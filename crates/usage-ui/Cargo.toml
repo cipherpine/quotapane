@@ -1,0 +1,14 @@
+[package]
+name = "usage-ui"
+description = "QuotaPane always-on-top desktop window (egui). Pure render — holds no credential logic."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false # distributed as a signed binary, not on crates.io
+
+[dependencies]
+usage-core = { path = "../usage-core" }
+# egui/eframe land in M2 (ARCHITECTURE.md §9). Deferring the UI dependency
+# tree keeps M0/M1 audits focused on the trust boundary.

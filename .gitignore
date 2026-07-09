@@ -1,0 +1,19 @@
+# Build
+/target/
+
+# Local editor/OS noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# NEVER commit credentials or anything resembling them (SECURITY.md).
+# Test fixtures must be synthetic and generated at test runtime, not stored.
+.credentials.json
+auth.json
+*.pem
+*.key
+.env
+.env.*
+
+# Local Claude staging folder (not part of the project)
+/_claude_setup/
