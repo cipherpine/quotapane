@@ -1,0 +1,53 @@
+//! Normalized, **non-secret** data types.
+//!
+//! Everything that crosses from the poller to the UI/CLI is one of these
+//! types. None of them can carry a credential: that is enforced by
+//! construction (no secret-typed fields), which is what makes the
+//! process → UI channel a non-boundary (THREAT_MODEL.md §4).
+
+/// Identifies a usage data source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProviderId {
+    /// Claude subscription quota (OAuth usage endpoint + header fallback).
+    ClaudeSubscription,
+    /// OpenAI Codex subscription quota. (M3 — endpoint verified then, not guessed.)
+    CodexSubscription,
+    /// Anthropic official Usage & Cost Admin API (opt-in, org accounts only). (M4)
+    AnthropicAdmin,
+    /// OpenAI official usage/costs API (opt-in, org key). (M4)
+    OpenAiUsage,
+}
+
+/// A quota window (e.g. Claude "5-hour" or "weekly"), normalized.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaWindow {
+    /// Human-readable window label, e.g. `"5h"` or `"week"`.
+    pub label: String,
+    /// Fraction of the window consumed, `0.0..=1.0`, when known.
+    pub used_fraction: Option<f64>,
+    /// Seconds until the window resets, when known.
+    pub resets_in_secs: Option<u64>,
+}
+
+/// A snapshot of one provider's state at one poll. Contains no secrets,
+/// by type: adding a secret-bearing field here is a breaking security change.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderSnapshot {
+    /// Which provider this snapshot describes.
+    pub provider: ProviderId,
+    /// Unix timestamp (seconds) when the poll completed.
+    pub taken_at_unix_secs: u64,
+    /// Quota windows reported by the provider.
+    pub windows: Vec<QuotaWindow>,
+    /// Whether the data came from the primary endpoint or a fallback.
+    pub source: SnapshotSource,
+}
+
+/// Where a snapshot's data came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotSource {
+    /// The provider's usage endpoint (may be undocumented — disclaimed at runtime).
+    UsageEndpoint,
+    /// Rate-limit headers from an official API response (fallback).
+    RateLimitHeaders,
+}

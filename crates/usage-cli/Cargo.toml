@@ -1,0 +1,12 @@
+[package]
+name = "usage-cli"
+description = "QuotaPane headless CLI: --once / --json output for scripting, tests, and egress verification."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false # distributed as a signed binary, not on crates.io
+
+[dependencies]
+usage-core = { path = "../usage-core" }

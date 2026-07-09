@@ -1,0 +1,14 @@
+[package]
+name = "usage-core"
+description = "QuotaPane trust boundary: credential ingress, egress chokepoint, provider polling. THE audit target."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# zeroize: wipes secret bytes from memory on drop (SECURITY.md invariant 2).
+# Deliberately WITHOUT the `derive` feature to avoid pulling syn/quote/proc-macro2
+# into the trust boundary's dependency tree.
+zeroize = { workspace = true }

@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/usage-core",
+    "crates/usage-ui",
+    "crates/usage-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cipherpine/quotapane"
+rust-version = "1.85"
+
+# Dependency policy: every entry here must be justified in CONTRIBUTING.md
+# and pass cargo-deny (deny.toml). Keep this list minimal — the small
+# dependency tree is a design priority (ARCHITECTURE.md §1).
+[workspace.dependencies]
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

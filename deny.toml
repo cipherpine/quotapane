@@ -1,0 +1,38 @@
+# cargo-deny policy — gated in CI on every PR (SECURITY.md, supply-chain policy).
+# The dependency tree is intentionally tiny; every crate is justified in
+# CONTRIBUTING.md. Loosening any section below is a security-relevant change.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Internal workspace path-dependencies are exempt from the wildcard ban;
+# registry dependencies must always pin a version.
+allow-wildcard-paths = true
+# Telemetry/analytics crates must never appear (SECURITY.md invariant 4).
+deny = [
+    { crate = "sentry" },
+    { crate = "posthog-rs" },
+    { crate = "segment" },
+    { crate = "rudderanalytics" },
+    { crate = "opentelemetry-otlp" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

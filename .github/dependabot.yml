@@ -1,0 +1,12 @@
+# Keeps the (deliberately tiny) dependency tree and CI actions current.
+# SECURITY.md, supply-chain policy.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
