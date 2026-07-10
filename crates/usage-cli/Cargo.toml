@@ -10,3 +10,4 @@ publish = false # distributed as a signed binary, not on crates.io
 
 [dependencies]
 usage-core = { path = "../usage-core" }
+serde_json = { workspace = true }
