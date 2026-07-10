@@ -64,7 +64,7 @@ quotapane/
 │  │  ├─ credentials/    # read-only credential loaders (Claude, Codex, WSL paths)
 │  │  ├─ egress/         # single hardened HTTP chokepoint + host allowlist
 │  │  ├─ providers/      # UsageProvider trait + one impl per source
-│  │  ├─ poller/         # async scheduler: adaptive intervals, backoff
+│  │  ├─ poller/         # thread-based scheduler: adaptive intervals, backoff
 │  │  └─ model/          # normalized types: QuotaWindow, UsageBucket, CostBucket, RateLimit
 │  ├─ usage-ui/          # egui app: pure render, holds no credential logic
 │  └─ usage-cli/         # headless --once / --json mode (scripting, tests, egress proof)
@@ -95,7 +95,7 @@ Any attempt to dial a host not on the list is a hard error. Proxy support is **o
 ```rust
 trait UsageProvider {
     fn id(&self) -> ProviderId;
-    async fn poll(&self, http: &Egress) -> Result<ProviderSnapshot>;
+    fn poll(&self, http: &Egress) -> Result<ProviderSnapshot>;
     fn cadence(&self) -> Cadence;      // adaptive interval hints
 }
 ```
@@ -107,7 +107,7 @@ Implementations:
 - `OpenAiUsage` *(opt-in)* — official OpenAI usage/costs API. Needs an org key.
 - `OtelSource` *(opt-in, advanced)* — reads from your **existing** local OTEL/Prometheus endpoint instead of calling providers directly (fits your current OTEL setup; keeps tokens out of this tool entirely for the billing view).
 
-**`poller`** — Async (`tokio`) scheduler. Per-provider, staggered. Adaptive intervals: fast (~5 min) during active use, normal (~7 min), slow (~20 min) when idle, snap to imminent quota resets, exponential backoff on `429`. Emits normalized snapshots over a channel to the UI. Tokens are loaded lazily, held only in memory, zeroized after use.
+**`poller`** — Thread-based scheduler (one lightweight thread per provider; amended from async/`tokio` in M1 — the `ureq`/`rustls` sync stack was chosen to keep the trust boundary's dependency tree minimal, and 2–4 providers don't need an async runtime). Per-provider, staggered. Adaptive intervals: fast (~5 min) during active use, normal (~7 min), slow (~20 min) when idle, snap to imminent quota resets, exponential backoff on `429`. Emits normalized snapshots over a channel to the UI. Tokens are loaded lazily, held only in memory, zeroized after use.
 
 ### Data flow
 

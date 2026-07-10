@@ -11,9 +11,16 @@ yanked = "deny"
 
 [licenses]
 version = 2
+# Every license here is permissive; additions must be reviewed.
+# ISC / BSD-3-Clause / CDLA-Permissive-2.0 entered with the M1 TLS stack
+# (ureq → rustls → ring/webpki; CDLA covers the Mozilla root-cert data in
+# webpki-roots). "Apache-2.0 AND ISC" (ring) is satisfied by the two entries.
 allow = [
     "MIT",
     "Apache-2.0",
+    "ISC",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
 
@@ -24,12 +31,25 @@ wildcards = "deny"
 # registry dependencies must always pin a version.
 allow-wildcard-paths = true
 # Telemetry/analytics crates must never appear (SECURITY.md invariant 4).
+# Logger BACKENDS are also banned: the `log` facade enters transitively via
+# ureq (which redacts sensitive headers behind an allowlist — verified at
+# v3.3.0, src/util.rs NON_SENSITIVE_HEADERS), but as defense in depth no
+# QuotaPane binary may ever install a log consumer. With no backend linked,
+# every log macro in every dependency is a no-op — nothing can reach disk
+# or console. Removing a ban here is a breaking security change.
 deny = [
     { crate = "sentry" },
     { crate = "posthog-rs" },
     { crate = "segment" },
     { crate = "rudderanalytics" },
     { crate = "opentelemetry-otlp" },
+    { crate = "env_logger" },
+    { crate = "simple_logger" },
+    { crate = "simplelog" },
+    { crate = "fern" },
+    { crate = "flexi_logger" },
+    { crate = "log4rs" },
+    { crate = "tracing-subscriber" },
 ]
 
 [sources]

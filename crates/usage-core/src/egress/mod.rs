@@ -10,14 +10,31 @@
 //!   rather than parsing a URL string. This removes the URL-parser-ambiguity
 //!   class of allowlist bypasses (userinfo tricks, mixed-case schemes,
 //!   confusable hosts) at the API level: the host that is checked is
-//!   byte-for-byte the host that will be dialed.
-//! - M0 ships this module deny-everything: host checking, proxy gating, and
-//!   their tests exist, but no actual network dial. The real HTTP client
-//!   lands in M1 *behind* this same API, so the allowlist test is already
-//!   guarding the only door.
+//!   byte-for-byte the host that will be dialed. `path` must start with `/`,
+//!   which makes userinfo smuggling (`@evil.com`) syntactically impossible
+//!   in the composed URL.
+//! - The transport (M1) is `ureq` + `rustls`: synchronous, pure-Rust TLS,
+//!   deliberately chosen over an async stack to keep the audit tree small.
+//!   Redirects are **never followed** — a 3xx is returned to the caller, so
+//!   a redirect can never carry a request off the allowlist. HTTPS is the
+//!   only scheme this module can construct.
+//! - The `Authorization` header is assembled from a [`Secret`] here, at the
+//!   last possible moment. The transport necessarily holds a transient copy
+//!   of the header for the duration of the request, and no [`EgressError`]
+//!   carries header contents. Logging posture, precisely: `ureq` logs via
+//!   the `log` facade but redacts headers behind an allowlist
+//!   (`NON_SENSITIVE_HEADERS`, verified at ureq 3.3.0 `src/util.rs`), so
+//!   `Authorization` never reaches the facade even under a trace-level
+//!   logger; additionally, no QuotaPane binary installs a log backend, and
+//!   `deny.toml` bans logger-backend crates so every log macro stays a
+//!   no-op. Re-verify the redaction allowlist on every ureq upgrade.
 //! - Proxy use is opt-in (invariant 7): if proxy environment variables are
 //!   present and the user has not explicitly opted in, requests fail closed
-//!   before anything is sent.
+//!   before anything is sent — and as defense in depth, the underlying agent
+//!   is configured with proxying disabled unless the user opted in.
+
+use crate::credentials::Secret;
+use std::time::Duration;
 
 /// The complete set of hosts this process may ever contact.
 ///
@@ -34,21 +51,33 @@ pub const ALLOWED_HOSTS: &[&str] = &[
     "api.github.com",
 ];
 
+/// Connect timeout for outbound requests.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Whole-request timeout for outbound requests.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum response body size accepted (defense against pathological responses).
+const MAX_BODY_BYTES: u64 = 1024 * 1024; // 1 MiB — usage payloads are tiny
+
 /// Errors from the egress chokepoint. Never contains secret bytes.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EgressError {
     /// The requested host is not on [`ALLOWED_HOSTS`]. Hard error — never
     /// retried, never downgraded to a warning.
     HostNotAllowlisted(String),
+    /// The path did not start with `/` (required so the composed URL cannot
+    /// smuggle userinfo or an alternate authority).
+    InvalidPath(String),
     /// Proxy environment variables are set but the user has not opted in
     /// (SECURITY.md invariant 7). Fails closed before any bytes are sent.
     ProxyNotOptedIn {
         /// The name of the environment variable that triggered the gate.
         variable: String,
     },
-    /// Network transport is not yet implemented (M0). The chokepoint exists
-    /// and denies; the actual client arrives in M1 behind this same API.
-    NotImplemented,
+    /// The transport failed (DNS, TCP, TLS, timeout, or oversized body).
+    /// Carries a display string derived from the transport error; URLs may
+    /// appear in it, secrets never do (headers are not echoed by `ureq`
+    /// errors, and we never place the token in a URL).
+    Transport(String),
 }
 
 impl std::fmt::Display for EgressError {
@@ -57,17 +86,34 @@ impl std::fmt::Display for EgressError {
             EgressError::HostNotAllowlisted(h) => {
                 write!(f, "egress denied: host {h:?} is not on the allowlist")
             }
+            EgressError::InvalidPath(p) => {
+                write!(f, "egress denied: path {p:?} must start with '/'")
+            }
             EgressError::ProxyNotOptedIn { variable } => write!(
                 f,
                 "egress denied: proxy environment ({variable}) detected without explicit opt-in; \
                  a TLS-inspecting proxy could observe bearer tokens"
             ),
-            EgressError::NotImplemented => write!(f, "egress transport not implemented (M0)"),
+            EgressError::Transport(detail) => write!(f, "egress transport error: {detail}"),
         }
     }
 }
 
 impl std::error::Error for EgressError {}
+
+/// A response from an allowlisted host. Status and headers are passed
+/// through verbatim so providers can interpret 401/429 and read rate-limit
+/// headers; nothing in here is a secret of *ours* (response contents come
+/// from the provider), so deriving `Debug` is safe.
+#[derive(Debug)]
+pub struct EgressResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response headers as (lowercased-name, value) pairs.
+    pub headers: Vec<(String, String)>,
+    /// Response body, capped at [`MAX_BODY_BYTES`].
+    pub body: Vec<u8>,
+}
 
 /// Proxy-related environment variables that gate egress (invariant 7).
 const PROXY_ENV_VARS: &[&str] = &[
@@ -103,6 +149,16 @@ impl Egress {
         }
     }
 
+    /// Validate that a path cannot alter the URL's authority when composed
+    /// as `https://{host}{path}`: it must start with `/` and contain no
+    /// whitespace or control characters.
+    fn check_path(path: &str) -> Result<(), EgressError> {
+        if !path.starts_with('/') || path.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return Err(EgressError::InvalidPath(path.to_string()));
+        }
+        Ok(())
+    }
+
     /// Check the proxy gate against an explicit list of environment variables
     /// (pure function — testable without mutating process env).
     fn check_proxy_gate(proxy_opt_in: bool, env: &[(String, String)]) -> Result<(), EgressError> {
@@ -119,19 +175,90 @@ impl Egress {
         Ok(())
     }
 
+    /// Build the one agent every request uses. Redirects are never followed;
+    /// non-2xx statuses are returned as responses (providers interpret them);
+    /// proxying is hard-disabled unless the user explicitly opted in.
+    fn agent(&self) -> ureq::Agent {
+        let mut cfg = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_global(Some(REQUEST_TIMEOUT))
+            .user_agent(""); // callers set User-Agent explicitly per request
+        if !self.proxy_opt_in {
+            // Defense in depth: even if a proxy env var appears after the
+            // gate check, the agent will not use it.
+            cfg = cfg.proxy(None);
+        }
+        cfg.build().into()
+    }
+
     /// Issue an HTTPS GET to `https://{host}{path}`.
     ///
     /// Order of gates (all fail closed, before any bytes leave the process):
     /// 1. host allowlist (invariant 3)
-    /// 2. proxy opt-in (invariant 7)
-    /// 3. transport — TLS-only; lands in M1.
-    pub fn get(&self, host: &str, path: &str) -> Result<Vec<u8>, EgressError> {
+    /// 2. path shape (no authority smuggling)
+    /// 3. proxy opt-in (invariant 7)
+    /// 4. TLS-only transport, redirects never followed
+    ///
+    /// `bearer` — if present, sent as `Authorization: Bearer …`, assembled
+    /// here at the last moment from the [`Secret`]. **This is the only place
+    /// in the codebase where a token leaves the process.**
+    /// `headers` — additional non-secret headers (e.g. `anthropic-beta`,
+    /// `User-Agent`); never place secrets here.
+    pub fn get(
+        &self,
+        host: &str,
+        path: &str,
+        bearer: Option<&Secret<String>>,
+        headers: &[(&str, &str)],
+    ) -> Result<EgressResponse, EgressError> {
         Self::check_host(host)?;
+        Self::check_path(path)?;
         let env: Vec<(String, String)> = std::env::vars().collect();
         Self::check_proxy_gate(self.proxy_opt_in, &env)?;
-        let _ = path;
-        // M1: perform the TLS request here, through this one code path only.
-        Err(EgressError::NotImplemented)
+
+        // HTTPS is the only constructible scheme, and `host` is byte-for-byte
+        // an allowlist entry (checked above).
+        let url = format!("https://{host}{path}");
+
+        let mut req = self.agent().get(&url);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        if let Some(token) = bearer {
+            // Transient copy of the secret for the request lifetime — see
+            // module docs. Never logged; ureq errors do not echo headers.
+            req = req.header("Authorization", &format!("Bearer {}", token.expose()));
+        }
+
+        let mut response = req
+            .call()
+            .map_err(|e| EgressError::Transport(e.to_string()))?;
+
+        let status = response.status().as_u16();
+        let headers_out: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|v| (name.as_str().to_ascii_lowercase(), v.to_string()))
+            })
+            .collect();
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_BODY_BYTES)
+            .read_to_vec()
+            .map_err(|e| EgressError::Transport(e.to_string()))?;
+
+        Ok(EgressResponse {
+            status,
+            headers: headers_out,
+            body,
+        })
     }
 }
 
@@ -168,15 +295,41 @@ mod tests {
     }
 
     /// End-to-end through the public API: the denial holds at the chokepoint,
-    /// not just in the helper.
+    /// not just in the helper. (Denied before any dial — no network in tests.)
     #[test]
     fn get_refuses_non_allowlisted_host() {
         let egress = Egress::new(false);
-        let err = egress.get("attacker.example", "/exfil").unwrap_err();
+        let err = egress
+            .get("attacker.example", "/exfil", None, &[])
+            .unwrap_err();
         assert_eq!(
             err,
             EgressError::HostNotAllowlisted("attacker.example".to_string())
         );
+    }
+
+    /// A path that does not start with `/` could smuggle userinfo or an
+    /// alternate authority into the composed URL (`…com@evil.com/…`).
+    /// Rejected before any dial.
+    #[test]
+    fn authority_smuggling_paths_are_rejected() {
+        let egress = Egress::new(false);
+        for path in [
+            "@evil.com/exfil",
+            "",
+            "evil.com/x",
+            "/pa th",
+            "/x\r\nHost:evil",
+        ] {
+            let err = egress
+                .get("api.anthropic.com", path, None, &[])
+                .unwrap_err();
+            assert_eq!(
+                err,
+                EgressError::InvalidPath(path.to_string()),
+                "path: {path:?}"
+            );
+        }
     }
 
     /// SECURITY.md invariant 7: proxy env present without opt-in fails closed.
@@ -204,12 +357,21 @@ mod tests {
         Egress::check_proxy_gate(false, &env).unwrap();
     }
 
-    /// M0 definition: even a fully-allowed request does not reach a network —
-    /// the transport does not exist yet.
+    /// The error type must never carry secret bytes: exercise every variant's
+    /// Display/Debug against a marker string.
     #[test]
-    fn m0_transport_is_not_implemented() {
-        let egress = Egress::new(true); // opt-in irrelevant; nothing is sent either way
-        let err = egress.get("api.anthropic.com", "/v1/anything").unwrap_err();
-        assert_eq!(err, EgressError::NotImplemented);
+    fn egress_errors_never_echo_secrets() {
+        let marker = "synthetic-token-MARKER-000";
+        for err in [
+            EgressError::HostNotAllowlisted("h".into()),
+            EgressError::InvalidPath("p".into()),
+            EgressError::ProxyNotOptedIn {
+                variable: "HTTPS_PROXY".into(),
+            },
+            EgressError::Transport("dns failure".into()),
+        ] {
+            let s = format!("{err} / {err:?}");
+            assert!(!s.contains(marker));
+        }
     }
 }

@@ -39,13 +39,13 @@ impl From<EgressError> for ProviderError {
 /// A single usage data source (subscription quota or official billing).
 ///
 /// Implementations receive the shared [`Egress`] chokepoint — they cannot
-/// construct their own network path. Signature matches ARCHITECTURE.md §4.
-#[allow(async_fn_in_trait)] // single-process consumer; Send bounds revisited in M1 with the runtime
+/// construct their own network path. Signature matches ARCHITECTURE.md §4
+/// (synchronous since the M1 `ureq`/thread-based stack decision).
 pub trait UsageProvider {
     /// Stable identifier for this provider.
     fn id(&self) -> ProviderId;
     /// Fetch a fresh snapshot through the egress chokepoint.
-    async fn poll(&self, http: &Egress) -> Result<ProviderSnapshot, ProviderError>;
+    fn poll(&self, http: &Egress) -> Result<ProviderSnapshot, ProviderError>;
     /// Current cadence hint for the poller.
     fn cadence(&self) -> Cadence;
 }
