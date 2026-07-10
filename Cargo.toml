@@ -22,6 +22,12 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # Chosen over reqwest/tokio for a much smaller audit tree (sync, rustls, no
 # async runtime). Introducing any other HTTP client is a breaking security change.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# serde/serde_json: parse credential + usage JSON. serde's `derive` is used for
+# plain (non-secret) DTOs only; `Secret<T>` deliberately never derives Serialize
+# or Deserialize (SECURITY.md invariant 1). Tokens are moved into `Secret`
+# immediately after deserialization.
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
 
 [profile.release]
 strip = true

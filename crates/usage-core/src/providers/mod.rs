@@ -1,9 +1,12 @@
 //! The [`UsageProvider`] trait. One implementation per data source.
 //!
-//! No implementations exist in M0 — per the security-first build order,
-//! no provider or network-calling code is written until the egress
-//! chokepoint, `Secret<T>`, their tests, and CI all exist and pass.
-//! `ClaudeSubscription` arrives in M1.
+//! The trust boundary (egress chokepoint, `Secret<T>`, their tests, CI) shipped
+//! and passed before any provider code was written (security-first build order).
+//! [`ClaudeSubscription`] (M1) is the first implementation.
+
+mod claude_subscription;
+
+pub use claude_subscription::ClaudeSubscription;
 
 use crate::egress::{Egress, EgressError};
 use crate::model::{ProviderId, ProviderSnapshot};
@@ -24,6 +27,20 @@ pub enum Cadence {
 pub enum ProviderError {
     /// The egress chokepoint refused or failed the request.
     Egress(EgressError),
+    /// A credential could not be loaded or parsed. The string is a
+    /// non-secret description (I/O error kind or "malformed …") — token
+    /// bytes never appear here.
+    Credential(String),
+    /// The OAuth token is expired (detected locally via `expiresAt`, or a
+    /// 401/403 from the provider). The user should refresh it by running the
+    /// official `claude` CLI; QuotaPane never writes the credential file.
+    TokenExpired,
+    /// The provider rate-limited us (HTTP 429). Carries a `retry-after` hint
+    /// when the response provided one.
+    RateLimited {
+        /// Seconds to wait before retrying, if the response said so.
+        retry_after_secs: Option<u64>,
+    },
     /// The provider responded but the payload could not be interpreted
     /// (undocumented endpoints may change shape at any time — fail closed,
     /// show stale/error, never leak; THREAT_MODEL.md R4).
@@ -35,6 +52,34 @@ impl From<EgressError> for ProviderError {
         ProviderError::Egress(e)
     }
 }
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProviderError::Egress(e) => write!(f, "egress error: {e}"),
+            ProviderError::Credential(msg) => write!(f, "credential error: {msg}"),
+            ProviderError::TokenExpired => write!(
+                f,
+                "OAuth token expired — run `claude` to refresh it, then retry"
+            ),
+            ProviderError::RateLimited {
+                retry_after_secs: Some(s),
+            } => {
+                write!(f, "rate limited by provider; retry after {s}s")
+            }
+            ProviderError::RateLimited {
+                retry_after_secs: None,
+            } => {
+                write!(f, "rate limited by provider")
+            }
+            ProviderError::UnexpectedPayload => {
+                write!(f, "provider response could not be interpreted")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProviderError {}
 
 /// A single usage data source (subscription quota or official billing).
 ///

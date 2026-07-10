@@ -4,9 +4,18 @@
 //! types. None of them can carry a credential: that is enforced by
 //! construction (no secret-typed fields), which is what makes the
 //! process → UI channel a non-boundary (THREAT_MODEL.md §4).
+//!
+//! These types derive `Serialize` (for `usage-cli --json`). That is safe
+//! **because** they hold no secrets — the exact inverse of `Secret<T>`,
+//! which forbids `Serialize` for the same reason. Adding a secret-bearing
+//! field to any type here would be a breaking security change and must be
+//! rejected in review.
+
+use serde::Serialize;
 
 /// Identifies a usage data source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProviderId {
     /// Claude subscription quota (OAuth usage endpoint + header fallback).
     ClaudeSubscription,
@@ -19,7 +28,7 @@ pub enum ProviderId {
 }
 
 /// A quota window (e.g. Claude "5-hour" or "weekly"), normalized.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct QuotaWindow {
     /// Human-readable window label, e.g. `"5h"` or `"week"`.
     pub label: String,
@@ -31,7 +40,7 @@ pub struct QuotaWindow {
 
 /// A snapshot of one provider's state at one poll. Contains no secrets,
 /// by type: adding a secret-bearing field here is a breaking security change.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProviderSnapshot {
     /// Which provider this snapshot describes.
     pub provider: ProviderId,
@@ -44,7 +53,8 @@ pub struct ProviderSnapshot {
 }
 
 /// Where a snapshot's data came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SnapshotSource {
     /// The provider's usage endpoint (may be undocumented — disclaimed at runtime).
     UsageEndpoint,
