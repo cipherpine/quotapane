@@ -18,6 +18,10 @@ rust-version = "1.85"
 # dependency tree is a design priority (ARCHITECTURE.md §1).
 [workspace.dependencies]
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
+# ureq: the ONE HTTP client in the workspace, used only inside usage-core::egress.
+# Chosen over reqwest/tokio for a much smaller audit tree (sync, rustls, no
+# async runtime). Introducing any other HTTP client is a breaking security change.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [profile.release]
 strip = true

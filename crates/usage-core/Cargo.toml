@@ -12,3 +12,6 @@ rust-version.workspace = true
 # Deliberately WITHOUT the `derive` feature to avoid pulling syn/quote/proc-macro2
 # into the trust boundary's dependency tree.
 zeroize = { workspace = true }
+# ureq: TLS transport behind the egress chokepoint (see workspace Cargo.toml
+# and CONTRIBUTING.md for the full justification). rustls-only, no native TLS.
+ureq = { workspace = true }
