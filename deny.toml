@@ -21,6 +21,9 @@ allow = [
     "ISC",
     "BSD-3-Clause",
     "CDLA-Permissive-2.0",
+    # Unicode-3.0: `unicode-ident`, pulled by serde_derive's proc-macro tree
+    # (syn). Permissive; the standard license for Unicode data tables.
+    "Unicode-3.0",
 ]
 confidence-threshold = 0.93
 

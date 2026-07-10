@@ -79,6 +79,10 @@ Each invariant below is enforced in code and backed by a test. A change that wea
 - Optional official-billing mode uses an Admin/org API key (`sk-ant-admin-…` / OpenAI org key) supplied by the user via environment variable or the OS keychain — **never** stored by the app in its config.
 - The app treats these tokens as bearer credentials that can act as you against the provider. Anything reading them is inside your trust boundary; the project's job is to keep that boundary small and honest.
 
+### Presenting as the official client (subscription mode)
+
+The Claude subscription usage endpoint (`GET /api/oauth/usage`) rate-limits requests that lack a `User-Agent: claude-code/<version>` header, so QuotaPane sends that header. This means its subscription requests **present as the official Claude Code client**. This is a deliberate, disclosed choice: QuotaPane calls only the endpoint that client already calls, with your own OAuth token, read-only, and to a single allowlisted host. It is not an authentication bypass and nothing is scraped, but you should understand that the request is indistinguishable at the wire from the official client's own usage check. The endpoint is undocumented and may change or be withdrawn without notice; QuotaPane fails closed (shows stale/error, never leaks) when it does.
+
 ---
 
 ## Network / egress policy

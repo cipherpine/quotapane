@@ -15,3 +15,6 @@ zeroize = { workspace = true }
 # ureq: TLS transport behind the egress chokepoint (see workspace Cargo.toml
 # and CONTRIBUTING.md for the full justification). rustls-only, no native TLS.
 ureq = { workspace = true }
+# serde/serde_json: credential + usage-response parsing (non-secret DTOs only).
+serde = { workspace = true }
+serde_json = { workspace = true }
