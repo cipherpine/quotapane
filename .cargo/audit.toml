@@ -1,0 +1,12 @@
+# cargo-audit configuration. Keep in sync with the [advisories] ignore list
+# in deny.toml — same IDs, same justification, re-reviewed whenever the
+# dependency path changes.
+#
+# RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml): DoS-class issues when
+# parsing UNTRUSTED XML. quick-xml exists in this workspace only inside
+# `wayland-scanner`, a build-time proc-macro parsing the vendored Wayland
+# protocol XML shipped in the crates — trusted input, never runtime data,
+# absent from the Windows (primary) target. No patched compatible version
+# yet; remove when wayland-scanner updates.
+[advisories]
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]

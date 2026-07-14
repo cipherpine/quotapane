@@ -8,6 +8,19 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# Ignored advisories require a written justification and re-review whenever
+# the dependency path changes.
+ignore = [
+    # Both quick-xml advisories are DoS-class (quadratic CPU / unbounded
+    # allocation when parsing UNTRUSTED XML). In this workspace quick-xml
+    # exists only inside `wayland-scanner`, a BUILD-TIME proc-macro that
+    # parses the vendored Wayland protocol XML shipped inside the crates —
+    # trusted input, never runtime data, and absent entirely from the
+    # Windows (primary) target. No patched compatible version exists yet;
+    # remove these when wayland-scanner updates.
+    { id = "RUSTSEC-2026-0194", reason = "build-time only (wayland-scanner), trusted vendored XML, DoS-class" },
+    { id = "RUSTSEC-2026-0195", reason = "build-time only (wayland-scanner), trusted vendored XML, DoS-class" },
+]
 
 [licenses]
 version = 2
@@ -24,6 +37,16 @@ allow = [
     # Unicode-3.0: `unicode-ident`, pulled by serde_derive's proc-macro tree
     # (syn). Permissive; the standard license for Unicode data tables.
     "Unicode-3.0",
+    # The four below entered with the M2 egui/eframe UI tree (usage-ui only —
+    # the trust boundary crate does not depend on any of this):
+    # Zlib: small utility crates in the winit/graphics stack. Permissive.
+    "Zlib",
+    # BSL-1.0 (Boost): permissive, not to be confused with BUSL.
+    "BSL-1.0",
+    # OFL-1.1 + Ubuntu-font-1.0: the fonts embedded by epaint_default_fonts.
+    # Standard font licenses; permissive for embedding/distribution.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
 ]
 confidence-threshold = 0.93
 

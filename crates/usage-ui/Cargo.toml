@@ -9,6 +9,9 @@ rust-version.workspace = true
 publish = false # distributed as a signed binary, not on crates.io
 
 [dependencies]
+# eframe (M2): the window. Trimmed features — glow renderer only (no wgpu),
+# default fonts, X11+Wayland on Linux. This tree is large but lives entirely
+# OUTSIDE the trust boundary: usage-ui receives only non-secret snapshots.
+# See CONTRIBUTING.md for the justification row.
+eframe = { version = "0.35.0", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
 usage-core = { path = "../usage-core" }
-# egui/eframe land in M2 (ARCHITECTURE.md §9). Deferring the UI dependency
-# tree keeps M0/M1 audits focused on the trust boundary.
