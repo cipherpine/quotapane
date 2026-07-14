@@ -11,7 +11,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cipherpine/quotapane"
-rust-version = "1.85"
+rust-version = "1.92" # floor set by eframe 0.35 (M2); CI builds on stable
 
 # Dependency policy: every entry here must be justified in CONTRIBUTING.md
 # and pass cargo-deny (deny.toml). Keep this list minimal — the small
