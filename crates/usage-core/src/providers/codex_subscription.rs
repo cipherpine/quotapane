@@ -16,14 +16,15 @@
 //! rather than inventing a format. Presenting as the official client is a
 //! deliberate, disclosed choice (README.md, SECURITY.md).
 //!
-//! ## Honest posture on schema
-//! The endpoint is undocumented. Every response field is optional and two
-//! plausible top-level shapes (flat, and wrapped in `rate_limits`) are both
-//! accepted; `resets_at` is accepted as an RFC 3339 string, an absolute
-//! epoch, or a relative seconds count. Anything unrecognized degrades the
-//! snapshot instead of crashing or leaking (THREAT_MODEL.md R4). The first
-//! live run pins the real shape; if windows come back empty there, the
-//! wrapper differs and gets a targeted fix — never a guess.
+//! ## Schema (pinned by a live run)
+//! The endpoint is undocumented. The M3 live run pinned the real shape:
+//! camelCase, windows wrapped under `rateLimits`, with `usedPercent` /
+//! `windowDurationMins` / `resetsAt` (an absolute epoch number). The DTOs
+//! below match that exactly; a flat root-level `primary`/`secondary` is also
+//! accepted as cheap resilience, and `resetsAt` still parses as an RFC 3339
+//! string or a relative count in case a future reshape uses one. Anything
+//! unrecognized degrades the snapshot instead of crashing or leaking
+//! (THREAT_MODEL.md R4).
 //!
 //! ## Credentials (`~/.codex/auth.json`, or `$CODEX_HOME/auth.json`)
 //! Verified shape: `{ "OPENAI_API_KEY": …, "tokens": { "id_token",
@@ -174,33 +175,40 @@ enum RawResetsAt {
     Text(String),
 }
 
-/// One rate-limit window. Field names verified against the Codex CLI source
-/// (`RateLimitWindow`: `used_percent`, `window_minutes`, `resets_at`).
-/// Everything optional: degrade, don't crash.
+/// One rate-limit window. Field names pinned against a real wire capture and
+/// the Codex issue tracker: the endpoint serializes **camelCase**
+/// (`usedPercent`, `windowDurationMins`, `resetsAt`); `resetsAt` is an
+/// absolute epoch-seconds number. `#[serde(rename_all = "camelCase")]` maps
+/// these snake_case Rust fields onto the wire names. Everything optional:
+/// degrade, don't crash.
 #[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct RawWindow {
     used_percent: Option<f64>,
-    window_minutes: Option<u64>,
+    window_duration_mins: Option<u64>,
     resets_at: Option<RawResetsAt>,
 }
 
-/// Windows pair as the CLI models it.
+/// Windows pair as the endpoint models it (`primary` / `secondary`).
 #[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct RawWindows {
     primary: Option<RawWindow>,
     secondary: Option<RawWindow>,
 }
 
-/// Top-level response. Both plausible shapes are accepted: windows at the
-/// root, or nested under `rate_limits`.
+/// Top-level response. The verified shape wraps the windows under
+/// `rateLimits`; a flat root-level `primary`/`secondary` is also accepted as
+/// cheap resilience against a future reshape.
 #[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct RawUsage {
     rate_limits: Option<RawWindows>,
     primary: Option<RawWindow>,
     secondary: Option<RawWindow>,
 }
 
-/// Human label for a window from its length in minutes: `300 → "5h"`,
+/// Human label for a window from its duration in minutes: `300 → "5h"`,
 /// `10080 → "7d"`, `90 → "90m"`; `None → fallback`.
 fn minutes_label(minutes: Option<u64>, fallback: &str) -> String {
     match minutes {
@@ -237,7 +245,7 @@ fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
     for (win, fallback) in [(primary, "primary"), (secondary, "secondary")] {
         if let Some(w) = win {
             windows.push(QuotaWindow {
-                label: minutes_label(w.window_minutes, fallback),
+                label: minutes_label(w.window_duration_mins, fallback),
                 used_fraction: w.used_percent.map(|u| (u / 100.0).clamp(0.0, 1.0)),
                 resets_in_secs: resets_in_secs(w.resets_at.as_ref(), now_unix_secs),
             });
@@ -301,27 +309,39 @@ mod tests {
     }
 
     #[test]
-    fn builds_snapshot_from_wrapped_shape() {
-        let json = r#"{"rate_limits":{
-            "primary":   {"used_percent": 33.0, "window_minutes": 300,   "resets_at": "2026-07-15T01:00:00Z"},
-            "secondary": {"used_percent": 80.0, "window_minutes": 10080, "resets_at": "2026-07-16T00:00:00Z"}
-        }}"#;
-        let usage: RawUsage = serde_json::from_str(json).unwrap();
-        let now = parse_rfc3339_to_unix("2026-07-15T00:00:00Z").unwrap() as u64;
+    fn builds_snapshot_from_verified_wire_shape() {
+        // Byte-for-byte the real endpoint shape: camelCase, `rateLimits`
+        // wrapper, `resetsAt` as an absolute epoch number (from the Codex
+        // issue tracker capture). This is the regression test for the M3
+        // live-run mismatch — the first build used snake_case and rendered
+        // no bars.
+        let now: u64 = 1_779_000_000;
+        let json = format!(
+            r#"{{"rateLimits":{{
+                "limitId":"codex",
+                "primary":   {{"usedPercent": 25, "windowDurationMins": 300,   "resetsAt": {}}},
+                "secondary": {{"usedPercent": 18, "windowDurationMins": 10080, "resetsAt": {}}},
+                "planType":"prolite","rateLimitReachedType":null
+            }}}}"#,
+            now + 3600,
+            now + 86_400
+        );
+        let usage: RawUsage = serde_json::from_str(&json).unwrap();
         let snap = build_snapshot(usage, now);
 
         assert_eq!(snap.provider, ProviderId::CodexSubscription);
         assert_eq!(snap.windows.len(), 2);
         assert_eq!(snap.windows[0].label, "5h");
-        assert_eq!(snap.windows[0].used_fraction, Some(0.33));
+        assert_eq!(snap.windows[0].used_fraction, Some(0.25));
         assert_eq!(snap.windows[0].resets_in_secs, Some(3600));
         assert_eq!(snap.windows[1].label, "7d");
+        assert_eq!(snap.windows[1].used_fraction, Some(0.18));
         assert_eq!(snap.windows[1].resets_in_secs, Some(86_400));
     }
 
     #[test]
     fn builds_snapshot_from_flat_shape() {
-        let json = r#"{"primary": {"used_percent": 50.0, "window_minutes": 300}}"#;
+        let json = r#"{"primary": {"usedPercent": 50.0, "windowDurationMins": 300}}"#;
         let usage: RawUsage = serde_json::from_str(json).unwrap();
         let snap = build_snapshot(usage, 0);
         assert_eq!(snap.windows.len(), 1);
@@ -337,8 +357,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_window_minutes_uses_fallback_label() {
-        let json = r#"{"primary": {"used_percent": 10.0}}"#;
+    fn missing_window_duration_uses_fallback_label() {
+        let json = r#"{"primary": {"usedPercent": 10.0}}"#;
         let usage: RawUsage = serde_json::from_str(json).unwrap();
         let snap = build_snapshot(usage, 0);
         assert_eq!(snap.windows[0].label, "primary");
@@ -346,7 +366,7 @@ mod tests {
 
     #[test]
     fn used_percent_is_clamped() {
-        let json = r#"{"primary": {"used_percent": 250.0}}"#;
+        let json = r#"{"primary": {"usedPercent": 250.0}}"#;
         let usage: RawUsage = serde_json::from_str(json).unwrap();
         let snap = build_snapshot(usage, 0);
         assert_eq!(snap.windows[0].used_fraction, Some(1.0));
