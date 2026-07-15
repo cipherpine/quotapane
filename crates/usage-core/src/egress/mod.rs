@@ -40,12 +40,16 @@ use std::time::Duration;
 ///
 /// Compile-time, deny-by-default. Adding a host is a breaking security
 /// change: it must be justified against THREAT_MODEL.md §6 and called out
-/// in review (and the Codex usage host, deferred to M3, must be verified
-/// against provider behavior — never guessed).
+/// in review, and any provider host must be verified against real provider
+/// behavior — never guessed.
 pub const ALLOWED_HOSTS: &[&str] = &[
     // Anthropic: subscription usage + Messages-API header fallback; official Admin API (M4).
     "api.anthropic.com",
-    // OpenAI: official usage/costs API (M4). The Codex usage host is added in M3 after verification.
+    // Codex (ChatGPT-plan) subscription usage: GET /backend-api/wham/usage.
+    // Verified M3 against openai/codex source (codex-rs/backend-client) —
+    // ChatGPT-plan usage is served by chatgpt.com, NOT api.openai.com.
+    "chatgpt.com",
+    // OpenAI: official usage/costs API — opt-in billing mode only (M4).
     "api.openai.com",
     // GitHub: release update *check* only, and only when the user enables it (invariant 5).
     "api.github.com",
@@ -276,6 +280,10 @@ mod tests {
             "api.anthropic.com.evil.com", // allowed host as a prefix label
             "api.anthropic.com:8443",     // port smuggling
             "anthropic.com",
+            "evil.chatgpt.com",     // subdomain of the M3 Codex host
+            "chatgpt.com.evil.com", // M3 host as a prefix label
+            "chatgpt.com:8443",     // port smuggling on the M3 host
+            "openai.com",           // bare apex is NOT allowlisted
             "localhost",
             "127.0.0.1",
             "",

@@ -83,13 +83,16 @@ Each invariant below is enforced in code and backed by a test. A change that wea
 
 The Claude subscription usage endpoint (`GET /api/oauth/usage`) rate-limits requests that lack a `User-Agent: claude-code/<version>` header, so QuotaPane sends that header. This means its subscription requests **present as the official Claude Code client**. This is a deliberate, disclosed choice: QuotaPane calls only the endpoint that client already calls, with your own OAuth token, read-only, and to a single allowlisted host. It is not an authentication bypass and nothing is scraped, but you should understand that the request is indistinguishable at the wire from the official client's own usage check. The endpoint is undocumented and may change or be withdrawn without notice; QuotaPane fails closed (shows stale/error, never leaks) when it does.
 
+The same applies to the Codex provider: its requests to `chatgpt.com` send the Codex CLI's default `User-Agent` (`codex-cli`) and the `ChatGPT-Account-Id` header, so they present as the official Codex client. Same posture, same disclosure, same fail-closed behavior; token refresh is delegated to `codex login` and the app never writes `auth.json`.
+
 ---
 
 ## Network / egress policy
 
 - Single HTTP chokepoint, deny-by-default allowlist:
   - `api.anthropic.com` — subscription usage + fallback; official Admin API.
-  - OpenAI usage host(s) — `api.openai.com` and the Codex usage host.
+  - `chatgpt.com` — Codex (ChatGPT-plan) subscription usage (verified against the open-source Codex CLI).
+  - `api.openai.com` — official OpenAI usage/costs API (opt-in billing mode only).
   - `api.github.com` — update **check only**, and only if the user enables it.
 - TLS required; optional certificate pinning for provider hosts.
 - Proxy off by default (see invariant 7).

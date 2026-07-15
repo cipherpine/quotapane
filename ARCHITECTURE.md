@@ -86,7 +86,8 @@ quotapane/
 
 **`egress`** — One HTTP client, one chokepoint, deny-by-default. A compile-time host **allowlist** is the only way a request leaves the process:
 - `api.anthropic.com` (subscription usage + fallback; official Admin API)
-- OpenAI usage host(s) (`api.openai.com`, and the Codex usage host)
+- `chatgpt.com` — Codex (ChatGPT-plan) subscription usage (`/backend-api/wham/usage`; verified in M3 against the open-source Codex CLI — the subscription endpoint is **not** on `api.openai.com`)
+- `api.openai.com` — official OpenAI usage/costs API (opt-in billing mode, M4)
 - `api.github.com` — **update check only**, and only when the user enables it
 Any attempt to dial a host not on the list is a hard error. Proxy support is **off by default**; if `HTTPS_PROXY`/`ALL_PROXY` is set, the app surfaces a visible warning that a TLS-inspecting proxy (e.g. a corporate Zscaler-style gateway) can observe the bearer token at its decryption point, and requires explicit opt-in to proceed. Optional certificate pinning for provider hosts.
 
