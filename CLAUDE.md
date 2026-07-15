@@ -4,6 +4,8 @@ Always-on-top desktop window showing live AI usage/quota across Anthropic + Open
 
 Before non-trivial work, read `ARCHITECTURE.md` (design, crate layout, roadmap), `SECURITY.md` (invariants, disclosure policy), and `THREAT_MODEL.md`.
 
+Also read `DECISIONS.md` — the standing decision record and autonomy charter: pre-approved defaults agent sessions may act on without asking, and the hard stop conditions they must never work around. Milestone-scale goal prompts live in `prompts/`.
+
 ## Security-critical paths — top-tier models only
 
 Changes to any of the following must be **authored or reviewed at the top model tier** (Fable/Opus-class). No exceptions, including "trivial" edits:

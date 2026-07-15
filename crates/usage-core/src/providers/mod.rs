@@ -2,11 +2,15 @@
 //!
 //! The trust boundary (egress chokepoint, `Secret<T>`, their tests, CI) shipped
 //! and passed before any provider code was written (security-first build order).
-//! [`ClaudeSubscription`] (M1) is the first implementation.
+//! [`ClaudeSubscription`] (M1) and [`CodexSubscription`] (M3) are the
+//! subscription-mode implementations; official billing providers arrive in M4.
 
 mod claude_subscription;
+mod codex_subscription;
+pub(crate) mod time;
 
 pub use claude_subscription::ClaudeSubscription;
+pub use codex_subscription::{CodexSubscription, DEFAULT_USER_AGENT as CODEX_DEFAULT_USER_AGENT};
 
 use crate::egress::{Egress, EgressError};
 use crate::model::{ProviderId, ProviderSnapshot};
@@ -60,7 +64,8 @@ impl std::fmt::Display for ProviderError {
             ProviderError::Credential(msg) => write!(f, "credential error: {msg}"),
             ProviderError::TokenExpired => write!(
                 f,
-                "OAuth token expired — run `claude` to refresh it, then retry"
+                "OAuth token expired — refresh via the provider's official CLI \
+                 (`claude` or `codex login`), then retry"
             ),
             ProviderError::RateLimited {
                 retry_after_secs: Some(s),
