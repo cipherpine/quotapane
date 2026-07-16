@@ -16,13 +16,16 @@
 //! rather than inventing a format. Presenting as the official client is a
 //! deliberate, disclosed choice (README.md, SECURITY.md).
 //!
-//! ## Schema (pinned by a live run)
-//! The endpoint is undocumented. The M3 live run pinned the real shape:
-//! camelCase, windows wrapped under `rateLimits`, with `usedPercent` /
-//! `windowDurationMins` / `resetsAt` (an absolute epoch number). The DTOs
-//! below match that exactly; a flat root-level `primary`/`secondary` is also
-//! accepted as cheap resilience, and `resetsAt` still parses as an RFC 3339
-//! string or a relative count in case a future reshape uses one. Anything
+//! ## Schema (pinned by a live capture, 2026-07-15)
+//! The endpoint is undocumented. A `usage-cli --debug-raw` capture pinned the
+//! real shape: a top-level singular `rate_limit` object with
+//! `primary_window`/`secondary_window`, each carrying `used_percent`,
+//! `limit_window_seconds` (window DURATION in seconds), `reset_after_seconds`
+//! (relative seconds until reset), and `reset_at` (absolute epoch fallback).
+//! The DTOs below read only those fields. The response also contains account
+//! PII (`user_id`, `account_id`, `email`) and a per-model
+//! `additional_rate_limits` array — both are ignored by serde and never enter
+//! a snapshot (the per-model breakdown is deferred to M5 depth). Anything
 //! unrecognized degrades the snapshot instead of crashing or leaking
 //! (THREAT_MODEL.md R4).
 //!
@@ -39,7 +42,6 @@
 use crate::credentials::{load_credential_file, Secret};
 use crate::egress::Egress;
 use crate::model::{ProviderId, ProviderSnapshot, QuotaWindow, SnapshotSource};
-use crate::providers::time::parse_rfc3339_to_unix;
 use crate::providers::{Cadence, ProviderError, UsageProvider};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -54,11 +56,6 @@ const PATH: &str = "/backend-api/wham/usage";
 /// Passed to [`CodexSubscription::with_default_path`] by callers unless they
 /// have a more specific verified value.
 pub const DEFAULT_USER_AGENT: &str = "codex-cli";
-
-/// Threshold distinguishing an absolute epoch from a relative seconds count
-/// when `resets_at` arrives as a bare number (~2001-09-09 in epoch terms; no
-/// quota window is years long, and no epoch is this small).
-const EPOCH_VS_RELATIVE_THRESHOLD: i64 = 1_000_000_000;
 
 /// Provider for Codex (ChatGPT-plan) subscription quota.
 pub struct CodexSubscription {
@@ -89,20 +86,21 @@ impl CodexSubscription {
     }
 }
 
-impl UsageProvider for CodexSubscription {
-    fn id(&self) -> ProviderId {
-        ProviderId::CodexSubscription
-    }
-
-    fn poll(&self, http: &Egress) -> Result<ProviderSnapshot, ProviderError> {
+impl CodexSubscription {
+    /// The one request this provider makes. Both [`Self::poll`] and
+    /// [`Self::debug_raw_body`] go through here, so the debug dump is
+    /// *guaranteed* to reflect the exact request normal polling sends
+    /// (Ingress TB1 → Egress TB2). The token leaves the process only at the
+    /// `http.get` call, wrapped in `Secret` until that moment.
+    fn fetch(&self, http: &Egress) -> Result<crate::egress::EgressResponse, ProviderError> {
         // Ingress (TB1): load read-only, wrapped in Secret.
         let raw = load_credential_file(&self.credentials_path)
             .map_err(|e| ProviderError::Credential(e.to_string()))?;
         let creds = parse_auth(raw.expose())
             .ok_or_else(|| ProviderError::Credential("malformed auth.json".into()))?;
 
-        // Egress (TB2): the token leaves the process only here. The
-        // ChatGPT-Account-Id header is sent when present, matching the CLI.
+        // Egress (TB2): the ChatGPT-Account-Id header is sent when present,
+        // matching the CLI.
         let mut headers: Vec<(&str, &str)> = vec![
             ("Content-Type", "application/json"),
             ("User-Agent", &self.user_agent),
@@ -110,7 +108,32 @@ impl UsageProvider for CodexSubscription {
         if let Some(account_id) = creds.account_id.as_deref() {
             headers.push(("ChatGPT-Account-Id", account_id));
         }
-        let resp = http.get(HOST, PATH, Some(&creds.access_token), &headers)?;
+        Ok(http.get(HOST, PATH, Some(&creds.access_token), &headers)?)
+    }
+
+    /// Debug/diagnostic: perform the usage request and return the **raw**
+    /// response as `"status: <code>\n<body>"`. Used by `usage-cli
+    /// --debug-raw` to pin the endpoint's exact JSON shape without an ad-hoc
+    /// token request outside the trust boundary. The body is provider usage
+    /// data (percentages, timestamps) — non-secret; the bearer token and
+    /// account id ride in request headers and never appear in the body.
+    pub fn debug_raw_body(&self, http: &Egress) -> Result<String, ProviderError> {
+        let resp = self.fetch(http)?;
+        Ok(format!(
+            "status: {}\n{}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        ))
+    }
+}
+
+impl UsageProvider for CodexSubscription {
+    fn id(&self) -> ProviderId {
+        ProviderId::CodexSubscription
+    }
+
+    fn poll(&self, http: &Egress) -> Result<ProviderSnapshot, ProviderError> {
+        let resp = self.fetch(http)?;
 
         match resp.status {
             200 => {
@@ -166,88 +189,70 @@ fn parse_auth(raw_json: &str) -> Option<ParsedAuth> {
     })
 }
 
-/// `resets_at` as observed/plausible on the wire: an RFC 3339 string, an
-/// absolute epoch-seconds number, or a relative seconds-until-reset number.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawResetsAt {
-    Number(i64),
-    Text(String),
-}
-
-/// One rate-limit window. Field names pinned against a real wire capture and
-/// the Codex issue tracker: the endpoint serializes **camelCase**
-/// (`usedPercent`, `windowDurationMins`, `resetsAt`); `resetsAt` is an
-/// absolute epoch-seconds number. `#[serde(rename_all = "camelCase")]` maps
-/// these snake_case Rust fields onto the wire names. Everything optional:
-/// degrade, don't crash.
+/// One rate-limit window. Fields pinned against a live capture:
+/// `used_percent`, `limit_window_seconds` (window DURATION, seconds),
+/// `reset_after_seconds` (relative seconds until reset), `reset_at`
+/// (absolute epoch fallback). Everything optional: degrade, don't crash.
 #[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
 struct RawWindow {
     used_percent: Option<f64>,
-    window_duration_mins: Option<u64>,
-    resets_at: Option<RawResetsAt>,
+    limit_window_seconds: Option<u64>,
+    reset_after_seconds: Option<i64>,
+    reset_at: Option<i64>,
 }
 
-/// Windows pair as the endpoint models it (`primary` / `secondary`).
+/// The `primary_window` / `secondary_window` pair nested under `rate_limit`.
 #[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct RawWindows {
-    primary: Option<RawWindow>,
-    secondary: Option<RawWindow>,
+struct RawRateLimit {
+    primary_window: Option<RawWindow>,
+    secondary_window: Option<RawWindow>,
 }
 
-/// Top-level response. The verified shape wraps the windows under
-/// `rateLimits`; a flat root-level `primary`/`secondary` is also accepted as
-/// cheap resilience against a future reshape.
+/// Top-level response (verified 2026-07-15). Only the singular top-level
+/// `rate_limit` is read; account PII and the per-model
+/// `additional_rate_limits` array are ignored by serde (unknown fields) and
+/// never enter a snapshot.
 #[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
 struct RawUsage {
-    rate_limits: Option<RawWindows>,
-    primary: Option<RawWindow>,
-    secondary: Option<RawWindow>,
+    rate_limit: Option<RawRateLimit>,
 }
 
-/// Human label for a window from its duration in minutes: `300 → "5h"`,
-/// `10080 → "7d"`, `90 → "90m"`; `None → fallback`.
-fn minutes_label(minutes: Option<u64>, fallback: &str) -> String {
-    match minutes {
-        Some(m) if m > 0 && m % 1440 == 0 => format!("{}d", m / 1440),
-        Some(m) if m > 0 && m % 60 == 0 => format!("{}h", m / 60),
-        Some(m) if m > 0 => format!("{m}m"),
+/// Human label for a window from its duration in **seconds**:
+/// `18000 → "5h"`, `604800 → "7d"`, `90 → "90s"`; `None`/`0 → fallback`.
+fn seconds_label(secs: Option<u64>, fallback: &str) -> String {
+    match secs {
+        Some(s) if s > 0 && s % 86_400 == 0 => format!("{}d", s / 86_400),
+        Some(s) if s > 0 && s % 3_600 == 0 => format!("{}h", s / 3_600),
+        Some(s) if s > 0 && s % 60 == 0 => format!("{}m", s / 60),
+        Some(s) if s > 0 => format!("{s}s"),
         _ => fallback.to_string(),
     }
 }
 
-/// Seconds until reset from whichever `resets_at` form arrived.
-fn resets_in_secs(resets_at: Option<&RawResetsAt>, now_unix_secs: u64) -> Option<u64> {
-    match resets_at? {
-        RawResetsAt::Text(s) => parse_rfc3339_to_unix(s)
-            .map(|reset| reset.saturating_sub(now_unix_secs as i64).max(0) as u64),
-        RawResetsAt::Number(n) if *n >= EPOCH_VS_RELATIVE_THRESHOLD => {
-            // Absolute epoch seconds.
-            Some(n.saturating_sub(now_unix_secs as i64).max(0) as u64)
-        }
-        RawResetsAt::Number(n) if *n >= 0 => Some(*n as u64), // relative seconds
-        RawResetsAt::Number(_) => None,                       // negative: nonsense
+/// Seconds until reset: prefer the relative `reset_after_seconds`, else
+/// derive from the absolute `reset_at` epoch.
+fn window_resets_in_secs(w: &RawWindow, now_unix_secs: u64) -> Option<u64> {
+    if let Some(after) = w.reset_after_seconds {
+        return Some(after.max(0) as u64);
     }
+    w.reset_at
+        .map(|at| at.saturating_sub(now_unix_secs as i64).max(0) as u64)
 }
 
 /// Build a normalized, non-secret snapshot from a usage response.
 fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
-    // Prefer the wrapped shape; fall back to root-level windows.
-    let (primary, secondary) = match usage.rate_limits {
-        Some(rl) => (rl.primary, rl.secondary),
-        None => (usage.primary, usage.secondary),
-    };
+    let rate_limit = usage.rate_limit.unwrap_or_default();
 
     let mut windows = Vec::new();
-    for (win, fallback) in [(primary, "primary"), (secondary, "secondary")] {
+    for (win, fallback) in [
+        (rate_limit.primary_window, "primary"),
+        (rate_limit.secondary_window, "secondary"),
+    ] {
         if let Some(w) = win {
             windows.push(QuotaWindow {
-                label: minutes_label(w.window_duration_mins, fallback),
+                label: seconds_label(w.limit_window_seconds, fallback),
                 used_fraction: w.used_percent.map(|u| (u / 100.0).clamp(0.0, 1.0)),
-                resets_in_secs: resets_in_secs(w.resets_at.as_ref(), now_unix_secs),
+                resets_in_secs: window_resets_in_secs(&w, now_unix_secs),
             });
         }
     }
@@ -310,19 +315,24 @@ mod tests {
 
     #[test]
     fn builds_snapshot_from_verified_wire_shape() {
-        // Byte-for-byte the real endpoint shape: camelCase, `rateLimits`
-        // wrapper, `resetsAt` as an absolute epoch number (from the Codex
-        // issue tracker capture). This is the regression test for the M3
-        // live-run mismatch — the first build used snake_case and rendered
-        // no bars.
-        let now: u64 = 1_779_000_000;
+        // Structurally identical to the 2026-07-15 `--debug-raw` capture:
+        // top-level singular `rate_limit`, `primary_window`/`secondary_window`,
+        // `used_percent` / `limit_window_seconds` / `reset_after_seconds`, and
+        // ignored PII + `additional_rate_limits`. Regression test for the M3
+        // live-run mismatch (no windows rendered).
+        let now: u64 = 1_784_000_000;
         let json = format!(
-            r#"{{"rateLimits":{{
-                "limitId":"codex",
-                "primary":   {{"usedPercent": 25, "windowDurationMins": 300,   "resetsAt": {}}},
-                "secondary": {{"usedPercent": 18, "windowDurationMins": 10080, "resetsAt": {}}},
-                "planType":"prolite","rateLimitReachedType":null
-            }}}}"#,
+            r#"{{
+                "user_id":"user-REDACTED","account_id":"user-REDACTED","email":"x@example.com",
+                "plan_type":"prolite",
+                "rate_limit":{{
+                    "allowed":true,"limit_reached":false,
+                    "primary_window":  {{"used_percent":25,"limit_window_seconds":18000, "reset_after_seconds":3600,  "reset_at":{}}},
+                    "secondary_window":{{"used_percent":18,"limit_window_seconds":604800,"reset_after_seconds":86400, "reset_at":{}}}
+                }},
+                "additional_rate_limits":[{{"limit_name":"GPT-5.3-Codex-Spark","rate_limit":{{"primary_window":{{"used_percent":0,"limit_window_seconds":604800}}}}}}],
+                "rate_limit_reached_type":null
+            }}"#,
             now + 3600,
             now + 86_400
         );
@@ -330,23 +340,40 @@ mod tests {
         let snap = build_snapshot(usage, now);
 
         assert_eq!(snap.provider, ProviderId::CodexSubscription);
+        // Only the top-level rate_limit's two windows; additional_rate_limits
+        // are intentionally not emitted in M3.
         assert_eq!(snap.windows.len(), 2);
-        assert_eq!(snap.windows[0].label, "5h");
+        assert_eq!(snap.windows[0].label, "5h"); // 18000s
         assert_eq!(snap.windows[0].used_fraction, Some(0.25));
-        assert_eq!(snap.windows[0].resets_in_secs, Some(3600));
-        assert_eq!(snap.windows[1].label, "7d");
+        assert_eq!(snap.windows[0].resets_in_secs, Some(3600)); // reset_after_seconds
+        assert_eq!(snap.windows[1].label, "7d"); // 604800s
         assert_eq!(snap.windows[1].used_fraction, Some(0.18));
         assert_eq!(snap.windows[1].resets_in_secs, Some(86_400));
     }
 
     #[test]
-    fn builds_snapshot_from_flat_shape() {
-        let json = r#"{"primary": {"usedPercent": 50.0, "windowDurationMins": 300}}"#;
+    fn single_window_secondary_null() {
+        // The exact shape Justin's account returned: only primary_window,
+        // secondary null.
+        let json = r#"{"rate_limit":{"primary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":604060},"secondary_window":null}}"#;
         let usage: RawUsage = serde_json::from_str(json).unwrap();
         let snap = build_snapshot(usage, 0);
         assert_eq!(snap.windows.len(), 1);
-        assert_eq!(snap.windows[0].used_fraction, Some(0.5));
-        assert_eq!(snap.windows[0].resets_in_secs, None);
+        assert_eq!(snap.windows[0].label, "7d");
+        assert_eq!(snap.windows[0].used_fraction, Some(0.0));
+        assert_eq!(snap.windows[0].resets_in_secs, Some(604_060));
+    }
+
+    #[test]
+    fn reset_at_used_when_reset_after_absent() {
+        let now: u64 = 1_784_000_000;
+        let json = format!(
+            r#"{{"rate_limit":{{"primary_window":{{"used_percent":5,"limit_window_seconds":18000,"reset_at":{}}}}}}}"#,
+            now + 1800
+        );
+        let usage: RawUsage = serde_json::from_str(&json).unwrap();
+        let snap = build_snapshot(usage, now);
+        assert_eq!(snap.windows[0].resets_in_secs, Some(1800));
     }
 
     #[test]
@@ -358,7 +385,7 @@ mod tests {
 
     #[test]
     fn missing_window_duration_uses_fallback_label() {
-        let json = r#"{"primary": {"usedPercent": 10.0}}"#;
+        let json = r#"{"rate_limit":{"primary_window":{"used_percent":10.0}}}"#;
         let usage: RawUsage = serde_json::from_str(json).unwrap();
         let snap = build_snapshot(usage, 0);
         assert_eq!(snap.windows[0].label, "primary");
@@ -366,43 +393,45 @@ mod tests {
 
     #[test]
     fn used_percent_is_clamped() {
-        let json = r#"{"primary": {"usedPercent": 250.0}}"#;
+        let json = r#"{"rate_limit":{"primary_window":{"used_percent":250.0,"limit_window_seconds":18000}}}"#;
         let usage: RawUsage = serde_json::from_str(json).unwrap();
         let snap = build_snapshot(usage, 0);
         assert_eq!(snap.windows[0].used_fraction, Some(1.0));
     }
 
     #[test]
-    fn minutes_labels() {
-        assert_eq!(minutes_label(Some(300), "x"), "5h");
-        assert_eq!(minutes_label(Some(10080), "x"), "7d");
-        assert_eq!(minutes_label(Some(90), "x"), "90m");
-        assert_eq!(minutes_label(Some(1440), "x"), "1d");
-        assert_eq!(minutes_label(None, "primary"), "primary");
-        assert_eq!(minutes_label(Some(0), "x"), "x");
+    fn seconds_labels() {
+        assert_eq!(seconds_label(Some(18_000), "x"), "5h");
+        assert_eq!(seconds_label(Some(604_800), "x"), "7d");
+        assert_eq!(seconds_label(Some(5_400), "x"), "90m");
+        assert_eq!(seconds_label(Some(45), "x"), "45s");
+        assert_eq!(seconds_label(None, "primary"), "primary");
+        assert_eq!(seconds_label(Some(0), "x"), "x");
     }
 
     #[test]
-    fn resets_at_number_forms() {
-        // Relative seconds (small number).
-        assert_eq!(
-            resets_in_secs(Some(&RawResetsAt::Number(1800)), 1_800_000_000),
-            Some(1800)
-        );
-        // Absolute epoch (large number): 3600s after "now".
-        assert_eq!(
-            resets_in_secs(Some(&RawResetsAt::Number(1_800_003_600)), 1_800_000_000),
-            Some(3600)
-        );
-        // Past epoch clamps to zero rather than underflowing.
-        assert_eq!(
-            resets_in_secs(Some(&RawResetsAt::Number(1_700_000_000)), 1_800_000_000),
-            Some(0)
-        );
-        // Negative is nonsense.
-        assert_eq!(resets_in_secs(Some(&RawResetsAt::Number(-5)), 0), None);
-        // Absent.
-        assert_eq!(resets_in_secs(None, 0), None);
+    fn window_resets_prefers_relative_then_epoch() {
+        // reset_after_seconds wins when present (even if reset_at also set).
+        let w = RawWindow {
+            reset_after_seconds: Some(1800),
+            reset_at: Some(9_999_999_999),
+            ..Default::default()
+        };
+        assert_eq!(window_resets_in_secs(&w, 1_784_000_000), Some(1800));
+        // Negative relative clamps to zero.
+        let w = RawWindow {
+            reset_after_seconds: Some(-5),
+            ..Default::default()
+        };
+        assert_eq!(window_resets_in_secs(&w, 0), Some(0));
+        // Falls back to reset_at epoch when reset_after absent.
+        let w = RawWindow {
+            reset_at: Some(1_784_003_600),
+            ..Default::default()
+        };
+        assert_eq!(window_resets_in_secs(&w, 1_784_000_000), Some(3600));
+        // Neither → None.
+        assert_eq!(window_resets_in_secs(&RawWindow::default(), 0), None);
     }
 
     #[test]
