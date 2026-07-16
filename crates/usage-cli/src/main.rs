@@ -72,6 +72,7 @@ struct Args {
     provider: ProviderSel,
     client_version: String,
     client_version_defaulted: bool,
+    debug_raw: bool,
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
@@ -79,12 +80,14 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
     let mut json = false;
     let mut provider: Option<ProviderSel> = None;
     let mut client_version: Option<String> = None;
+    let mut debug_raw = false;
 
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--once" => once = true,
             "--json" => json = true,
+            "--debug-raw" => debug_raw = true,
             "--provider" => {
                 let value = iter
                     .next()
@@ -111,6 +114,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
         provider: provider.unwrap_or(ProviderSel::Claude),
         client_version: client_version.unwrap_or_else(|| DEFAULT_CLIENT_VERSION.to_string()),
         client_version_defaulted,
+        debug_raw,
     })
 }
 
@@ -137,7 +141,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
-                "usage: usage-cli --once [--json] [--provider claude|codex|all] [--client-version <VER>]"
+                "usage: usage-cli --once [--json] [--provider claude|codex|all] [--client-version <VER>] [--debug-raw]"
             );
             return ExitCode::from(2);
         }
@@ -162,6 +166,30 @@ fn main() -> ExitCode {
     // provider records a clean diagnostic and flips the exit code, but never
     // aborts the others (`all` still emits whatever succeeded).
     for id in ids {
+        // `--debug-raw` bypasses the normal snapshot path for Codex only,
+        // printing the exact wire response through the same `fetch` the
+        // normal poll uses (`debug_raw_body`). Claude is unaffected: it
+        // always takes the normal path below, debug-raw or not.
+        if args.debug_raw && id == ProviderId::CodexSubscription {
+            match CodexSubscription::with_default_path(CODEX_DEFAULT_USER_AGENT) {
+                None => {
+                    eprintln!(
+                        "error: {}: could not resolve a home directory for the credentials path",
+                        provider_cli_name(id)
+                    );
+                    had_error = true;
+                }
+                Some(provider) => match provider.debug_raw_body(&egress) {
+                    Ok(raw) => println!("{raw}"),
+                    Err(e) => {
+                        eprintln!("error: {}: {e}", provider_cli_name(id));
+                        had_error = true;
+                    }
+                },
+            }
+            continue;
+        }
+
         match build_provider(id, &args.client_version) {
             None => {
                 eprintln!(
@@ -359,5 +387,26 @@ mod tests {
     #[test]
     fn provider_flag_without_value_is_an_error() {
         assert!(parse_args(args(&["--once", "--provider"])).is_err());
+    }
+
+    // --- --debug-raw parsing (new) ---
+
+    #[test]
+    fn debug_raw_flag_defaults_off() {
+        let parsed = parse_args(args(&["--once"])).unwrap();
+        assert!(!parsed.debug_raw);
+    }
+
+    #[test]
+    fn debug_raw_flag_is_recognized_with_codex_provider() {
+        let parsed = parse_args(args(&["--once", "--debug-raw", "--provider", "codex"])).unwrap();
+        assert!(parsed.debug_raw);
+        assert_eq!(parsed.provider, ProviderSel::Codex);
+    }
+
+    #[test]
+    fn debug_raw_flag_can_appear_in_any_order() {
+        let parsed = parse_args(args(&["--provider", "codex", "--once", "--debug-raw"])).unwrap();
+        assert!(parsed.debug_raw);
     }
 }
