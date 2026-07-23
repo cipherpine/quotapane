@@ -48,6 +48,32 @@ allow = [
     "OFL-1.1",
     "Ubuntu-font-1.0",
 ]
+
+# License EXCEPTIONS — deliberately narrower than `allow`: each is scoped to a
+# single named crate and does NOT loosen the global policy.
+#
+# option-ext 0.2.0 (MPL-2.0) is the only non-permissive license anywhere in the
+# tree, and it is a PHANTOM dependency (M3.5 tray review, 2026-07-23). It enters
+# solely via  tray-icon → dirs → dirs-sys → option-ext,  and `tray-icon`
+# declares `dirs` ONLY under its Linux/BSD cfg, while we gate `tray-icon` to
+# Windows/macOS in crates/usage-ui/Cargo.toml. The cfg intersection is empty, so
+# option-ext is compiled, linked, and shipped on NONE of our targets — verified:
+#   cargo tree -i dirs --target x86_64-pc-windows-msvc   → empty
+#   cargo tree -i dirs --target aarch64-apple-darwin     → empty
+#   cargo tree -i dirs --target x86_64-apple-darwin      → empty
+#   cargo tree -i dirs --target x86_64-unknown-linux-gnu → empty
+# It appears only under `--target all` as a Cargo.lock union artifact. MPL-2.0's
+# file-level copyleft therefore never attaches to anything we distribute. We keep
+# FULL all-target cargo-deny coverage (no [graph].targets restriction, so Linux
+# advisories such as the wayland-scanner items above stay scanned) and bless this
+# one never-shipped crate instead. Global copyleft (MPL/GPL/LGPL/…) stays
+# disallowed. RE-REVIEW if tray-icon ever gains a Windows/macOS path to `dirs`,
+# or if a real Linux tray is added (M5+/ksni) — option-ext would then actually
+# ship and this exception must be reconsidered.
+exceptions = [
+    { name = "option-ext", allow = ["MPL-2.0"] },
+]
+
 confidence-threshold = 0.93
 
 [bans]

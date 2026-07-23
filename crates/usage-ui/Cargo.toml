@@ -15,3 +15,18 @@ publish = false # distributed as a signed binary, not on crates.io
 # See CONTRIBUTING.md for the justification row.
 eframe = { version = "0.35.0", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
 usage-core = { path = "../usage-core" }
+
+# tray-icon (M3.5): system tray on Windows (primary) + macOS only. Reviewed at
+# the top tier 2026-07-20 (corrected 2026-07-23) — see the full analysis in
+# prompts/m3.5-tray-dependency-review.md and the CONTRIBUTING.md row.
+# Lockfile delta is 9 crates: 5 that compile here (tray-icon, muda,
+# crossbeam-channel, crossbeam-utils, keyboard-types, all MIT/Apache) + 4
+# PHANTOM crates pulled only through tray-icon's Linux/BSD-gated `dirs` dep
+# (dirs, dirs-sys, redox_users, and option-ext which is MPL-2.0). The target
+# gate below makes that chain compile on none of our targets; option-ext's
+# MPL-2.0 is handled by a narrow per-crate exception in deny.toml.
+# Deliberately NO `gtk` feature and NO Linux target: the Linux backend would
+# pull the officially-unmaintained gtk-rs 0.18 bindings + libappindicator.
+# Linux stays window-only in v1 (future gtk-free option: ksni, own review).
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tray-icon = { version = "0.24", default-features = false }
