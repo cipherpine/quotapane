@@ -1,4 +1,4 @@
-//! QuotaPane desktop window — M3 milestone (multi-provider).
+//! QuotaPane desktop window — M3.5 milestone (multi-provider + system tray).
 //!
 //! Pure render: this crate receives non-secret `ProviderSnapshot` values over
 //! per-provider channels and draws them. It never touches credentials or the
@@ -10,6 +10,13 @@
 //! tracked **per provider**, so one provider being signed out or erroring
 //! never disturbs the other. A provider whose credential file is absent is
 //! rendered as a single quiet "not signed in" line rather than a red banner.
+//!
+//! M3.5 adds a system tray on Windows (primary) and macOS: a runtime-drawn
+//! icon, a live tooltip built from the same snapshots the window renders, a
+//! left-click that raises the window, and a Show/Hide + Quit menu. When the
+//! tray is active the window's close request hides to tray instead of quitting;
+//! `--no-tray` restores the classic close-to-quit behavior. Linux has no tray
+//! (window-only) and compiles to exactly the pre-M3.5 behavior.
 
 use eframe::egui;
 use std::process::ExitCode;
@@ -42,11 +49,15 @@ struct Args {
     /// Codex CLI default ([`CODEX_DEFAULT_USER_AGENT`]) — a correct value, not
     /// a placeholder, so its default needs no warning.
     codex_user_agent: String,
+    /// Disable the system tray, restoring close-to-quit. On platforms without a
+    /// tray (Linux) the flag is accepted and ignored.
+    no_tray: bool,
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
     let mut client_version: Option<String> = None;
     let mut codex_user_agent: Option<String> = None;
+    let mut no_tray = false;
 
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
@@ -64,6 +75,10 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
                     .ok_or_else(|| "--codex-user-agent requires a value".to_string())?;
                 codex_user_agent = Some(value);
             }
+            // Boolean flag: disable the tray (accepted-and-ignored on Linux).
+            "--no-tray" => {
+                no_tray = true;
+            }
             other => return Err(format!("unrecognized argument: {other}")),
         }
     }
@@ -73,6 +88,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
         client_version: client_version.unwrap_or_else(|| DEFAULT_CLIENT_VERSION.to_string()),
         client_version_defaulted,
         codex_user_agent: codex_user_agent.unwrap_or_else(|| CODEX_DEFAULT_USER_AGENT.to_string()),
+        no_tray,
     })
 }
 
@@ -163,6 +179,259 @@ fn fraction_color(fraction: Option<f64>) -> egui::Color32 {
     }
 }
 
+// --------------------------------------------------------------------------
+// System tray (Windows + macOS only) — see the CONTRIBUTING.md / deny.toml
+// rationale. Everything below the pure helpers is gated to the tray targets;
+// Linux compiles to exactly the pre-M3.5 window-only behavior.
+// --------------------------------------------------------------------------
+
+/// A tray/menu interaction, forwarded from the OS event handlers into the app.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayMessage {
+    /// Left-click: show and focus the window.
+    ShowAndFocus,
+    /// "Show/Hide" menu item: flip the window's visibility.
+    ToggleShowHide,
+    /// "Quit" menu item: exit the app for real.
+    Quit,
+}
+
+/// The window that best represents a provider at a glance: the one closest to
+/// its limit (highest used fraction). Ties and unknown fractions resolve to the
+/// earliest such window. `None` when the snapshot has no windows.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn representative_window(snapshot: &ProviderSnapshot) -> Option<&QuotaWindow> {
+    let mut best: Option<&QuotaWindow> = None;
+    for window in &snapshot.windows {
+        let better = match best {
+            None => true,
+            Some(current) => {
+                window.used_fraction.unwrap_or(-1.0) > current.used_fraction.unwrap_or(-1.0)
+            }
+        };
+        if better {
+            best = Some(window);
+        }
+    }
+    best
+}
+
+/// One provider's tray line, e.g. `"Claude 5h 42%"`, or `"Claude --"` when no
+/// usable snapshot or percentage is available.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn provider_tray_summary(label: &str, snapshot: Option<&ProviderSnapshot>) -> String {
+    if let Some(snapshot) = snapshot {
+        if let Some(window) = representative_window(snapshot) {
+            if let Some(fraction) = window.used_fraction {
+                let pct = (fraction * 100.0).round().clamp(0.0, 100.0) as i64;
+                let window_label = &window.label;
+                return format!("{label} {window_label} {pct}%");
+            }
+        }
+    }
+    format!("{label} --")
+}
+
+/// The whole tray tooltip: each provider's line joined by `" | "`, e.g.
+/// `"Claude 5h 42% | Codex 7d 3%"`.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn tray_tooltip(entries: &[(&str, Option<&ProviderSnapshot>)]) -> String {
+    entries
+        .iter()
+        .map(|(label, snapshot)| provider_tray_summary(label, *snapshot))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// Side length (px) of the square tray icon generated at runtime.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const ICON_SIZE: u32 = 32;
+
+/// Write one RGBA pixel into a row-major `size`×`size` buffer.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn put_px(px: &mut [u8], size: usize, x: usize, y: usize, rgba: [u8; 4]) {
+    let i = (y * size + x) * 4;
+    px[i..i + 4].copy_from_slice(&rgba);
+}
+
+/// Draw a horizontal gauge bar: the `track` color across `[left, right)` on
+/// rows `[top, bottom)`, with the leading `fraction` filled in `color`.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn fill_bar(
+    px: &mut [u8],
+    size: usize,
+    top: usize,
+    bottom: usize,
+    left: usize,
+    right: usize,
+    color: [u8; 4],
+    track: [u8; 4],
+    fraction: f64,
+) {
+    let span = right - left;
+    let fill_end = left + ((span as f64) * fraction.clamp(0.0, 1.0)).round() as usize;
+    for y in top..bottom {
+        for x in left..right {
+            put_px(px, size, x, y, if x < fill_end { color } else { track });
+        }
+    }
+}
+
+/// Generate the tray icon as raw RGBA8 (`ICON_SIZE`×`ICON_SIZE`, row-major).
+///
+/// Drawn entirely in code — no asset file, no build script, no image decoder.
+/// It's a tiny two-bar gauge on a dark tile, echoing the window's quota bars: a
+/// fuller green bar over a shorter amber one.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn tray_icon_rgba() -> Vec<u8> {
+    let size = ICON_SIZE as usize;
+    let mut px = vec![0u8; size * size * 4]; // transparent background
+
+    const TILE: [u8; 4] = [24, 27, 33, 255]; // dark slate
+    const TRACK: [u8; 4] = [55, 60, 68, 255]; // unfilled bar background
+    const GREEN: [u8; 4] = [46, 160, 67, 255]; // matches NORMAL_COLOR
+    const AMBER: [u8; 4] = [230, 162, 60, 255]; // matches WARNING_COLOR
+
+    // Dark tile, inset 2px, with the four hard corners clipped for a soft look.
+    for y in 2..size - 2 {
+        for x in 2..size - 2 {
+            let corner = (x < 4 || x >= size - 4) && (y < 4 || y >= size - 4);
+            if !corner {
+                put_px(&mut px, size, x, y, TILE);
+            }
+        }
+    }
+
+    // Two horizontal gauge bars echoing the window's quota bars.
+    let left = 7;
+    let right = size - 7;
+    fill_bar(&mut px, size, 10, 15, left, right, GREEN, TRACK, 0.70);
+    fill_bar(&mut px, size, 18, 23, left, right, AMBER, TRACK, 0.40);
+
+    px
+}
+
+/// Runtime tray-icon integration. Owns the live tray handle and the receiver
+/// its OS event handlers feed. Windows + macOS only.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod tray {
+    use eframe::egui;
+    use std::sync::mpsc::{self, Receiver};
+    use std::sync::{Arc, Mutex};
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::{
+        Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    };
+
+    use super::TrayMessage;
+
+    const INITIAL_TOOLTIP: &str = "QuotaPane";
+
+    /// A live tray icon. Dropping it removes the icon, so it lives as long as
+    /// the app; the owned menu (and its items) live with it.
+    pub struct Tray {
+        icon: TrayIcon,
+        rx: Receiver<TrayMessage>,
+        /// Whether the window is currently shown (the tray toggles this).
+        pub visible: bool,
+        last_tooltip: String,
+    }
+
+    impl Tray {
+        /// Build the tray on the calling (main) thread — both Windows and macOS
+        /// require it there. Returns `None` if the OS refuses to create it, in
+        /// which case the app falls back to close-to-quit. Registers the
+        /// process-wide tray/menu event handlers, which forward into an mpsc
+        /// channel drained each frame.
+        pub fn create(ctx: &egui::Context) -> Option<Tray> {
+            let (tx, rx) = mpsc::channel::<TrayMessage>();
+            // The event handlers must be `Send + Sync`; a bare `Sender` is not
+            // `Sync`, so guard it behind a mutex.
+            let tx = Arc::new(Mutex::new(tx));
+
+            let menu = Menu::new();
+            let show_hide = MenuItem::new("Show/Hide", true, None);
+            let quit = MenuItem::new("Quit", true, None);
+            menu.append_items(&[&show_hide, &PredefinedMenuItem::separator(), &quit])
+                .ok()?;
+            let show_hide_id = show_hide.id().clone();
+            let quit_id = quit.id().clone();
+
+            {
+                let tx = Arc::clone(&tx);
+                let ctx = ctx.clone();
+                MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                    let msg = if event.id == show_hide_id {
+                        TrayMessage::ToggleShowHide
+                    } else if event.id == quit_id {
+                        TrayMessage::Quit
+                    } else {
+                        return;
+                    };
+                    if let Ok(tx) = tx.lock() {
+                        let _ = tx.send(msg);
+                    }
+                    // Wake the event loop so the click feels instant rather than
+                    // waiting for the 1s tick.
+                    ctx.request_repaint();
+                }));
+            }
+
+            {
+                let tx = Arc::clone(&tx);
+                let ctx = ctx.clone();
+                TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Ok(tx) = tx.lock() {
+                            let _ = tx.send(TrayMessage::ShowAndFocus);
+                        }
+                        ctx.request_repaint();
+                    }
+                }));
+            }
+
+            let icon = Icon::from_rgba(super::tray_icon_rgba(), super::ICON_SIZE, super::ICON_SIZE)
+                .ok()?;
+            let icon = TrayIconBuilder::new()
+                .with_menu(Box::new(menu))
+                // Left-click raises the window; the menu is a right-click.
+                .with_menu_on_left_click(false)
+                .with_tooltip(INITIAL_TOOLTIP)
+                .with_icon(icon)
+                .build()
+                .ok()?;
+
+            Some(Tray {
+                icon,
+                rx,
+                visible: true,
+                last_tooltip: INITIAL_TOOLTIP.to_string(),
+            })
+        }
+
+        /// Take every tray/menu event queued since the last frame.
+        pub fn take_messages(&self) -> Vec<TrayMessage> {
+            self.rx.try_iter().collect()
+        }
+
+        /// Update the OS tooltip only when the text actually changed, to avoid
+        /// hammering the platform API every frame.
+        pub fn set_tooltip_if_changed(&mut self, tooltip: &str) {
+            if tooltip != self.last_tooltip {
+                let _ = self.icon.set_tooltip(Some(tooltip));
+                self.last_tooltip = tooltip.to_string();
+            }
+        }
+    }
+}
+
 /// Live state for one provider's section. Owns its poller handle and the
 /// latest non-secret update; never touches credentials. Independent of every
 /// other pane — its staleness and failure are its own.
@@ -231,13 +500,98 @@ impl ProviderPane {
 /// Draggable, always-on-top window showing live quota for every provider.
 struct QuotaPaneApp {
     panes: Vec<ProviderPane>,
+    /// Whether close-to-tray is in effect. False on Linux, when `--no-tray` is
+    /// given, or if tray creation failed — in all of which close quits.
+    tray_active: bool,
+    /// Set once the user picks "Quit" from the tray, so the close interceptor
+    /// lets the real exit through.
+    quitting: bool,
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    tray: Option<tray::Tray>,
+}
+
+impl QuotaPaneApp {
+    /// Refresh the tooltip and drain queued tray/menu events, acting on each.
+    /// Runs from `logic`, so it keeps working even while the window is hidden.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    fn service_tray(&mut self, ctx: &egui::Context) {
+        // Build the tooltip from the same snapshots the window renders.
+        let tooltip = {
+            let entries: Vec<(&str, Option<&ProviderSnapshot>)> = self
+                .panes
+                .iter()
+                .map(|pane| (provider_label(pane.id), pane.latest_snapshot.as_ref()))
+                .collect();
+            tray_tooltip(&entries)
+        };
+
+        // Update the tooltip and collect events without holding the tray borrow
+        // across the app mutations below.
+        let messages = match self.tray.as_mut() {
+            Some(tray) => {
+                tray.set_tooltip_if_changed(&tooltip);
+                tray.take_messages()
+            }
+            None => return,
+        };
+
+        for message in messages {
+            match message {
+                TrayMessage::ShowAndFocus => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    if let Some(tray) = self.tray.as_mut() {
+                        tray.visible = true;
+                    }
+                }
+                TrayMessage::ToggleShowHide => {
+                    if let Some(tray) = self.tray.as_mut() {
+                        tray.visible = !tray.visible;
+                        let visible = tray.visible;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(visible));
+                        if visible {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        }
+                    }
+                }
+                TrayMessage::Quit => {
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for QuotaPaneApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Fold in every pending poller update. Runs even while hidden to tray,
+        // so the tooltip stays live and Show/Quit keep responding.
         for pane in &mut self.panes {
             pane.drain();
         }
+
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        self.service_tray(ctx);
+
+        // Close-to-tray: when the tray is active, a close request hides the
+        // window instead of quitting. Always compiled; on platforms without a
+        // tray `tray_active` is always false, so close quits exactly as before.
+        if self.tray_active && !self.quitting && ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            if let Some(tray) = self.tray.as_mut() {
+                tray.visible = false;
+            }
+        }
+
+        // Keep polling for updates (and tray events) about once a second, even
+        // when the window is hidden.
+        ctx.request_repaint_after(Duration::from_secs(1));
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
         // The root `Ui` eframe hands to `App::ui` has no margin or background
@@ -262,8 +616,6 @@ impl eframe::App for QuotaPaneApp {
                 render_pane(ui, pane);
             }
         });
-
-        ctx.request_repaint_after(Duration::from_secs(1));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -361,7 +713,9 @@ fn main() -> ExitCode {
         Ok(a) => a,
         Err(e) => {
             eprintln!("error: {e}");
-            eprintln!("usage: usage-ui [--client-version <VER>] [--codex-user-agent <UA>]");
+            eprintln!(
+                "usage: usage-ui [--client-version <VER>] [--codex-user-agent <UA>] [--no-tray]"
+            );
             return ExitCode::from(2);
         }
     };
@@ -371,6 +725,11 @@ fn main() -> ExitCode {
             "note: no --client-version given; using \"{DEFAULT_CLIENT_VERSION}\" — pass a real claude-code version to avoid provider throttling"
         );
     }
+
+    // `--no-tray` disables the tray; on platforms without one (Linux) the flag
+    // is accepted and ignored. Reading it via `cfg!` keeps the field live on
+    // every platform and yields today's behavior wherever there is no tray.
+    let tray_active = !args.no_tray && cfg!(any(target_os = "windows", target_os = "macos"));
 
     // One pane per provider. A missing home directory becomes a per-pane
     // startup error; a missing credential file surfaces later as a quiet
@@ -383,9 +742,6 @@ fn main() -> ExitCode {
         ProviderId::CodexSubscription,
         CodexSubscription::with_default_path(args.codex_user_agent),
     );
-    let app = QuotaPaneApp {
-        panes: vec![claude, codex],
-    };
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -396,11 +752,33 @@ fn main() -> ExitCode {
         ..Default::default()
     };
 
-    match eframe::run_native(
+    let result = eframe::run_native(
         "QuotaPane",
         native_options,
-        Box::new(|_cc| Ok(Box::new(app))),
-    ) {
+        Box::new(move |_cc| {
+            // Create the tray on the main thread, now that eframe/winit is up.
+            // If creation fails, fall back to close-to-quit.
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            let (tray, tray_active) = if tray_active {
+                let tray = tray::Tray::create(&_cc.egui_ctx);
+                let active = tray.is_some();
+                (tray, active)
+            } else {
+                (None, false)
+            };
+
+            let app = QuotaPaneApp {
+                panes: vec![claude, codex],
+                tray_active,
+                quitting: false,
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                tray,
+            };
+            Ok(Box::new(app))
+        }),
+    );
+
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
@@ -474,6 +852,35 @@ mod tests {
         assert_eq!(parsed.client_version, "4.5.6");
         assert!(!parsed.client_version_defaulted);
         assert_eq!(parsed.codex_user_agent, "ua-x");
+    }
+
+    // --- parse_args: --no-tray flag (new) ---
+
+    #[test]
+    fn no_tray_defaults_to_false() {
+        let parsed = parse_args(args(&[])).unwrap();
+        assert!(!parsed.no_tray);
+    }
+
+    #[test]
+    fn no_tray_flag_sets_true() {
+        let parsed = parse_args(args(&["--no-tray"])).unwrap();
+        assert!(parsed.no_tray);
+    }
+
+    #[test]
+    fn no_tray_combines_with_other_flags() {
+        let parsed = parse_args(args(&[
+            "--no-tray",
+            "--client-version",
+            "1.2.3",
+            "--codex-user-agent",
+            "ua-y",
+        ]))
+        .unwrap();
+        assert!(parsed.no_tray);
+        assert_eq!(parsed.client_version, "1.2.3");
+        assert_eq!(parsed.codex_user_agent, "ua-y");
     }
 
     // --- provider_label: label mapping ---
@@ -622,5 +1029,129 @@ mod tests {
     fn ninety_five_percent_is_red() {
         assert_eq!(fraction_color(Some(0.95)), CRITICAL_COLOR);
         assert_eq!(fraction_color(Some(1.0)), CRITICAL_COLOR);
+    }
+}
+
+// Tray helpers are Windows/macOS-only, so their tests are too (they run on the
+// windows-latest and macos-latest CI jobs, and locally on Windows).
+#[cfg(all(test, any(target_os = "windows", target_os = "macos")))]
+mod tray_tests {
+    use super::*;
+    use usage_core::model::{ProviderId, ProviderSnapshot, QuotaWindow, SnapshotSource};
+
+    fn snap(windows: Vec<QuotaWindow>) -> ProviderSnapshot {
+        ProviderSnapshot {
+            provider: ProviderId::ClaudeSubscription,
+            taken_at_unix_secs: 0,
+            windows,
+            source: SnapshotSource::UsageEndpoint,
+        }
+    }
+
+    fn window(label: &str, fraction: Option<f64>) -> QuotaWindow {
+        QuotaWindow {
+            label: label.to_string(),
+            used_fraction: fraction,
+            resets_in_secs: None,
+        }
+    }
+
+    fn pixel(px: &[u8], size: usize, x: usize, y: usize) -> [u8; 4] {
+        let i = (y * size + x) * 4;
+        [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    }
+
+    // --- tooltip formatting ---
+
+    #[test]
+    fn tooltip_both_providers_matches_example_shape() {
+        let claude = snap(vec![window("5h", Some(0.42)), window("week", Some(0.10))]);
+        let codex = snap(vec![window("7d", Some(0.03))]);
+        let tip = tray_tooltip(&[("Claude", Some(&claude)), ("Codex", Some(&codex))]);
+        assert_eq!(tip, "Claude 5h 42% | Codex 7d 3%");
+    }
+
+    #[test]
+    fn tooltip_unknown_providers_show_double_dash() {
+        let tip = tray_tooltip(&[("Claude", None), ("Codex", None)]);
+        assert_eq!(tip, "Claude -- | Codex --");
+    }
+
+    #[test]
+    fn summary_window_without_fraction_is_double_dash() {
+        let s = snap(vec![window("5h", None)]);
+        assert_eq!(provider_tray_summary("Claude", Some(&s)), "Claude --");
+    }
+
+    #[test]
+    fn summary_no_windows_is_double_dash() {
+        let s = snap(vec![]);
+        assert_eq!(provider_tray_summary("Claude", Some(&s)), "Claude --");
+    }
+
+    #[test]
+    fn summary_no_snapshot_is_double_dash() {
+        assert_eq!(provider_tray_summary("Codex", None), "Codex --");
+    }
+
+    #[test]
+    fn representative_window_picks_highest_usage() {
+        let s = snap(vec![window("5h", Some(0.42)), window("week", Some(0.90))]);
+        assert_eq!(provider_tray_summary("Claude", Some(&s)), "Claude week 90%");
+    }
+
+    #[test]
+    fn summary_rounds_percentage() {
+        // 0.005 → 0.5% → rounds to 1%.
+        let s = snap(vec![window("5h", Some(0.005))]);
+        assert_eq!(provider_tray_summary("Claude", Some(&s)), "Claude 5h 1%");
+    }
+
+    #[test]
+    fn single_provider_tooltip_has_no_separator() {
+        let s = snap(vec![window("5h", Some(0.42))]);
+        let tip = tray_tooltip(&[("Claude", Some(&s))]);
+        assert_eq!(tip, "Claude 5h 42%");
+        assert!(!tip.contains('|'));
+    }
+
+    // --- icon pixel generation invariants ---
+
+    #[test]
+    fn icon_has_expected_dimensions() {
+        let px = tray_icon_rgba();
+        assert_eq!(px.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
+    }
+
+    #[test]
+    fn icon_corner_is_transparent() {
+        let px = tray_icon_rgba();
+        assert_eq!(pixel(&px, ICON_SIZE as usize, 0, 0), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn icon_center_is_opaque() {
+        // The icon is not blank: its tile center is fully opaque.
+        let px = tray_icon_rgba();
+        let c = ICON_SIZE as usize / 2;
+        assert_eq!(pixel(&px, ICON_SIZE as usize, c, c)[3], 255);
+    }
+
+    #[test]
+    fn icon_draws_green_and_amber_bars() {
+        let px = tray_icon_rgba();
+        let size = ICON_SIZE as usize;
+        // Green bar (rows 10..15), inside the filled portion.
+        assert_eq!(pixel(&px, size, 10, 12), [46, 160, 67, 255]);
+        // Amber bar (rows 18..23), inside the filled portion.
+        assert_eq!(pixel(&px, size, 10, 20), [230, 162, 60, 255]);
+    }
+
+    #[test]
+    fn icon_bar_shows_unfilled_track() {
+        let px = tray_icon_rgba();
+        let size = ICON_SIZE as usize;
+        // Past the 70% fill of the green bar: the track color.
+        assert_eq!(pixel(&px, size, 23, 12), [55, 60, 68, 255]);
     }
 }
