@@ -37,7 +37,9 @@ A single, standalone, always-on-top desktop window that shows **live usage/quota
 | **Availability** | Anyone signed into the CLI | **Anthropic Admin API is unavailable for individual accounts** — requires an Organization on a Platform plan. Not available on Bedrock. |
 | **Stability** | Fragile — undocumented, may change without notice; ToS gray area | Stable, documented; cost endpoints are **beta** (schema may shift) |
 
-**Implication for v1:** the subscription/quota view is what people actually want on their desk, but it depends on undocumented endpoints. The API-billing view is stable and official but needs an org/admin key that solo users may not have, and it does *not* cover Claude Code-on-subscription usage. Ship the subscription providers first (behind a clear "uses undocumented endpoints" disclaimer), and treat the official Admin/usage APIs as an **opt-in advanced mode**. Design the provider layer so both are just implementations of one trait.
+**Implication for v1:** the subscription/quota view is what people actually want on their desk, but it depends on undocumented endpoints. Ship the subscription providers behind a clear "uses undocumented endpoints" disclaimer. The API-billing column above was originally planned as an opt-in advanced mode (M4) — **that is now withdrawn; see ADR-002 below.** Keep the provider layer as one trait regardless, so a future token-free cost source can slot in without touching the trust boundary.
+
+**Documented decision (ADR-002, 2026-07-23): the official Admin/billing APIs are out of scope.** Researching M4 established that both vendors' usage/cost endpoints require an **organization Admin API key** (`sk-ant-admin01-…` / an OpenAI admin key) and are **unavailable to individual Pro/Max/Plus/Codex subscribers** — Anthropic's docs state the Admin API is unavailable for individual accounts outright. So the billing view (a) serves a different audience (API-billed orgs) with **zero overlap** with QuotaPane's subscription users, (b) measures a different thing — metered API dollar-spend, not subscription rate-limit consumption (a flat-fee Max/Codex user has no per-token bill for that usage), and (c) most decisively, would force the trust boundary to ingest and hold an **org-admin credential**, the highest-blast-radius secret in either ecosystem — directly contradicting the "tiny, auditable, read-only" thesis that is this product's headline. The org-cost space is also already well served (first-party consoles; Vantage/Finout/Datadog). If cost visibility is ever wanted, the compatible path is the **token-free `OtelSource`** (M5) — never an admin key. Consequence: `AnthropicAdmin`/`OpenAiUsage` are withdrawn, and `api.openai.com` has been dropped from the egress allowlist — the trust boundary now reaches only `api.anthropic.com`, `chatgpt.com`, and opt-in `api.github.com`.
 
 ---
 
@@ -85,9 +87,8 @@ quotapane/
 **`credentials`** — Read-only loaders. Resolves `~/.claude/.credentials.json`, `$CODEX_HOME/auth.json` (or `~/.codex/auth.json`), and optionally a credential file inside a named WSL distro. Returns tokens wrapped in a `Secret<T>` type that: zeroizes memory on drop, has a `Debug`/`Display` impl that prints `«redacted»`, and is never serialized. **Never writes** to credential files. Token *refresh* is delegated by spawning the official `claude` / `codex` CLI — the app itself never mints or rewrites `auth.json`, which eliminates a whole class of credential-corruption and leakage bugs.
 
 **`egress`** — One HTTP client, one chokepoint, deny-by-default. A compile-time host **allowlist** is the only way a request leaves the process:
-- `api.anthropic.com` (subscription usage + fallback; official Admin API)
+- `api.anthropic.com` (subscription usage + Messages-API rate-limit fallback)
 - `chatgpt.com` — Codex (ChatGPT-plan) subscription usage (`/backend-api/wham/usage`; verified in M3 against the open-source Codex CLI — the subscription endpoint is **not** on `api.openai.com`)
-- `api.openai.com` — official OpenAI usage/costs API (opt-in billing mode, M4)
 - `api.github.com` — **update check only**, and only when the user enables it
 Any attempt to dial a host not on the list is a hard error. Proxy support is **off by default**; if `HTTPS_PROXY`/`ALL_PROXY` is set, the app surfaces a visible warning that a TLS-inspecting proxy (e.g. a corporate Zscaler-style gateway) can observe the bearer token at its decryption point, and requires explicit opt-in to proceed. Optional certificate pinning for provider hosts.
 
@@ -104,9 +105,9 @@ trait UsageProvider {
 Implementations:
 - `ClaudeSubscription` — OAuth usage endpoint + Messages-API rate-limit-header fallback.
 - `CodexSubscription` — OpenAI Codex usage endpoint.
-- `AnthropicAdmin` *(opt-in)* — official Usage & Cost Admin API. Needs `sk-ant-admin-…`; unavailable to individual accounts.
-- `OpenAiUsage` *(opt-in)* — official OpenAI usage/costs API. Needs an org key.
-- `OtelSource` *(opt-in, advanced)* — reads from your **existing** local OTEL/Prometheus endpoint instead of calling providers directly (fits your current OTEL setup; keeps tokens out of this tool entirely for the billing view).
+- ~~`AnthropicAdmin`~~ *(withdrawn — ADR-002)* — would have needed an org admin key; out of scope. The `ProviderId` variant is slated for removal.
+- ~~`OpenAiUsage`~~ *(withdrawn — ADR-002)* — would have needed an org admin key; out of scope. The `ProviderId` variant is slated for removal.
+- `OtelSource` *(opt-in, advanced; M5)* — reads from your **existing** local OTEL/Prometheus endpoint instead of calling providers directly (keeps tokens out of this tool entirely). Per ADR-002 this is the **only** acceptable path to any cost/spend view, since it needs no admin key.
 
 **`poller`** — Thread-based scheduler (one lightweight thread per provider; amended from async/`tokio` in M1 — the `ureq`/`rustls` sync stack was chosen to keep the trust boundary's dependency tree minimal, and 2–4 providers don't need an async runtime). Per-provider, staggered. Adaptive intervals: fast (~5 min) during active use, normal (~7 min), slow (~20 min) when idle, snap to imminent quota resets, exponential backoff on `429`. Emits normalized snapshots over a channel to the UI. Tokens are loaded lazily, held only in memory, zeroized after use.
 
@@ -198,7 +199,7 @@ Because it's public and touches credentials, the repo itself must model good pra
 ## 8. UI specification
 
 Always-on-top, frameless, draggable floating window.
-- **Per-provider row:** provider name/icon, one or more quota bars (e.g. Claude 5h + weekly; Codex session + weekly), each color-coded by threshold, with a reset countdown. Optional cost readout when an official billing provider is enabled.
+- **Per-provider row:** provider name/icon, one or more quota bars (e.g. Claude 5h + weekly; Codex session + weekly), each color-coded by threshold, with a reset countdown. (An optional cost readout is possible only via a future token-free `OtelSource` (M5); the official Admin/billing APIs are out of scope — ADR-002.)
 - **Interactions:** drag to move; scroll to resize/zoom; click a row to expand a detail popover (sparkline history, per-model breakdown, forecast-to-limit, top projects if available); right-click for settings/position/theme/minimize.
 - **Modes:** compact (thin strip) and expanded; multi-monitor aware; position persists.
 - **Liveness:** staleness indicator when data is older than expected; a subtle pulse on refresh; never blocks input.
@@ -214,7 +215,7 @@ Build the **trust boundary first**, prove it headless, then add the window and m
 - **M1 — First provider, headless.** `ClaudeSubscription` (usage endpoint + header fallback), `usage-cli --json`, egress-allowlist test passing. Proves the whole pipeline with no UI.
 - **M2 — The window.** `egui` always-on-top floating window rendering the Claude provider live.
 - **M3 — Second provider.** `CodexSubscription`; multi-row UI; both providers live. *This is the minimum shippable "both providers, own window" product.*
-- **M4 — Opt-in official billing.** `AnthropicAdmin` + `OpenAiUsage` behind an advanced-mode config gate (org/admin keys). Clearly labeled and separated from the subscription view.
+- **M4 — ~~Opt-in official billing~~ WITHDRAWN (ADR-002).** The official Admin/billing APIs need org-admin keys, serve a different (API-billed) audience with no overlap with subscription users, and would break the read-only trust-boundary thesis. Any future cost view comes token-free via `OtelSource` (M5), not admin keys.
 - **M5 — Depth.** History/sparklines, forecast-to-limit, thresholds/alerts, optional `OtelSource` that reuses your existing OTEL pipeline.
 - **M6 — Ship.** Packaging (WinGet/Homebrew/AUR), signed CI releases + provenance, docs, `v1.0`.
 
@@ -223,11 +224,11 @@ Build the **trust boundary first**, prove it headless, then add the window and m
 ## 10. Open decisions (resolve in Cowork)
 
 1. **UI:** `egui` (recommended) vs Tauri. Recommendation stands unless rich HTML UI becomes a requirement.
-2. **v1 provider scope:** ship subscription-only (Claude + Codex) first; official billing in M4. Confirm.
+2. **v1 provider scope:** ✅ Resolved — subscription-only (Claude + Codex). Official billing (M4) is **withdrawn** (ADR-002).
 3. **Undocumented endpoints — in or out?** They power the view users actually want but are fragile and a ToS gray area. Recommendation: include them, gated behind the runtime disclaimer, with graceful degradation when they change.
 4. **Name & license:** pick a real name; MIT vs Apache-2.0.
 5. **Platform priority:** you're on Windows — confirm Windows is the primary CI/release target, with macOS/Linux best-effort at first.
-6. **OTEL role:** first-class billing source, or advanced/optional? (You already run OTEL, so this could become the *cleanest* token-free path to the billing view.)
+6. **OTEL role:** ✅ Resolved — advanced/optional, deferred to M5. With the admin-key billing APIs out (ADR-002), a token-free `OtelSource` is the *only* acceptable path to any cost view — but it stays optional, not first-class.
 
 ---
 

@@ -39,9 +39,9 @@ credential files (read-only) ─┐
 | # | Asset | Why it matters |
 |---|---|---|
 | A1 | **Provider OAuth bearer tokens** (`~/.claude/.credentials.json`, `~/.codex/auth.json`) | Act-as-user credentials against the provider account/subscription. Primary asset. |
-| A2 | **Admin/org API keys** (optional billing mode) | Read access to org-wide usage/cost; higher-privilege than A1 in an org context. |
+| A2 | ~~Admin/org API keys~~ — **withdrawn (ADR-002)** | An official-billing mode would have held an org Admin key (org-wide usage/cost, higher-privilege than A1). Evaluated and **rejected**; the app never ingests such a key, so this asset does not exist in the system. Row retained to record the decision. |
 | A3 | **Integrity of the user's credential files** | Corruption or unintended writes could lock the user out or leak secrets. |
-| A4 | **Release artifact integrity** | A tampered binary could exfiltrate A1/A2. |
+| A4 | **Release artifact integrity** | A tampered binary could exfiltrate A1. |
 | A5 | **User trust / reputation of the project** | A public security-focused tool lives or dies on it. |
 
 ---

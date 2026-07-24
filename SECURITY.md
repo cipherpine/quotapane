@@ -76,7 +76,7 @@ Each invariant below is enforced in code and backed by a test. A change that wea
 
 - Sources are read-only: `~/.claude/.credentials.json`, `$CODEX_HOME/auth.json` (or `~/.codex/auth.json`), and optionally a credential file inside a named WSL distro.
 - Tokens live only in memory, wrapped in `Secret<T>`, zeroized after use.
-- Optional official-billing mode uses an Admin/org API key (`sk-ant-admin-…` / OpenAI org key) supplied by the user via environment variable or the OS keychain — **never** stored by the app in its config.
+- QuotaPane **never** ingests an organization Admin/org API key. An official-billing mode was evaluated and **rejected** (see `ARCHITECTURE.md`, ADR-002): holding that higher-privilege key would enlarge this trust boundary — the opposite of the project's purpose. The only credentials read are your own local subscription tokens, above.
 - The app treats these tokens as bearer credentials that can act as you against the provider. Anything reading them is inside your trust boundary; the project's job is to keep that boundary small and honest.
 
 ### Presenting as the official client (subscription mode)
@@ -90,9 +90,8 @@ The same applies to the Codex provider: its requests to `chatgpt.com` send the C
 ## Network / egress policy
 
 - Single HTTP chokepoint, deny-by-default allowlist:
-  - `api.anthropic.com` — subscription usage + fallback; official Admin API.
+  - `api.anthropic.com` — subscription usage + Messages-API rate-limit fallback.
   - `chatgpt.com` — Codex (ChatGPT-plan) subscription usage (verified against the open-source Codex CLI).
-  - `api.openai.com` — official OpenAI usage/costs API (opt-in billing mode only).
   - `api.github.com` — update **check only**, and only if the user enables it.
 - TLS required; optional certificate pinning for provider hosts.
 - Proxy off by default (see invariant 7).
