@@ -40,6 +40,15 @@ const NORMAL_COLOR: egui::Color32 = egui::Color32::from_rgb(46, 160, 67);
 const WARNING_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 162, 60);
 const CRITICAL_COLOR: egui::Color32 = egui::Color32::from_rgb(217, 62, 62);
 
+/// Slim custom titlebar — the window is borderless (`with_decorations(false)`),
+/// so it draws its own. ~24px tall.
+const TITLEBAR_HEIGHT: f32 = 24.0;
+/// Dark strip echoing the tray icon's tile (the tray's `TILE` slate), so the
+/// titlebar reads as the same product as the tray.
+const TITLEBAR_BG: egui::Color32 = egui::Color32::from_rgb(24, 27, 33);
+/// Near-white app-name text on the dark strip.
+const TITLEBAR_TEXT: egui::Color32 = egui::Color32::from_rgb(220, 223, 228);
+
 struct Args {
     /// Claude Code client version → `User-Agent: claude-code/<ver>`.
     client_version: String,
@@ -143,14 +152,35 @@ fn classify_failure(failure: Option<&str>) -> FailureDisplay {
     }
 }
 
-/// Format a reset countdown, e.g. "45s", "2m", "1h 2m".
-fn format_countdown(secs: u64) -> String {
+/// Format a used-fraction as a whole-number percent for the bar label:
+/// `Some(0.42)` → `"42%"`, `None` → `"--"`. Clamped to 0–100 so a fraction that
+/// (transiently) exceeds 1.0 never renders as `"101%"`.
+fn format_percent(fraction: Option<f64>) -> String {
+    match fraction {
+        None => "--".to_string(),
+        Some(f) => {
+            let pct = (f * 100.0).round().clamp(0.0, 100.0) as i64;
+            format!("{pct}%")
+        }
+    }
+}
+
+/// Format a reset countdown compactly for the small always-on-top window:
+/// `None` → `"--"`, under a minute → `"<1m"`, under an hour → `"12m"`, under a
+/// day → `"3h 12m"` (incl. `"2h 0m"` exactly on the hour), else days+hours →
+/// `"5d 4h"`.
+fn format_reset(remaining: Option<u64>) -> String {
+    let Some(secs) = remaining else {
+        return "--".to_string();
+    };
     if secs < 60 {
-        format!("{secs}s")
+        "<1m".to_string()
     } else if secs < 3600 {
         format!("{}m", secs / 60)
-    } else {
+    } else if secs < 86_400 {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
     }
 }
 
@@ -511,6 +541,83 @@ struct QuotaPaneApp {
 }
 
 impl QuotaPaneApp {
+    /// Hide the window (minimize-to-tray). On Windows/macOS the app lives on in
+    /// the tray; on Linux (no tray) it simply hides. Keeps the tray's toggle
+    /// state in sync so a later Show/Hide behaves correctly.
+    fn hide_window(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        if let Some(tray) = self.tray.as_mut() {
+            tray.visible = false;
+        }
+    }
+
+    /// Draw the slim custom titlebar: app name on the left, minimize + close on
+    /// the right, and the strip itself as a window-drag handle. Rendered on
+    /// every platform (Linux included). The buttons only *record* intent inside
+    /// the panel closure; the app acts on it after the closure returns, so no
+    /// `&mut self` is borrowed across the egui closure.
+    fn render_titlebar(&mut self, root_ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut minimize = false;
+        let mut close = false;
+
+        let frame = egui::Frame::new()
+            .fill(TITLEBAR_BG)
+            .inner_margin(egui::Margin {
+                left: 8,
+                right: 2,
+                top: 0,
+                bottom: 0,
+            });
+
+        egui::Panel::top("titlebar")
+            .exact_size(TITLEBAR_HEIGHT)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(frame)
+            .show(root_ui, |ui| {
+                // Whole-strip drag handle. Added first so the buttons drawn
+                // afterwards sit on top and keep their own clicks; dragging the
+                // empty strip (or the app name) moves the decoration-less window.
+                let strip = ui.interact(
+                    ui.max_rect(),
+                    ui.id().with("titlebar_drag"),
+                    egui::Sense::click_and_drag(),
+                );
+                if strip.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+
+                // Buttons pinned right (close is right-most); the app name fills
+                // the remaining space on the left.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if titlebar_button(ui, draw_close_glyph).clicked() {
+                        close = true;
+                    }
+                    if titlebar_button(ui, draw_minimize_glyph).clicked() {
+                        minimize = true;
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new("QuotaPane")
+                                .color(TITLEBAR_TEXT)
+                                .strong(),
+                        );
+                    });
+                });
+            });
+
+        if minimize {
+            self.hide_window(ctx);
+        }
+        if close {
+            // Exactly the OS-close path: the `logic()` interceptor hides to tray
+            // when the tray is active, or lets the close through (quit) under
+            // `--no-tray` / on Linux.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
     /// Refresh the tooltip and drain queued tray/menu events, acting on each.
     /// Runs from `logic`, so it keeps working even while the window is hidden.
     #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -593,6 +700,11 @@ impl eframe::App for QuotaPaneApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Slim custom titlebar first (a top panel): app name + minimize/close,
+        // and a window-drag handle. Takes its ~24px; the CentralPanel fills the
+        // rest below it.
+        self.render_titlebar(ui, &ctx);
 
         // The root `Ui` eframe hands to `App::ui` has no margin or background
         // (see `eframe::App::ui` docs) — a `CentralPanel` supplies both.
@@ -683,29 +795,59 @@ fn render_windows(ui: &mut egui::Ui, snapshot: &ProviderSnapshot, age: Option<Du
 fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow) {
     ui.horizontal(|ui| {
         ui.label(&window.label);
-        match window.used_fraction {
-            Some(fraction) => {
-                ui.add(
-                    egui::ProgressBar::new(fraction as f32)
-                        .desired_width(120.0)
-                        .fill(fraction_color(Some(fraction))),
-                );
-            }
-            None => {
-                ui.add(
-                    egui::ProgressBar::new(0.0)
-                        .desired_width(120.0)
-                        .fill(fraction_color(None))
-                        .text("?"),
-                );
-            }
-        }
-        let reset_text = match window.resets_in_secs {
-            Some(secs) => format!("resets in {}", format_countdown(secs)),
-            None => "resets in ?".to_string(),
-        };
-        ui.label(reset_text);
+        // The numeric percent rides on the bar itself; `--` when unknown (an
+        // unknown fraction also draws an empty gray bar).
+        ui.add(
+            egui::ProgressBar::new(window.used_fraction.unwrap_or(0.0) as f32)
+                .desired_width(120.0)
+                .fill(fraction_color(window.used_fraction))
+                .text(format_percent(window.used_fraction)),
+        );
+        // Compact reset countdown, e.g. "resets in 3h 12m"; `--` when unknown.
+        ui.label(format!("resets in {}", format_reset(window.resets_in_secs)));
     });
+}
+
+/// Paint a close "✕" into `rect` with `stroke`. Painted (not a font glyph),
+/// mirroring egui's own window close button, so it never depends on font
+/// coverage — no tofu risk.
+fn draw_close_glyph(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    painter.line_segment([rect.left_top(), rect.right_bottom()], stroke);
+    painter.line_segment([rect.right_top(), rect.left_bottom()], stroke);
+}
+
+/// Paint a minimize "–" (one horizontal bar) into `rect` with `stroke`.
+fn draw_minimize_glyph(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    let y = rect.center().y;
+    painter.line_segment(
+        [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+        stroke,
+    );
+}
+
+/// A small square titlebar control filling the strip's height. Paints `draw`
+/// with the interaction's foreground stroke over a subtle hover background, and
+/// returns the click response.
+fn titlebar_button(
+    ui: &mut egui::Ui,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, egui::Stroke),
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(TITLEBAR_HEIGHT, TITLEBAR_HEIGHT),
+        egui::Sense::click(),
+    );
+    // Copy the (Copy) visual fields out so the &Style borrow ends before we paint.
+    let (stroke, hover_fill) = {
+        let visuals = ui.style().interact(&response);
+        (visuals.fg_stroke, visuals.weak_bg_fill)
+    };
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 2.0, hover_fill);
+    }
+    // Inset the glyph so it reads as a small icon, not edge-to-edge.
+    let glyph = rect.shrink(rect.height() * 0.33);
+    draw(ui.painter(), glyph, stroke);
+    response
 }
 
 fn main() -> ExitCode {
@@ -945,31 +1087,85 @@ mod tests {
         );
     }
 
-    // --- format_countdown ---
+    // --- format_percent ---
 
     #[test]
-    fn format_countdown_seconds_only() {
-        assert_eq!(format_countdown(45), "45s");
+    fn format_percent_known_fraction() {
+        assert_eq!(format_percent(Some(0.42)), "42%");
     }
 
     #[test]
-    fn format_countdown_minutes_only() {
-        assert_eq!(format_countdown(125), "2m");
+    fn format_percent_unknown_is_double_dash() {
+        assert_eq!(format_percent(None), "--");
     }
 
     #[test]
-    fn format_countdown_hours_and_minutes() {
-        assert_eq!(format_countdown(3723), "1h 2m");
+    fn format_percent_zero() {
+        assert_eq!(format_percent(Some(0.0)), "0%");
     }
 
     #[test]
-    fn format_countdown_exact_hour() {
-        assert_eq!(format_countdown(7200), "2h 0m");
+    fn format_percent_clamps_above_one_to_100() {
+        assert_eq!(format_percent(Some(1.5)), "100%");
     }
 
     #[test]
-    fn format_countdown_zero() {
-        assert_eq!(format_countdown(0), "0s");
+    fn format_percent_clamps_below_zero_to_0() {
+        assert_eq!(format_percent(Some(-0.2)), "0%");
+    }
+
+    #[test]
+    fn format_percent_rounds_to_nearest_whole() {
+        assert_eq!(format_percent(Some(0.426)), "43%");
+        assert_eq!(format_percent(Some(0.424)), "42%");
+    }
+
+    // --- format_reset ---
+
+    #[test]
+    fn format_reset_unknown_is_double_dash() {
+        assert_eq!(format_reset(None), "--");
+    }
+
+    #[test]
+    fn format_reset_zero_is_sub_minute() {
+        assert_eq!(format_reset(Some(0)), "<1m");
+    }
+
+    #[test]
+    fn format_reset_under_a_minute_is_sub_minute() {
+        assert_eq!(format_reset(Some(45)), "<1m");
+        assert_eq!(format_reset(Some(59)), "<1m");
+    }
+
+    #[test]
+    fn format_reset_minutes_only() {
+        assert_eq!(format_reset(Some(60)), "1m");
+        assert_eq!(format_reset(Some(720)), "12m");
+        assert_eq!(format_reset(Some(3599)), "59m");
+    }
+
+    #[test]
+    fn format_reset_hours_and_minutes() {
+        assert_eq!(format_reset(Some(3600)), "1h 0m");
+        assert_eq!(format_reset(Some(3723)), "1h 2m");
+    }
+
+    #[test]
+    fn format_reset_exact_hour() {
+        assert_eq!(format_reset(Some(7200)), "2h 0m");
+    }
+
+    #[test]
+    fn format_reset_just_under_a_day() {
+        assert_eq!(format_reset(Some(86_399)), "23h 59m");
+    }
+
+    #[test]
+    fn format_reset_multi_day() {
+        assert_eq!(format_reset(Some(86_400)), "1d 0h");
+        // 5 days 4 hours = 5*86400 + 4*3600 = 446_400.
+        assert_eq!(format_reset(Some(446_400)), "5d 4h");
     }
 
     // --- format_age ---
