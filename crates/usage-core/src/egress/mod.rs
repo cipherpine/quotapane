@@ -43,14 +43,12 @@ use std::time::Duration;
 /// in review, and any provider host must be verified against real provider
 /// behavior — never guessed.
 pub const ALLOWED_HOSTS: &[&str] = &[
-    // Anthropic: subscription usage + Messages-API header fallback; official Admin API (M4).
+    // Anthropic: subscription usage + Messages-API rate-limit header fallback.
     "api.anthropic.com",
     // Codex (ChatGPT-plan) subscription usage: GET /backend-api/wham/usage.
     // Verified M3 against openai/codex source (codex-rs/backend-client) —
     // ChatGPT-plan usage is served by chatgpt.com, NOT api.openai.com.
     "chatgpt.com",
-    // OpenAI: official usage/costs API — opt-in billing mode only (M4).
-    "api.openai.com",
     // GitHub: release update *check* only, and only when the user enables it (invariant 5).
     "api.github.com",
 ];
@@ -284,6 +282,7 @@ mod tests {
             "chatgpt.com.evil.com", // M3 host as a prefix label
             "chatgpt.com:8443",     // port smuggling on the M3 host
             "openai.com",           // bare apex is NOT allowlisted
+            "api.openai.com",       // withdrawn with M4 (ADR-002) — no longer allowlisted
             "localhost",
             "127.0.0.1",
             "",

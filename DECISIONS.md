@@ -11,7 +11,7 @@
 ## 1. Settled decisions (do not relitigate)
 
 - License: dual **MIT OR Apache-2.0**. Placeholder name **QuotaPane** stays until the pre-release naming decision (owner-only, M6).
-- v1 scope: **Claude + Codex subscription quota only.** Official Admin/usage billing APIs are opt-in advanced mode, deferred to M4.
+- v1 scope: **Claude + Codex subscription quota only.** Official Admin/usage billing APIs are **out of scope (ADR-002, 2026-07-23):** admin-key-only, unavailable to individual subscribers, no audience overlap, and holding an org-admin key would break the trust-boundary thesis. Any future cost view is token-free via `OtelSource` (M5), never an admin key.
 - Undocumented endpoints are **in**, gated behind the runtime disclaimer, failing closed on schema drift. QuotaPane sends official-client User-Agents (`claude-code/<ver>`, and the Codex equivalent) — a deliberate, disclosed choice (README + SECURITY.md).
 - Stack: Rust + egui/eframe (glow, no wgpu; ADR-001 rejected Tauri). `ureq` + `rustls`, synchronous, thread-based poller (no tokio). Windows is the primary target; macOS/Linux best-effort.
 - Expired tokens: **error + instruct** ("run `claude`/`codex` to refresh"). The app never writes credential files; refresh is delegated to official CLIs.
@@ -21,9 +21,9 @@
 
 ## 2. Roadmap state
 
-M0 (skeleton + trust boundary) ✅ · M1 (Claude provider, headless) ✅ · M2 (live window, visually confirmed) ✅ · M3 (Codex provider + multi-provider window) ✅ **(visually accepted 2026-07-20 — Codex section renders)** · **M3.5 tray icon — next (top-tier review of the tray-icon dependency BEFORE any code)** · M4 opt-in official billing · M5 depth (history, forecast, thresholds; also the deferred `additional_rate_limits` per-model breakdown and a Codex User-Agent flag in the CLI) · M6 ship (naming, packaging, signed releases, repo public — decision-dense, stays interactive).
+M0 (skeleton + trust boundary) ✅ · M1 (Claude provider, headless) ✅ · M2 (live window) ✅ · M3 (Codex + multi-provider window) ✅ **(visually accepted 2026-07-20 — Codex section renders)** · M3.5 (system tray) ✅ **(visually accepted 2026-07-24)** · window look pass (percent + reset countdown, slim titlebar) ✅ **(visually accepted 2026-07-24)** · **M4 (official billing) — WITHDRAWN (ADR-002).** · **M5 depth — underway** (first slice M5a: per-model breakdown via a collapsible toggle, speced 2026-07-24; then history/sparklines, forecast-to-limit, thresholds/alerts, a Codex User-Agent flag in the CLI, and the optional token-free `OtelSource`) · M6 ship (naming, packaging, signed releases, repo public — decision-dense, interactive).
 
-> Queued design item (owner request, 2026-07-20): after M3.5, revisit the Usage window's **look** — likely add percentage labels and/or other detail to make it more visually useful and appealing. This is a `usage-ui`-only polish pass (non-boundary); scope it as its own goal prompt when M3.5 lands.
+> Design note: the Usage-window look pass (per-bar percent + reset countdown, slim titlebar with minimize/close) shipped 2026-07-23 (commits b186446 / c62364a).
 
 ## 3. Pre-approved defaults (no need to ask)
 
