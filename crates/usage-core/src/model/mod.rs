@@ -21,10 +21,6 @@ pub enum ProviderId {
     ClaudeSubscription,
     /// OpenAI Codex subscription quota. (M3 — endpoint verified then, not guessed.)
     CodexSubscription,
-    /// Anthropic official Usage & Cost Admin API (opt-in, org accounts only). (M4)
-    AnthropicAdmin,
-    /// OpenAI official usage/costs API (opt-in, org key). (M4)
-    OpenAiUsage,
 }
 
 /// A quota window (e.g. Claude "5-hour" or "weekly"), normalized.

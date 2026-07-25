@@ -105,8 +105,8 @@ trait UsageProvider {
 Implementations:
 - `ClaudeSubscription` — OAuth usage endpoint + Messages-API rate-limit-header fallback.
 - `CodexSubscription` — OpenAI Codex usage endpoint.
-- ~~`AnthropicAdmin`~~ *(withdrawn — ADR-002)* — would have needed an org admin key; out of scope. The `ProviderId` variant is slated for removal.
-- ~~`OpenAiUsage`~~ *(withdrawn — ADR-002)* — would have needed an org admin key; out of scope. The `ProviderId` variant is slated for removal.
+- ~~`AnthropicAdmin`~~ *(withdrawn — ADR-002)* — would have needed an org admin key; out of scope. The `ProviderId` variant was removed 2026-07-25.
+- ~~`OpenAiUsage`~~ *(withdrawn — ADR-002)* — would have needed an org admin key; out of scope. The `ProviderId` variant was removed 2026-07-25.
 - `OtelSource` *(opt-in, advanced; M5)* — reads from your **existing** local OTEL/Prometheus endpoint instead of calling providers directly (keeps tokens out of this tool entirely). Per ADR-002 this is the **only** acceptable path to any cost/spend view, since it needs no admin key.
 
 **`poller`** — Thread-based scheduler (one lightweight thread per provider; amended from async/`tokio` in M1 — the `ureq`/`rustls` sync stack was chosen to keep the trust boundary's dependency tree minimal, and 2–4 providers don't need an async runtime). Per-provider, staggered. Adaptive intervals: fast (~5 min) during active use, normal (~7 min), slow (~20 min) when idle, snap to imminent quota resets, exponential backoff on `429`. Emits normalized snapshots over a channel to the UI. Tokens are loaded lazily, held only in memory, zeroized after use.
