@@ -280,3 +280,105 @@ dependency added. `git diff --check` clean; index blobs verified byte-exactly CR
   `additional_rate_limits`.
 - **Milestone acceptance** (§4.8). `DECISIONS.md` records M5a as implemented and awaiting
   visual acceptance — deliberately not ✅.
+
+---
+
+# M5a-fix — two-line per-model rows (2026-07-25)
+
+Follow-up to the above, same day. Base: `main` at `34e6441`. Non-§4.1 throughout;
+`crates/usage-ui/src/main.rs` was the only production file changed.
+
+## 7. The defect
+
+The owner's visual check found the per-model row **clipped at the right edge**: the reset
+countdown ran off the fixed 320px window.
+
+`render_window_row` lays out `label → ProgressBar(desired_width 120) → "resets in …"` on
+one line. That fits the two-to-seven-character headline labels it was written for (`5h`,
+`7d`), but not an indented `GPT-5.3-Codex-Spark`.
+
+**Measured after the fact: the single-line row wanted 358.9px inside the 304px the panel
+actually offers** — an overflow of ~55px, matching the owner's estimate of "roughly 355px
+inside 320".
+
+### Why every test passed anyway
+
+This is the part worth remembering. M5a shipped with 130 green tests, and **not one of
+them could have caught this**: every M5a test asserted on *parsed fixtures*, and a fixture
+is never laid out. The provider tests proved `"GPT-5.3-Codex-Spark"` arrives in
+`per_model` with the right fraction; the UI tests proved the pane starts collapsed and the
+panes toggle independently. Nothing measured whether a row *fits*. The fixture passed
+precisely because it never rendered.
+
+## 8. The fix
+
+**Per-model rows are now two lines** — the model label on its own line, then the bar and
+reset countdown inset beneath it — via a new `render_per_model_row`.
+`render_window_row` was **not modified**: the headline rows are visually accepted and
+still render byte-identically. (For the same reason the shared bar width was left as a
+literal `120.0` in both functions rather than extracted into a constant, which would have
+required editing the accepted function. A comment in each notes they must stay in step.)
+
+Stacking is **length-independent**, which is the point: it holds for any model name.
+Widening the label column would only have moved the cliff, and model names trend longer.
+
+Kept per spec: `desired_width(120.0)`, `fraction_color`, `format_percent`, and the
+`"resets in {}"` phrasing, so a per-model gauge stays comparable with a headline gauge.
+The label renders `.small()` in the weak text color so the two lines read as one
+subordinate row rather than two unrelated ones.
+
+### Vertical budget
+
+The central panel's content is now wrapped in an `egui::ScrollArea::vertical()`. Two-line
+rows double the per-model height cost (~34px each, measured) against a fixed,
+non-resizable 240px window with no scroll: enough models — or Claude also reporting
+per-model windows — would push the age footer out of the window with no way to reach it.
+
+It is a pure safety net: egui shows no scroll bar while content fits, so **nothing changes
+in any state the owner has already accepted**. One deviation from a naive reading of the
+instruction, made deliberately: `ScrollSource`'s `drag` is set to `DragScroll::Never`.
+egui 0.35 defaults it to `OnTouch`, which on a touch-capable Windows machine would turn a
+drag on the pane background into a scroll and steal the only gesture that moves this
+decoration-less window. Wheel and scroll bar stay enabled.
+
+## 9. Tests — the real change
+
+The prompt expected little to be assertable ("that `render_per_model_row` exists and is
+what the expanded branch calls"). That turned out to be too pessimistic: **egui can be
+laid out headlessly**, so the layout is now measured directly.
+
+A `lay_out` helper renders into a headless replica of the real window — same fixed size,
+same `CentralPanel`, same `ScrollArea` — and reports the width the content occupied
+against the width the window actually offers (measured, not hard-coded, so the assertions
+self-calibrate if a margin changes).
+
+Deliberately **not** `egui::__run_test_ui`: that helper installs `FontDefinitions::empty()`
+to save CPU, so every string measures ~0 wide and a width assertion made through it would
+pass no matter how far a row overflowed — it would have recreated the exact blind spot
+that let this ship. A default `Context` keeps egui's real fonts.
+
+| Test | What it pins |
+|---|---|
+| `per_model_row_fits_the_window` | the clipping label from the fixture now fits |
+| `per_model_row_fits_for_any_label_length` | a 47-char name still fits — length-independence |
+| `single_line_layout_would_not_fit_which_is_why_rows_stack` | the counterfactual: the one-line layout *does* overflow. Fails if anyone "simplifies" the two-line row back |
+| `headline_rows_still_fit` | the untouched accepted rows stay fitting |
+| `expanded_pane_fits_the_window_width` | integration — and the strongest available proof the expanded branch calls the two-line renderer, since calling the old one would overflow |
+| `several_expanded_models_outgrow_the_window_height` | why the `ScrollArea` exists, measured: six models exceed the height the panel can ever have |
+| `per_model_rows_use_the_dedicated_two_line_renderer` | the signature the expanded branch depends on |
+
+No existing assertion was weakened. `panes_start_collapsed`,
+`panes_expand_independently`, and both tray tests stay green.
+
+## 10. Verification
+
+`cargo clean -p usage-core` (610 files / 148 MiB) first, then all zero-exit:
+`fmt --all --check` → `build --locked` → `clippy --workspace --all-targets --locked -D
+warnings` → `test --workspace`. **137 tests pass** (cli 20, core 53, ui 64).
+
+`git status` showed `crates/usage-ui/src/main.rs` as the only modified file — §4.1 paths
+(`egress/**`, `credentials/**`, `SECURITY.md`, `THREAT_MODEL.md`, `deny.toml`, `.github/**`,
+`.cargo/**`, `.claude/**`) and `Cargo.lock` all untouched.
+
+No screenshots; no claim about appearance. M5a remains "awaiting visual acceptance" in
+`DECISIONS.md` — still no ✅.
