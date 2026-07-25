@@ -59,6 +59,14 @@ const TITLEBAR_TEXT: egui::Color32 = egui::Color32::from_rgb(220, 223, 228);
 /// Caption beside the per-model disclosure triangle.
 const PER_MODEL_CAPTION: &str = "per-model";
 
+/// The window's fixed inner size. It is **not resizable**, so every layout has
+/// to fit inside this — there is no user escape hatch when content overflows.
+const WINDOW_WIDTH: f32 = 320.0;
+const WINDOW_HEIGHT: f32 = 240.0;
+
+/// How far a per-model row's bar line is inset under its model label.
+const PER_MODEL_ROW_INDENT: f32 = 8.0;
+
 struct Args {
     /// Claude Code client version → `User-Agent: claude-code/<ver>`.
     client_version: String,
@@ -732,12 +740,34 @@ impl eframe::App for QuotaPaneApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
-            for (i, pane) in self.panes.iter_mut().enumerate() {
-                if i > 0 {
-                    ui.separator();
-                }
-                render_pane(ui, pane);
-            }
+            // Vertical safety net. The window is a fixed 240px with no resize,
+            // so content that outgrows it has nowhere to go: expanding several
+            // per-model rows (two lines each), or Claude also reporting
+            // per-model windows, would push the age footer out of the window
+            // with no way to reach it. This converts that silent truncation
+            // into a scroll.
+            //
+            // Deliberately invisible until needed: egui shows no scroll bar
+            // while the content fits, which is every state accepted so far, so
+            // this changes nothing the owner has already signed off on.
+            //
+            // `DragScroll::Never` matters — the default is `OnTouch`, and on a
+            // touch-capable Windows machine that would turn a drag on the pane
+            // background into a scroll, stealing the only gesture that moves
+            // this decoration-less window. Wheel and scroll bar stay enabled.
+            egui::ScrollArea::vertical()
+                .scroll_source(egui::containers::scroll_area::ScrollSource {
+                    drag: egui::containers::scroll_area::DragScroll::Never,
+                    ..Default::default()
+                })
+                .show(ui, |ui| {
+                    for (i, pane) in self.panes.iter_mut().enumerate() {
+                        if i > 0 {
+                            ui.separator();
+                        }
+                        render_pane(ui, pane);
+                    }
+                });
         });
     }
 
@@ -814,7 +844,7 @@ fn render_windows(
             // distinct ids.
             ui.indent(("per_model", snapshot.provider), |ui| {
                 for window in &snapshot.per_model {
-                    render_window_row(ui, window);
+                    render_per_model_row(ui, window);
                 }
             });
         }
@@ -849,6 +879,47 @@ fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow) {
                 .text(format_percent(window.used_fraction)),
         );
         // Compact reset countdown, e.g. "resets in 3h 12m"; `--` when unknown.
+        ui.label(format!("resets in {}", format_reset(window.resets_in_secs)));
+    });
+}
+
+/// Render one per-model row as **two lines**: the model's label, then the bar
+/// and reset countdown inset beneath it.
+///
+/// Separate from [`render_window_row`] on purpose, and that function is left
+/// untouched: the headline rows are visually accepted and must keep rendering
+/// exactly as they do. Their single-line layout works because a headline label
+/// is two to seven characters (`5h`, `7d`); a provider's model name on that
+/// same line (`GPT-5.3-Codex-Spark`, indented under the disclosure) wanted
+/// roughly 355px inside a fixed 320px window and pushed the reset countdown
+/// off the right edge.
+///
+/// Stacking is **length-independent**: it holds for any model name, however
+/// long. Widening the label column instead would only move the cliff, and
+/// model names trend longer over time.
+///
+/// The label is small + weak so the two lines read as one subordinate row
+/// rather than as two unrelated ones. The bar keeps the headline row's
+/// `desired_width(120.0)`, `fraction_color`, `format_percent`, and the
+/// `"resets in {}"` phrasing, so a per-model gauge stays comparable at a
+/// glance with a headline gauge.
+fn render_per_model_row(ui: &mut egui::Ui, window: &QuotaWindow) {
+    let weak = ui.visuals().weak_text_color();
+    ui.label(
+        egui::RichText::new(window.label.as_str())
+            .small()
+            .color(weak),
+    );
+    ui.horizontal(|ui| {
+        ui.add_space(PER_MODEL_ROW_INDENT);
+        // 120.0 deliberately matches `render_window_row`'s bar; that function
+        // is not edited to share a constant, so keep the two in step by hand.
+        ui.add(
+            egui::ProgressBar::new(window.used_fraction.unwrap_or(0.0) as f32)
+                .desired_width(120.0)
+                .fill(fraction_color(window.used_fraction))
+                .text(format_percent(window.used_fraction)),
+        );
         ui.label(format!("resets in {}", format_reset(window.resets_in_secs)));
     });
 }
@@ -981,7 +1052,7 @@ fn main() -> ExitCode {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([320.0, 240.0])
+            .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
             .with_decorations(false)
             .with_resizable(false)
             .with_always_on_top(),
@@ -1125,6 +1196,233 @@ mod tests {
     fn provider_labels_map_to_titles() {
         assert_eq!(provider_label(ProviderId::ClaudeSubscription), "Claude");
         assert_eq!(provider_label(ProviderId::CodexSubscription), "Codex");
+    }
+
+    use usage_core::model::SnapshotSource;
+
+    // --- layout: the fixed window is the whole budget (M5a-fix) ---
+    //
+    // These exist because the clipped per-model row shipped with a full green
+    // test suite: every M5a test asserted on parsed fixtures, and a fixture is
+    // never laid out, so nothing measured whether a row actually fits. These
+    // do measure.
+
+    /// What a layout wanted, versus what the window actually offers.
+    struct Laid {
+        /// Width the content occupied.
+        width: f32,
+        /// Height the content occupied.
+        height: f32,
+        /// Width available inside the real window's panel — measured, not
+        /// assumed, so the assertions self-calibrate if a margin changes.
+        available_width: f32,
+    }
+
+    /// Lay `add_contents` out in a headless replica of the real window: same
+    /// fixed size, same `CentralPanel`, same `ScrollArea`.
+    ///
+    /// Deliberately **not** `egui::__run_test_ui`, which installs empty fonts
+    /// to save CPU. Under empty fonts every string measures ~0 wide, so a
+    /// width assertion made through it would pass no matter how far a row
+    /// overflowed — it would recreate exactly the blind spot that let this bug
+    /// ship. A default `Context` keeps egui's real fonts and real text
+    /// extents.
+    fn lay_out(mut add_contents: impl FnMut(&mut egui::Ui)) -> Laid {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(WINDOW_WIDTH, WINDOW_HEIGHT),
+            )),
+            ..Default::default()
+        };
+        let (mut width, mut height, mut available_width) = (0.0, 0.0, 0.0);
+        // Two frames: the first warms the font atlas and the id-keyed state
+        // the indent and scroll area allocate, so the second measures a
+        // settled layout.
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        available_width = ui.max_rect().width();
+                        add_contents(ui);
+                        width = ui.min_rect().width();
+                        height = ui.min_rect().height();
+                    });
+                });
+            });
+        }
+        Laid {
+            width,
+            height,
+            available_width,
+        }
+    }
+
+    /// A per-model window with a realistic provider model name.
+    fn model_window(label: &str) -> QuotaWindow {
+        QuotaWindow {
+            label: label.to_string(),
+            used_fraction: Some(0.42),
+            // 5d 4h — the widest reset string the formatter produces.
+            resets_in_secs: Some(446_400),
+        }
+    }
+
+    #[test]
+    fn per_model_row_fits_the_window() {
+        // The exact label from the Codex fixture that clipped in the window.
+        let laid = lay_out(|ui| {
+            ui.indent("t", |ui| {
+                render_per_model_row(ui, &model_window("GPT-5.3-Codex-Spark"))
+            });
+        });
+        assert!(
+            laid.width <= laid.available_width,
+            "per-model row wanted {}px inside {}px",
+            laid.width,
+            laid.available_width
+        );
+    }
+
+    #[test]
+    fn per_model_row_fits_for_any_label_length() {
+        // The point of stacking: length-independence. Model names trend
+        // longer, and a fix that merely bought some pixels would fail here.
+        let absurd = "Claude-Opus-5-20260501-Extended-Thinking-Preview";
+        let laid = lay_out(|ui| {
+            ui.indent("t", |ui| render_per_model_row(ui, &model_window(absurd)));
+        });
+        assert!(
+            laid.width <= laid.available_width,
+            "long label wanted {}px inside {}px",
+            laid.width,
+            laid.available_width
+        );
+    }
+
+    #[test]
+    fn single_line_layout_would_not_fit_which_is_why_rows_stack() {
+        // Pins the defect itself. `render_window_row` is correct for the
+        // headline labels it serves, but a model name on that one line
+        // overflows — this is the counterfactual that justifies
+        // `render_per_model_row` existing at all, and it fails if anyone
+        // "simplifies" the two-line row back to one line.
+        let laid = lay_out(|ui| {
+            ui.indent("t", |ui| {
+                render_window_row(ui, &model_window("GPT-5.3-Codex-Spark"))
+            });
+        });
+        assert!(
+            laid.width > laid.available_width,
+            "expected the single-line layout to overflow; it wanted {}px inside {}px",
+            laid.width,
+            laid.available_width
+        );
+    }
+
+    #[test]
+    fn headline_rows_still_fit() {
+        // `render_window_row` is untouched; guard that it stays fitting for
+        // the labels it actually serves.
+        for label in ["5h", "7d"] {
+            let laid = lay_out(|ui| {
+                render_window_row(
+                    ui,
+                    &QuotaWindow {
+                        label: label.to_string(),
+                        used_fraction: Some(0.33),
+                        resets_in_secs: Some(446_400),
+                    },
+                )
+            });
+            assert!(
+                laid.width <= laid.available_width,
+                "headline row {label} wanted {}px inside {}px",
+                laid.width,
+                laid.available_width
+            );
+        }
+    }
+
+    #[test]
+    fn expanded_pane_fits_the_window_width() {
+        // Integration guard, and the strongest available proof that the
+        // expanded branch calls `render_per_model_row`: if it still called
+        // `render_window_row`, these labels would overflow exactly as
+        // `single_line_layout_would_not_fit_which_is_why_rows_stack` shows.
+        let snapshot = ProviderSnapshot {
+            provider: ProviderId::CodexSubscription,
+            taken_at_unix_secs: 0,
+            windows: vec![
+                QuotaWindow {
+                    label: "5h".to_string(),
+                    used_fraction: Some(0.25),
+                    resets_in_secs: Some(3600),
+                },
+                QuotaWindow {
+                    label: "7d".to_string(),
+                    used_fraction: Some(0.18),
+                    resets_in_secs: Some(86_400),
+                },
+            ],
+            per_model: vec![
+                model_window("GPT-5.3-Codex-Spark"),
+                model_window("GPT-5.3-Codex-Max"),
+            ],
+            source: SnapshotSource::UsageEndpoint,
+        };
+        let laid = lay_out(|ui| {
+            render_windows(ui, &snapshot, Some(Duration::from_secs(30)), true);
+        });
+        assert!(
+            laid.width <= laid.available_width,
+            "expanded pane wanted {}px inside {}px",
+            laid.width,
+            laid.available_width
+        );
+    }
+
+    #[test]
+    fn several_expanded_models_outgrow_the_window_height() {
+        // Why the `ScrollArea` is there, measured rather than asserted.
+        //
+        // Two-line rows cost ~34px each, and the central panel can never be
+        // taller than the window minus the titlebar (less its own margins
+        // still). One provider expanding six models already exceeds that, and
+        // the real window splits this budget across *two* panes, so the true
+        // threshold is lower again. Without the scroll area, overflow silently
+        // eats the age footer with no way to reach it.
+        let usable_height = WINDOW_HEIGHT - TITLEBAR_HEIGHT;
+        let snapshot = ProviderSnapshot {
+            provider: ProviderId::CodexSubscription,
+            taken_at_unix_secs: 0,
+            windows: vec![QuotaWindow {
+                label: "5h".to_string(),
+                used_fraction: Some(0.25),
+                resets_in_secs: Some(3600),
+            }],
+            per_model: (0..6)
+                .map(|i| model_window(&format!("GPT-5.3-Codex-Variant-{i}")))
+                .collect(),
+            source: SnapshotSource::UsageEndpoint,
+        };
+        let laid = lay_out(|ui| {
+            render_windows(ui, &snapshot, Some(Duration::from_secs(30)), true);
+        });
+        assert!(
+            laid.height > usable_height,
+            "expected {}px of content to exceed the {usable_height}px the panel can have",
+            laid.height
+        );
+        // Width still holds even in the overflowing case.
+        assert!(laid.width <= laid.available_width);
+    }
+
+    #[test]
+    fn per_model_rows_use_the_dedicated_two_line_renderer() {
+        // The signature the expanded branch depends on.
+        let _: fn(&mut egui::Ui, &QuotaWindow) = render_per_model_row;
     }
 
     // --- per-model disclosure state (M5a) ---
