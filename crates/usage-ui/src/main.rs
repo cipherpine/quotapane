@@ -106,8 +106,6 @@ fn provider_label(id: ProviderId) -> &'static str {
     match id {
         ProviderId::ClaudeSubscription => "Claude",
         ProviderId::CodexSubscription => "Codex",
-        ProviderId::AnthropicAdmin => "Anthropic Admin",
-        ProviderId::OpenAiUsage => "OpenAI",
     }
 }
 
@@ -118,8 +116,6 @@ fn not_signed_in_line(id: ProviderId) -> &'static str {
     match id {
         ProviderId::ClaudeSubscription => "Claude: not signed in — run `claude` to sign in",
         ProviderId::CodexSubscription => "Codex: not signed in — run `codex login`",
-        ProviderId::AnthropicAdmin => "Anthropic Admin: not configured",
-        ProviderId::OpenAiUsage => "OpenAI: not configured",
     }
 }
 
@@ -1031,11 +1027,6 @@ mod tests {
     fn provider_labels_map_to_titles() {
         assert_eq!(provider_label(ProviderId::ClaudeSubscription), "Claude");
         assert_eq!(provider_label(ProviderId::CodexSubscription), "Codex");
-        assert_eq!(
-            provider_label(ProviderId::AnthropicAdmin),
-            "Anthropic Admin"
-        );
-        assert_eq!(provider_label(ProviderId::OpenAiUsage), "OpenAI");
     }
 
     // --- not_signed_in_line: quiet-line mapping ---

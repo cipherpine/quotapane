@@ -62,8 +62,6 @@ fn provider_cli_name(id: ProviderId) -> &'static str {
     match id {
         ProviderId::ClaudeSubscription => "claude",
         ProviderId::CodexSubscription => "codex",
-        ProviderId::AnthropicAdmin => "anthropic-admin",
-        ProviderId::OpenAiUsage => "openai",
     }
 }
 
@@ -130,8 +128,6 @@ fn build_provider(id: ProviderId, client_version: &str) -> Option<Box<dyn UsageP
             CodexSubscription::with_default_path(CODEX_DEFAULT_USER_AGENT)
                 .map(|p| Box::new(p) as Box<dyn UsageProvider>)
         }
-        // M4 official-billing providers are not wired into the CLI yet.
-        ProviderId::AnthropicAdmin | ProviderId::OpenAiUsage => None,
     }
 }
 
