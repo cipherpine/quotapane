@@ -43,7 +43,24 @@ pub struct ProviderSnapshot {
     /// Unix timestamp (seconds) when the poll completed.
     pub taken_at_unix_secs: u64,
     /// Quota windows reported by the provider.
+    ///
+    /// These are the *headline* windows — the small set that describes the
+    /// subscription as a whole (e.g. Claude's `5h` and `7d`). Anything scoped
+    /// to a single model belongs in [`Self::per_model`] instead.
     pub windows: Vec<QuotaWindow>,
+    /// Per-model quota windows, when the provider reports any.
+    ///
+    /// Deliberately the same [`QuotaWindow`] type as [`Self::windows`]: a
+    /// per-model row *is* a quota window, just scoped to one model, so it
+    /// renders through the same code path and needs no parallel struct. The
+    /// `label` carries the provider's own model name verbatim (e.g.
+    /// `"7d-opus"`, `"GPT-5.3-Codex-Spark"`) — no label parsing is done or
+    /// implied anywhere downstream.
+    ///
+    /// Empty is the normal case for a provider that reports no per-model
+    /// data, which is why there is no `Option` wrapper: "none reported" and
+    /// "none exist" are the same thing to every consumer.
+    pub per_model: Vec<QuotaWindow>,
     /// Whether the data came from the primary endpoint or a fallback.
     pub source: SnapshotSource,
 }

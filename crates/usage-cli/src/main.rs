@@ -385,6 +385,57 @@ mod tests {
         assert!(parse_args(args(&["--once", "--provider"])).is_err());
     }
 
+    // --- --json surface (M5a) ---
+
+    #[test]
+    fn json_output_includes_per_model() {
+        // The CLI serializes `ProviderSnapshot` wholesale rather than
+        // hand-building its JSON, so `per_model` rides along for free. This
+        // pins that: if anyone replaces the derive with a hand-rolled writer,
+        // the field has to be carried deliberately.
+        use usage_core::model::{QuotaWindow, SnapshotSource};
+
+        let snapshot = ProviderSnapshot {
+            provider: ProviderId::ClaudeSubscription,
+            taken_at_unix_secs: 1_784_000_000,
+            windows: vec![QuotaWindow {
+                label: "5h".to_string(),
+                used_fraction: Some(0.25),
+                resets_in_secs: Some(3600),
+            }],
+            per_model: vec![QuotaWindow {
+                label: "7d-opus".to_string(),
+                used_fraction: Some(0.5),
+                resets_in_secs: None,
+            }],
+            source: SnapshotSource::UsageEndpoint,
+        };
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains("\"per_model\""), "missing per_model: {json}");
+        assert!(json.contains("7d-opus"));
+
+        // And the `--provider all` array form carries it too.
+        let array = serde_json::to_string(&vec![snapshot]).unwrap();
+        assert!(array.contains("\"per_model\""));
+    }
+
+    #[test]
+    fn json_output_keeps_per_model_present_when_empty() {
+        // No `skip_serializing_if`: consumers can rely on the key existing.
+        use usage_core::model::SnapshotSource;
+
+        let snapshot = ProviderSnapshot {
+            provider: ProviderId::CodexSubscription,
+            taken_at_unix_secs: 0,
+            windows: vec![],
+            per_model: vec![],
+            source: SnapshotSource::UsageEndpoint,
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains("\"per_model\":[]"), "was: {json}");
+    }
+
     // --- --debug-raw parsing (new) ---
 
     #[test]

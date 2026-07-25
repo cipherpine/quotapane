@@ -274,6 +274,7 @@ mod tests {
                 provider: ProviderId::ClaudeSubscription,
                 taken_at_unix_secs: 0,
                 windows: vec![],
+                per_model: vec![],
                 source: SnapshotSource::UsageEndpoint,
             })
         }
