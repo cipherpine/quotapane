@@ -169,31 +169,50 @@ struct RawWindow {
     resets_at: Option<String>,
 }
 
+/// Normalize one raw window into a [`QuotaWindow`] under `label`.
+fn to_quota_window(label: &str, w: RawWindow, now_unix_secs: u64) -> QuotaWindow {
+    QuotaWindow {
+        label: label.to_string(),
+        used_fraction: w.utilization.map(|u| (u / 100.0).clamp(0.0, 1.0)),
+        resets_in_secs: w
+            .resets_at
+            .as_deref()
+            .and_then(parse_rfc3339_to_unix)
+            .map(|reset| reset.saturating_sub(now_unix_secs as i64).max(0) as u64),
+    }
+}
+
 /// Build a normalized, non-secret snapshot from a usage response.
+///
+/// The endpoint reports four windows; they split by *scope*, not by kind.
+/// `five_hour`/`seven_day` describe the subscription as a whole and are the
+/// headline rows; `seven_day_opus`/`seven_day_sonnet` are the same seven-day
+/// window sliced per model, so they go to `per_model`. Labels are unchanged
+/// by the split — `"7d-opus"`/`"7d-sonnet"` are still emitted verbatim, so
+/// nothing downstream has to parse a label to know which bucket a row is in.
 fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
     let mut windows = Vec::new();
+    for (label, win) in [("5h", usage.five_hour), ("7d", usage.seven_day)] {
+        if let Some(w) = win {
+            windows.push(to_quota_window(label, w, now_unix_secs));
+        }
+    }
+
+    let mut per_model = Vec::new();
     for (label, win) in [
-        ("5h", usage.five_hour),
-        ("7d", usage.seven_day),
         ("7d-opus", usage.seven_day_opus),
         ("7d-sonnet", usage.seven_day_sonnet),
     ] {
         if let Some(w) = win {
-            windows.push(QuotaWindow {
-                label: label.to_string(),
-                used_fraction: w.utilization.map(|u| (u / 100.0).clamp(0.0, 1.0)),
-                resets_in_secs: w
-                    .resets_at
-                    .as_deref()
-                    .and_then(parse_rfc3339_to_unix)
-                    .map(|reset| reset.saturating_sub(now_unix_secs as i64).max(0) as u64),
-            });
+            per_model.push(to_quota_window(label, w, now_unix_secs));
         }
     }
+
     ProviderSnapshot {
         provider: ProviderId::ClaudeSubscription,
         taken_at_unix_secs: now_unix_secs,
         windows,
+        per_model,
         source: SnapshotSource::UsageEndpoint,
     }
 }
@@ -266,21 +285,62 @@ mod tests {
 
         assert_eq!(snap.provider, ProviderId::ClaudeSubscription);
         assert_eq!(snap.source, SnapshotSource::UsageEndpoint);
-        // Opus was null → skipped; the other three present.
-        assert_eq!(snap.windows.len(), 3);
+
+        // Headline windows: the subscription-wide 5h and 7d, and only those.
+        assert_eq!(snap.windows.len(), 2);
+        assert_eq!(snap.windows[0].label, "5h");
+        assert_eq!(snap.windows[1].label, "7d");
 
         let five = &snap.windows[0];
-        assert_eq!(five.label, "5h");
         assert_eq!(five.used_fraction, Some(0.33));
         assert_eq!(five.resets_in_secs, Some(3600));
 
-        let sonnet = snap
-            .windows
-            .iter()
-            .find(|w| w.label == "7d-sonnet")
-            .unwrap();
+        let seven = &snap.windows[1];
+        assert_eq!(seven.used_fraction, Some(0.80));
+
+        // Per-model: opus was null → skipped, so sonnet alone. Labels are
+        // unchanged by the split.
+        assert_eq!(snap.per_model.len(), 1);
+        let sonnet = &snap.per_model[0];
+        assert_eq!(sonnet.label, "7d-sonnet");
         assert_eq!(sonnet.used_fraction, Some(0.125));
         assert_eq!(sonnet.resets_in_secs, None); // resets_at was null
+
+        // The per-model rows must not also appear in the headline list.
+        assert!(!snap.windows.iter().any(|w| w.label.contains("opus")));
+        assert!(!snap.windows.iter().any(|w| w.label.contains("sonnet")));
+    }
+
+    #[test]
+    fn both_per_model_windows_are_split_out() {
+        // All four windows present: two headline, two per-model.
+        let json = r#"{
+            "five_hour": {"utilization": 10.0, "resets_at": null},
+            "seven_day": {"utilization": 20.0, "resets_at": null},
+            "seven_day_opus": {"utilization": 30.0, "resets_at": null},
+            "seven_day_sonnet": {"utilization": 40.0, "resets_at": null}
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+
+        let headline: Vec<&str> = snap.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(headline, vec!["5h", "7d"]);
+
+        let per_model: Vec<&str> = snap.per_model.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(per_model, vec!["7d-opus", "7d-sonnet"]);
+
+        assert_eq!(snap.per_model[0].used_fraction, Some(0.30));
+        assert_eq!(snap.per_model[1].used_fraction, Some(0.40));
+    }
+
+    #[test]
+    fn no_per_model_windows_yields_an_empty_vec() {
+        // Headline windows only — per_model is empty, never an error.
+        let json = r#"{"five_hour":{"utilization":10.0},"seven_day":{"utilization":20.0}}"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert_eq!(snap.windows.len(), 2);
+        assert!(snap.per_model.is_empty());
     }
 
     #[test]
@@ -289,6 +349,7 @@ mod tests {
         let usage: RawUsage = serde_json::from_str("{}").unwrap();
         let snap = build_snapshot(usage, 0);
         assert!(snap.windows.is_empty());
+        assert!(snap.per_model.is_empty());
 
         // Utilization present, resets_at absent.
         let usage: RawUsage =

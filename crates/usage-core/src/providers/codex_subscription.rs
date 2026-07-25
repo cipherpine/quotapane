@@ -22,12 +22,14 @@
 //! `primary_window`/`secondary_window`, each carrying `used_percent`,
 //! `limit_window_seconds` (window DURATION in seconds), `reset_after_seconds`
 //! (relative seconds until reset), and `reset_at` (absolute epoch fallback).
-//! The DTOs below read only those fields. The response also contains account
-//! PII (`user_id`, `account_id`, `email`) and a per-model
-//! `additional_rate_limits` array — both are ignored by serde and never enter
-//! a snapshot (the per-model breakdown is deferred to M5 depth). Anything
-//! unrecognized degrades the snapshot instead of crashing or leaking
-//! (THREAT_MODEL.md R4).
+//! The DTOs below read only those fields. The response also contains a
+//! per-model `additional_rate_limits` array, read since M5a into
+//! [`ProviderSnapshot::per_model`], and account PII (`user_id`, `account_id`,
+//! `email`), which is **ignored by serde and never enters a snapshot**. That
+//! defense is structural: no struct in this file declares a field for any PII
+//! value, so there is nothing for serde to populate. Do not add one — not
+//! even `#[serde(skip)]`, unused, or "just for a test". Anything unrecognized
+//! degrades the snapshot instead of crashing or leaking (THREAT_MODEL.md R4).
 //!
 //! ## Credentials (`~/.codex/auth.json`, or `$CODEX_HOME/auth.json`)
 //! Verified shape: `{ "OPENAI_API_KEY": …, "tokens": { "id_token",
@@ -208,13 +210,24 @@ struct RawRateLimit {
     secondary_window: Option<RawWindow>,
 }
 
-/// Top-level response (verified 2026-07-15). Only the singular top-level
-/// `rate_limit` is read; account PII and the per-model
-/// `additional_rate_limits` array are ignored by serde (unknown fields) and
-/// never enter a snapshot.
+/// One entry of the per-model `additional_rate_limits` array: the provider's
+/// own name for the limit plus a nested `rate_limit` of the same shape as the
+/// top-level one. Both fields optional — degrade, don't crash.
+#[derive(Deserialize, Default)]
+struct RawAdditionalRateLimit {
+    limit_name: Option<String>,
+    rate_limit: Option<RawRateLimit>,
+}
+
+/// Top-level response (verified 2026-07-15). The singular top-level
+/// `rate_limit` supplies the headline windows and `additional_rate_limits`
+/// the per-model ones. Account PII (`user_id`, `account_id`, `email`) has no
+/// field here and so is dropped by serde as an unknown field — it cannot
+/// reach a snapshot because there is nowhere for it to land.
 #[derive(Deserialize, Default)]
 struct RawUsage {
     rate_limit: Option<RawRateLimit>,
+    additional_rate_limits: Option<Vec<RawAdditionalRateLimit>>,
 }
 
 /// Human label for a window from its duration in **seconds**:
@@ -239,7 +252,29 @@ fn window_resets_in_secs(w: &RawWindow, now_unix_secs: u64) -> Option<u64> {
         .map(|at| at.saturating_sub(now_unix_secs as i64).max(0) as u64)
 }
 
+/// Normalize one raw window into a [`QuotaWindow`] under `label`.
+///
+/// The single place `used_percent` becomes a fraction and `reset_*` becomes a
+/// countdown, so the headline and per-model paths cannot drift into two
+/// conventions.
+fn to_quota_window(label: String, w: &RawWindow, now_unix_secs: u64) -> QuotaWindow {
+    QuotaWindow {
+        label,
+        used_fraction: w.used_percent.map(|u| (u / 100.0).clamp(0.0, 1.0)),
+        resets_in_secs: window_resets_in_secs(w, now_unix_secs),
+    }
+}
+
 /// Build a normalized, non-secret snapshot from a usage response.
+///
+/// Headline windows come from the top-level `rate_limit`; per-model windows
+/// from `additional_rate_limits`, each entry's nested `rate_limit
+/// .primary_window`. A per-model row is labeled with the provider's own
+/// `limit_name` **verbatim** — the provider's name for a model is the honest
+/// one, and normalizing it here would be inventing a vocabulary the UI would
+/// then have to parse back. `limit_window_seconds` keeps its headline meaning
+/// (window duration → label) and is used only as the label fallback for an
+/// unnamed entry, so no row can render blank.
 fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
     let rate_limit = usage.rate_limit.unwrap_or_default();
 
@@ -249,17 +284,27 @@ fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
         (rate_limit.secondary_window, "secondary"),
     ] {
         if let Some(w) = win {
-            windows.push(QuotaWindow {
-                label: seconds_label(w.limit_window_seconds, fallback),
-                used_fraction: w.used_percent.map(|u| (u / 100.0).clamp(0.0, 1.0)),
-                resets_in_secs: window_resets_in_secs(&w, now_unix_secs),
-            });
+            let label = seconds_label(w.limit_window_seconds, fallback);
+            windows.push(to_quota_window(label, &w, now_unix_secs));
         }
     }
+
+    let mut per_model = Vec::new();
+    for entry in usage.additional_rate_limits.unwrap_or_default() {
+        let Some(w) = entry.rate_limit.unwrap_or_default().primary_window else {
+            continue;
+        };
+        let label = entry
+            .limit_name
+            .unwrap_or_else(|| seconds_label(w.limit_window_seconds, "additional"));
+        per_model.push(to_quota_window(label, &w, now_unix_secs));
+    }
+
     ProviderSnapshot {
         provider: ProviderId::CodexSubscription,
         taken_at_unix_secs: now_unix_secs,
         windows,
+        per_model,
         source: SnapshotSource::UsageEndpoint,
     }
 }
@@ -318,8 +363,8 @@ mod tests {
         // Structurally identical to the 2026-07-15 `--debug-raw` capture:
         // top-level singular `rate_limit`, `primary_window`/`secondary_window`,
         // `used_percent` / `limit_window_seconds` / `reset_after_seconds`, and
-        // ignored PII + `additional_rate_limits`. Regression test for the M3
-        // live-run mismatch (no windows rendered).
+        // ignored PII + an `additional_rate_limits` entry. Regression test for
+        // the M3 live-run mismatch (no windows rendered).
         let now: u64 = 1_784_000_000;
         let json = format!(
             r#"{{
@@ -340,8 +385,8 @@ mod tests {
         let snap = build_snapshot(usage, now);
 
         assert_eq!(snap.provider, ProviderId::CodexSubscription);
-        // Only the top-level rate_limit's two windows; additional_rate_limits
-        // are intentionally not emitted in M3.
+        // Only the top-level rate_limit's two windows reach `windows`;
+        // `additional_rate_limits` go to `per_model` (M5a), never here.
         assert_eq!(snap.windows.len(), 2);
         assert_eq!(snap.windows[0].label, "5h"); // 18000s
         assert_eq!(snap.windows[0].used_fraction, Some(0.25));
@@ -381,6 +426,126 @@ mod tests {
         let usage: RawUsage = serde_json::from_str(r#"{"something_else": 1}"#).unwrap();
         let snap = build_snapshot(usage, 0);
         assert!(snap.windows.is_empty()); // degrade, never crash
+        assert!(snap.per_model.is_empty());
+    }
+
+    // --- per-model breakdown (M5a) ---
+
+    // Synthetic PII, deliberately distinctive so the absence assertions below
+    // are meaningful. `.invalid` is the reserved never-resolvable TLD.
+    const PII_USER_ID: &str = "user-SYNTHETIC-PII-9f3a";
+    const PII_ACCOUNT_ID: &str = "acct-SYNTHETIC-PII-7c21";
+    const PII_EMAIL: &str = "not-real-person@example.invalid";
+
+    #[test]
+    fn per_model_windows_parse_and_carry_no_pii() {
+        let json = format!(
+            r#"{{
+                "user_id":"{PII_USER_ID}","account_id":"{PII_ACCOUNT_ID}","email":"{PII_EMAIL}",
+                "plan_type":"pro",
+                "rate_limit":{{
+                    "primary_window":  {{"used_percent":25,"limit_window_seconds":18000, "reset_after_seconds":3600}},
+                    "secondary_window":{{"used_percent":18,"limit_window_seconds":604800,"reset_after_seconds":86400}}
+                }},
+                "additional_rate_limits":[
+                    {{"limit_name":"GPT-5.3-Codex-Spark","rate_limit":{{"primary_window":{{"used_percent":12.5,"limit_window_seconds":604800,"reset_after_seconds":7200}}}}}},
+                    {{"limit_name":"GPT-5.3-Codex-Max",  "rate_limit":{{"primary_window":{{"used_percent":40,  "limit_window_seconds":604800}}}}}}
+                ]
+            }}"#
+        );
+        // Guard against a vacuous test: the fixture must really carry the PII
+        // whose absence is asserted below.
+        for pii in [PII_USER_ID, PII_ACCOUNT_ID, PII_EMAIL] {
+            assert!(json.contains(pii), "fixture lost its PII: {pii}");
+        }
+
+        let usage: RawUsage = serde_json::from_str(&json).unwrap();
+        let snap = build_snapshot(usage, 0);
+
+        // Headline windows are unaffected by the per-model addition.
+        let headline: Vec<&str> = snap.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(headline, vec!["5h", "7d"]);
+
+        // Per-model rows: provider's own `limit_name`, verbatim and in order.
+        assert_eq!(snap.per_model.len(), 2);
+        assert_eq!(snap.per_model[0].label, "GPT-5.3-Codex-Spark");
+        assert_eq!(snap.per_model[0].used_fraction, Some(0.125)); // 12.5 / 100
+        assert_eq!(snap.per_model[0].resets_in_secs, Some(7200));
+        assert_eq!(snap.per_model[1].label, "GPT-5.3-Codex-Max");
+        assert_eq!(snap.per_model[1].used_fraction, Some(0.40));
+        assert_eq!(snap.per_model[1].resets_in_secs, None); // no reset fields
+
+        // Positive absence check: no PII value appears anywhere in the
+        // snapshot, in `Debug` or in the JSON the CLI emits. This fails if
+        // anyone later adds a field for one — which is the point.
+        let debug = format!("{snap:?}");
+        let json_out = serde_json::to_string(&snap).unwrap();
+        for pii in [PII_USER_ID, PII_ACCOUNT_ID, PII_EMAIL] {
+            assert!(!debug.contains(pii), "PII leaked into Debug: {pii}");
+            assert!(!json_out.contains(pii), "PII leaked into JSON: {pii}");
+        }
+        // The local parts alone must not survive either.
+        assert!(!debug.contains("SYNTHETIC-PII"));
+        assert!(!debug.contains("example.invalid"));
+    }
+
+    #[test]
+    fn additional_rate_limits_absent_yields_empty_per_model() {
+        // Older / other accounts simply omit the array. Empty, not an error.
+        let json =
+            r#"{"rate_limit":{"primary_window":{"used_percent":5,"limit_window_seconds":18000}}}"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert_eq!(snap.windows.len(), 1);
+        assert!(snap.per_model.is_empty());
+    }
+
+    #[test]
+    fn additional_rate_limits_empty_array_yields_empty_per_model() {
+        let json =
+            r#"{"rate_limit":{"primary_window":{"used_percent":5}},"additional_rate_limits":[]}"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert!(snap.per_model.is_empty());
+    }
+
+    #[test]
+    fn per_model_entry_without_a_window_is_skipped_not_fatal() {
+        // An entry carrying no nested primary_window has nothing to show.
+        let json = r#"{"additional_rate_limits":[
+            {"limit_name":"No-Window-Model"},
+            {"limit_name":"Empty-Rate-Limit","rate_limit":{}},
+            {"limit_name":"Real-Model","rate_limit":{"primary_window":{"used_percent":7}}}
+        ]}"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert_eq!(snap.per_model.len(), 1);
+        assert_eq!(snap.per_model[0].label, "Real-Model");
+        assert_eq!(snap.per_model[0].used_fraction, Some(0.07));
+    }
+
+    #[test]
+    fn unnamed_per_model_entry_falls_back_to_the_duration_label() {
+        // `limit_name` missing → the headline convention (window duration →
+        // label) rather than a blank row.
+        let json = r#"{"additional_rate_limits":[
+            {"rate_limit":{"primary_window":{"used_percent":3,"limit_window_seconds":604800}}},
+            {"rate_limit":{"primary_window":{"used_percent":4}}}
+        ]}"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert_eq!(snap.per_model[0].label, "7d");
+        assert_eq!(snap.per_model[1].label, "additional");
+    }
+
+    #[test]
+    fn per_model_used_percent_is_clamped_like_the_headline() {
+        let json = r#"{"additional_rate_limits":[
+            {"limit_name":"Over","rate_limit":{"primary_window":{"used_percent":250.0}}}
+        ]}"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert_eq!(snap.per_model[0].used_fraction, Some(1.0));
     }
 
     #[test]

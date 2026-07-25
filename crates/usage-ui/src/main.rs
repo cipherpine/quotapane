@@ -17,6 +17,13 @@
 //! tray is active the window's close request hides to tray instead of quitting;
 //! `--no-tray` restores the classic close-to-quit behavior. Linux has no tray
 //! (window-only) and compiles to exactly the pre-M3.5 behavior.
+//!
+//! M5a adds a per-provider disclosure toggle for the per-model rows a snapshot
+//! carries in `per_model` (Claude's `7d-opus`/`7d-sonnet`, Codex's
+//! `additional_rate_limits`). It is collapsed by default and its state is per
+//! pane, so the providers expand independently. The toggle is suppressed when
+//! a provider reports no per-model data. This is presentational only: the rows
+//! use the same renderer as the headline rows and no label is ever parsed.
 
 use eframe::egui;
 use std::process::ExitCode;
@@ -48,6 +55,9 @@ const TITLEBAR_HEIGHT: f32 = 24.0;
 const TITLEBAR_BG: egui::Color32 = egui::Color32::from_rgb(24, 27, 33);
 /// Near-white app-name text on the dark strip.
 const TITLEBAR_TEXT: egui::Color32 = egui::Color32::from_rgb(220, 223, 228);
+
+/// Caption beside the per-model disclosure triangle.
+const PER_MODEL_CAPTION: &str = "per-model";
 
 struct Args {
     /// Claude Code client version → `User-Agent: claude-code/<ver>`.
@@ -469,6 +479,10 @@ struct ProviderPane {
     latest_failure: Option<String>,
     /// Set when the poller could not even be started (e.g. no home directory).
     startup_error: Option<String>,
+    /// Whether this provider's per-model rows are disclosed. Per pane, not
+    /// global: Claude and Codex expand and collapse independently. Starts
+    /// collapsed, so the window opens at its established size.
+    expanded: bool,
 }
 
 impl ProviderPane {
@@ -492,6 +506,7 @@ impl ProviderPane {
             snapshot_received_at: None,
             latest_failure: None,
             startup_error,
+            expanded: false,
         }
     }
 
@@ -717,7 +732,7 @@ impl eframe::App for QuotaPaneApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
-            for (i, pane) in self.panes.iter().enumerate() {
+            for (i, pane) in self.panes.iter_mut().enumerate() {
                 if i > 0 {
                     ui.separator();
                 }
@@ -735,7 +750,7 @@ impl eframe::App for QuotaPaneApp {
 }
 
 /// Render one provider's titled section.
-fn render_pane(ui: &mut egui::Ui, pane: &ProviderPane) {
+fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane) {
     ui.heading(provider_label(pane.id));
 
     if let Some(err) = &pane.startup_error {
@@ -743,9 +758,15 @@ fn render_pane(ui: &mut egui::Ui, pane: &ProviderPane) {
         return;
     }
 
+    // The disclosure toggle only *records* intent while the snapshot is
+    // borrowed; the flip happens after, mirroring the titlebar buttons.
+    let mut toggled = false;
     if let Some(snapshot) = &pane.latest_snapshot {
         let age = pane.snapshot_received_at.map(|t| t.elapsed());
-        render_windows(ui, snapshot, age);
+        toggled = render_windows(ui, snapshot, age, pane.expanded);
+    }
+    if toggled {
+        pane.expanded = !pane.expanded;
     }
 
     match classify_failure(pane.latest_failure.as_deref()) {
@@ -767,10 +788,36 @@ fn render_pane(ui: &mut egui::Ui, pane: &ProviderPane) {
     }
 }
 
-/// Render a snapshot's quota bars plus its freshness/staleness line.
-fn render_windows(ui: &mut egui::Ui, snapshot: &ProviderSnapshot, age: Option<Duration>) {
+/// Render a snapshot's quota bars, the per-model disclosure, and its
+/// freshness/staleness line.
+///
+/// `expanded` is the pane's current disclosure state. Returns `true` when the
+/// user clicked the toggle this frame; the caller owns the flip.
+fn render_windows(
+    ui: &mut egui::Ui,
+    snapshot: &ProviderSnapshot,
+    age: Option<Duration>,
+    expanded: bool,
+) -> bool {
     for window in &snapshot.windows {
         render_window_row(ui, window);
+    }
+
+    // Per-model disclosure, between the headline rows and the age footer.
+    // Suppressed entirely when there is nothing to disclose — no affordance
+    // that opens onto an empty list.
+    let mut toggled = false;
+    if !snapshot.per_model.is_empty() {
+        toggled = disclosure_toggle(ui, expanded, PER_MODEL_CAPTION).clicked();
+        if expanded {
+            // Salted with the provider so the two panes' indent regions get
+            // distinct ids.
+            ui.indent(("per_model", snapshot.provider), |ui| {
+                for window in &snapshot.per_model {
+                    render_window_row(ui, window);
+                }
+            });
+        }
     }
 
     if let Some(age) = age {
@@ -786,6 +833,8 @@ fn render_windows(ui: &mut egui::Ui, snapshot: &ProviderSnapshot, age: Option<Du
         };
         ui.colored_label(color, age_text);
     }
+
+    toggled
 }
 
 fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow) {
@@ -802,6 +851,55 @@ fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow) {
         // Compact reset countdown, e.g. "resets in 3h 12m"; `--` when unknown.
         ui.label(format!("resets in {}", format_reset(window.resets_in_secs)));
     });
+}
+
+/// Paint the disclosure triangle into `rect`: pointing right (▸) when
+/// collapsed, down (▾) when expanded.
+///
+/// Painted rather than set as a `▸`/`▾` text glyph for the same reason the
+/// titlebar's ✕ and – are: it cannot depend on font coverage, so there is no
+/// tofu risk on any platform.
+fn draw_disclosure_triangle(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    expanded: bool,
+    color: egui::Color32,
+) {
+    let points = if expanded {
+        vec![rect.left_top(), rect.right_top(), rect.center_bottom()]
+    } else {
+        vec![rect.left_top(), rect.right_center(), rect.left_bottom()]
+    };
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
+/// The per-model disclosure control: triangle plus caption, as one clickable
+/// row. Both halves are clickable so the target is not a 9px triangle.
+fn disclosure_toggle(ui: &mut egui::Ui, expanded: bool, caption: &str) -> egui::Response {
+    ui.horizontal(|ui| {
+        let (rect, triangle) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::click());
+        // Copy the color out so the &Style borrow ends before painting.
+        let color = ui.style().interact(&triangle).fg_stroke.color;
+        // Nudge down to sit on the caption's baseline rather than its cap line.
+        draw_disclosure_triangle(
+            ui.painter(),
+            rect.translate(egui::vec2(0.0, 1.0)),
+            expanded,
+            color,
+        );
+
+        let weak = ui.visuals().weak_text_color();
+        let label = ui.add(
+            egui::Label::new(egui::RichText::new(caption).small().color(weak))
+                .sense(egui::Sense::click()),
+        );
+        (triangle | label).on_hover_cursor(egui::CursorIcon::PointingHand)
+    })
+    .inner
 }
 
 /// Paint a close "✕" into `rect` with `stroke`. Painted (not a font glyph),
@@ -1029,6 +1127,26 @@ mod tests {
         assert_eq!(provider_label(ProviderId::CodexSubscription), "Codex");
     }
 
+    // --- per-model disclosure state (M5a) ---
+
+    #[test]
+    fn panes_start_collapsed() {
+        // Collapsed by default, per pane. `None` skips spawning a poller.
+        let pane = ProviderPane::new::<ClaudeSubscription>(ProviderId::ClaudeSubscription, None);
+        assert!(!pane.expanded);
+    }
+
+    #[test]
+    fn panes_expand_independently() {
+        let mut claude =
+            ProviderPane::new::<ClaudeSubscription>(ProviderId::ClaudeSubscription, None);
+        let codex = ProviderPane::new::<CodexSubscription>(ProviderId::CodexSubscription, None);
+        claude.expanded = true;
+        // One pane's state is not the other's — no shared/global flag.
+        assert!(claude.expanded);
+        assert!(!codex.expanded);
+    }
+
     // --- not_signed_in_line: quiet-line mapping ---
 
     #[test]
@@ -1231,6 +1349,7 @@ mod tray_tests {
             provider: ProviderId::ClaudeSubscription,
             taken_at_unix_secs: 0,
             windows,
+            per_model: vec![],
             source: SnapshotSource::UsageEndpoint,
         }
     }
@@ -1292,6 +1411,23 @@ mod tray_tests {
         // 0.005 → 0.5% → rounds to 1%.
         let s = snap(vec![window("5h", Some(0.005))]);
         assert_eq!(provider_tray_summary("Claude", Some(&s)), "Claude 5h 1%");
+    }
+
+    #[test]
+    fn per_model_windows_do_not_feed_the_tooltip() {
+        // The tray summarizes the headline windows only. A per-model row that
+        // is closer to its limit must not hijack the tooltip.
+        let mut s = snap(vec![window("5h", Some(0.42))]);
+        s.per_model = vec![window("7d-opus", Some(0.99))];
+        assert_eq!(provider_tray_summary("Claude", Some(&s)), "Claude 5h 42%");
+    }
+
+    #[test]
+    fn per_model_only_snapshot_has_no_representative_window() {
+        // No headline windows at all → "--", not a per-model stand-in.
+        let mut s = snap(vec![]);
+        s.per_model = vec![window("7d-sonnet", Some(0.50))];
+        assert_eq!(provider_tray_summary("Claude", Some(&s)), "Claude --");
     }
 
     #[test]

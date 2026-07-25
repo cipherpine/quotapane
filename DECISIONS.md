@@ -21,7 +21,7 @@
 
 ## 2. Roadmap state
 
-M0 (skeleton + trust boundary) ✅ · M1 (Claude provider, headless) ✅ · M2 (live window) ✅ · M3 (Codex + multi-provider window) ✅ **(visually accepted 2026-07-20 — Codex section renders)** · M3.5 (system tray) ✅ **(visually accepted 2026-07-24)** · window look pass (percent + reset countdown, slim titlebar) ✅ **(visually accepted 2026-07-24)** · **M4 (official billing) — WITHDRAWN (ADR-002).** · **M5 depth — underway** (first slice M5a: per-model breakdown via a collapsible toggle, speced 2026-07-24; then history/sparklines, forecast-to-limit, thresholds/alerts, a Codex User-Agent flag in the CLI, and the optional token-free `OtelSource`) · M6 ship (naming, packaging, signed releases, repo public — decision-dense, interactive).
+M0 (skeleton + trust boundary) ✅ · M1 (Claude provider, headless) ✅ · M2 (live window) ✅ · M3 (Codex + multi-provider window) ✅ **(visually accepted 2026-07-20 — Codex section renders)** · M3.5 (system tray) ✅ **(visually accepted 2026-07-24)** · window look pass (percent + reset countdown, slim titlebar) ✅ **(visually accepted 2026-07-24)** · **M4 (official billing) — WITHDRAWN (ADR-002).** · **M5 depth — underway** (first slice M5a: per-model breakdown via a collapsible toggle, speced 2026-07-24, **implemented 2026-07-25 — awaiting visual acceptance**; then history/sparklines, forecast-to-limit, thresholds/alerts, a Codex User-Agent flag in the CLI, and the optional token-free `OtelSource`) · M6 ship (naming, packaging, signed releases, repo public — decision-dense, interactive).
 
 > Design note: the Usage-window look pass (per-bar percent + reset countdown, slim titlebar with minimize/close) shipped 2026-07-23 (commits b186446 / c62364a).
 
