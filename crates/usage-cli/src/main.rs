@@ -10,6 +10,11 @@
 //! and emits a JSON **array** (text mode prints both summaries); a provider that
 //! is signed out (absent credential file) produces a clean stderr diagnostic and
 //! a non-zero exit — never a panic — without stopping the other provider.
+//!
+//! `--debug-raw` prints a provider's exact wire response instead of a snapshot,
+//! for pinning an undocumented endpoint's schema without making an ad-hoc token
+//! request outside the trust boundary. It is supported by **both** providers;
+//! it used to apply to Codex only and be silently ignored for Claude.
 
 use std::process::ExitCode;
 
@@ -153,6 +158,16 @@ fn main() -> ExitCode {
         );
     }
 
+    // `--debug-raw` prints the provider's raw wire response instead of a
+    // normalized snapshot, so there is no snapshot for `--json` to serialize.
+    // Say so rather than dropping the flag silently — a silently ignored flag
+    // reads as "the tool produced no JSON", not "that flag does not apply".
+    if args.debug_raw && args.json {
+        eprintln!(
+            "note: --json does not apply to --debug-raw; printing the raw response body instead"
+        );
+    }
+
     let egress = Egress::new(false);
     let multi = matches!(args.provider, ProviderSel::All);
     let mut snapshots: Vec<ProviderSnapshot> = Vec::new();
@@ -162,12 +177,25 @@ fn main() -> ExitCode {
     // provider records a clean diagnostic and flips the exit code, but never
     // aborts the others (`all` still emits whatever succeeded).
     for id in ids {
-        // `--debug-raw` bypasses the normal snapshot path for Codex only,
-        // printing the exact wire response through the same `fetch` the
-        // normal poll uses (`debug_raw_body`). Claude is unaffected: it
-        // always takes the normal path below, debug-raw or not.
-        if args.debug_raw && id == ProviderId::CodexSubscription {
-            match CodexSubscription::with_default_path(CODEX_DEFAULT_USER_AGENT) {
+        // `--debug-raw` bypasses the normal snapshot path, printing the exact
+        // wire response through the same `fetch` the normal poll uses
+        // (`debug_raw_body`), so the dump is guaranteed to reflect the real
+        // request. Supported by **both** providers: the flag used to be
+        // silently ignored for Claude, which made it look like the endpoint
+        // returned nothing rather than that the flag did not apply.
+        if args.debug_raw {
+            // `None` means the credential *path* could not be resolved at all.
+            let dumped = match id {
+                ProviderId::ClaudeSubscription => {
+                    ClaudeSubscription::with_default_path(args.client_version.clone())
+                        .map(|p| p.debug_raw_body(&egress))
+                }
+                ProviderId::CodexSubscription => {
+                    CodexSubscription::with_default_path(CODEX_DEFAULT_USER_AGENT)
+                        .map(|p| p.debug_raw_body(&egress))
+                }
+            };
+            match dumped {
                 None => {
                     eprintln!(
                         "error: {}: could not resolve a home directory for the credentials path",
@@ -175,13 +203,11 @@ fn main() -> ExitCode {
                     );
                     had_error = true;
                 }
-                Some(provider) => match provider.debug_raw_body(&egress) {
-                    Ok(raw) => println!("{raw}"),
-                    Err(e) => {
-                        eprintln!("error: {}: {e}", provider_cli_name(id));
-                        had_error = true;
-                    }
-                },
+                Some(Ok(raw)) => println!("{raw}"),
+                Some(Err(e)) => {
+                    eprintln!("error: {}: {e}", provider_cli_name(id));
+                    had_error = true;
+                }
             }
             continue;
         }

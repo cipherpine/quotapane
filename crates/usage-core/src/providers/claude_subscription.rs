@@ -66,12 +66,13 @@ impl ClaudeSubscription {
     }
 }
 
-impl UsageProvider for ClaudeSubscription {
-    fn id(&self) -> ProviderId {
-        ProviderId::ClaudeSubscription
-    }
-
-    fn poll(&self, http: &Egress) -> Result<ProviderSnapshot, ProviderError> {
+impl ClaudeSubscription {
+    /// The one request this provider makes. Both [`UsageProvider::poll`] and
+    /// [`Self::debug_raw_body`] go through here, so the debug dump is
+    /// *guaranteed* to reflect the exact request normal polling sends
+    /// (Ingress TB1 → Egress TB2). The token leaves the process only at the
+    /// `http.get` call, wrapped in `Secret` until that moment.
+    fn fetch(&self, http: &Egress) -> Result<crate::egress::EgressResponse, ProviderError> {
         // Ingress (TB1): load read-only, wrapped in Secret.
         let raw = load_credential_file(&self.credentials_path)
             .map_err(|e| ProviderError::Credential(e.to_string()))?;
@@ -87,7 +88,7 @@ impl UsageProvider for ClaudeSubscription {
 
         // Egress (TB2): the token leaves the process only here.
         let user_agent = format!("claude-code/{}", self.client_version);
-        let resp = http.get(
+        Ok(http.get(
             HOST,
             PATH,
             Some(&creds.access_token),
@@ -96,7 +97,33 @@ impl UsageProvider for ClaudeSubscription {
                 ("Content-Type", "application/json"),
                 ("User-Agent", &user_agent),
             ],
-        )?;
+        )?)
+    }
+
+    /// Debug/diagnostic: perform the usage request and return the **raw**
+    /// response as `"status: <code>\n<body>"`. Used by `usage-cli --debug-raw`
+    /// to pin the endpoint's exact JSON shape without an ad-hoc token request
+    /// outside the trust boundary — the same "verify, don't invent" tool that
+    /// pinned the Codex schema. The body is provider usage data (utilization
+    /// percentages, reset timestamps) — non-secret; the bearer token rides in
+    /// a request header and never appears in the body.
+    pub fn debug_raw_body(&self, http: &Egress) -> Result<String, ProviderError> {
+        let resp = self.fetch(http)?;
+        Ok(format!(
+            "status: {}\n{}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        ))
+    }
+}
+
+impl UsageProvider for ClaudeSubscription {
+    fn id(&self) -> ProviderId {
+        ProviderId::ClaudeSubscription
+    }
+
+    fn poll(&self, http: &Egress) -> Result<ProviderSnapshot, ProviderError> {
+        let resp = self.fetch(http)?;
 
         match resp.status {
             200 => {
@@ -394,6 +421,30 @@ mod tests {
         let err = provider.poll(&egress).unwrap_err();
         assert!(matches!(err, ProviderError::TokenExpired));
 
+        // `debug_raw_body` shares `fetch`, so it must refuse a known-expired
+        // token before dialing too — the diagnostic path is not a way around
+        // the pre-network expiry check.
+        let err = provider.debug_raw_body(&egress).unwrap_err();
+        assert!(matches!(err, ProviderError::TokenExpired));
+
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn debug_raw_missing_credentials_is_a_clean_secret_free_error() {
+        // Mirrors the Codex provider's contract: an absent credential file
+        // surfaces a Credential error containing "not found", never a panic
+        // and never token bytes.
+        let mut path = std::env::temp_dir();
+        path.push(format!("quotapane-cs-{}-missing.json", std::process::id()));
+        let provider = ClaudeSubscription::new(path, "2.0.0");
+        let err = provider.debug_raw_body(&Egress::new(false)).unwrap_err();
+        match err {
+            ProviderError::Credential(msg) => {
+                assert!(msg.contains("not found"), "message was: {msg}");
+                assert!(!msg.contains(SYNTHETIC_TOKEN));
+            }
+            other => panic!("expected Credential, got: {other:?}"),
+        }
     }
 }
