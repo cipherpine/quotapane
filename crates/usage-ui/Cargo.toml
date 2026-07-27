@@ -8,6 +8,12 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false # distributed as a signed binary, not on crates.io
 
+# The shipped executable is `quotapane` (D2/D3, 2026-07-26): the product name
+# is QuotaPane, while the crate name stays product-neutral.
+[[bin]]
+name = "quotapane"
+path = "src/main.rs"
+
 [dependencies]
 # eframe (M2): the window. Trimmed features — glow renderer only (no wgpu),
 # default fonts, X11+Wayland on Linux. This tree is large but lives entirely

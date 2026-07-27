@@ -17,7 +17,7 @@
 //! deliberate, disclosed choice (README.md, SECURITY.md).
 //!
 //! ## Schema (pinned by a live capture, 2026-07-15)
-//! The endpoint is undocumented. A `usage-cli --debug-raw` capture pinned the
+//! The endpoint is undocumented. A `quotapane-cli --debug-raw` capture pinned the
 //! real shape: a top-level singular `rate_limit` object with
 //! `primary_window`/`secondary_window`, each carrying `used_percent`,
 //! `limit_window_seconds` (window DURATION in seconds), `reset_after_seconds`
@@ -114,7 +114,7 @@ impl CodexSubscription {
     }
 
     /// Debug/diagnostic: perform the usage request and return the **raw**
-    /// response as `"status: <code>\n<body>"`. Used by `usage-cli
+    /// response as `"status: <code>\n<body>"`. Used by `quotapane-cli
     /// --debug-raw` to pin the endpoint's exact JSON shape without an ad-hoc
     /// token request outside the trust boundary. The body is provider usage
     /// data (percentages, timestamps) — non-secret; the bearer token and

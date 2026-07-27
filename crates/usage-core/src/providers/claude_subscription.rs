@@ -101,7 +101,7 @@ impl ClaudeSubscription {
     }
 
     /// Debug/diagnostic: perform the usage request and return the **raw**
-    /// response as `"status: <code>\n<body>"`. Used by `usage-cli --debug-raw`
+    /// response as `"status: <code>\n<body>"`. Used by `quotapane-cli --debug-raw`
     /// to pin the endpoint's exact JSON shape without an ad-hoc token request
     /// outside the trust boundary — the same "verify, don't invent" tool that
     /// pinned the Codex schema. The body is provider usage data (utilization

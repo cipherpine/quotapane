@@ -1021,7 +1021,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
-                "usage: usage-ui [--client-version <VER>] [--codex-user-agent <UA>] [--no-tray]"
+                "usage: quotapane [--client-version <VER>] [--codex-user-agent <UA>] [--no-tray]"
             );
             return ExitCode::from(2);
         }
