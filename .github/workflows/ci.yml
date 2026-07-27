@@ -81,3 +81,30 @@ jobs:
             echo '::error::telemetry endpoint detected in source (SECURITY.md invariant 4)'
             exit 1
           fi
+
+  gitleaks:
+    # SECURITY.md supply-chain policy: secret scanning runs in CI over the
+    # FULL history, not just the tip — a secret deleted at the tip is still
+    # a leak. Uses the MIT-licensed gitleaks release BINARY verified against
+    # a pinned SHA256 (pin report §5: stronger than an action tag, no vendor
+    # license logic running in CI). To bump: update GITLEAKS_VERSION and
+    # GITLEAKS_SHA256 together, from the release's checksums file.
+    name: gitleaks — full-history secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history, every ref reachable from this SHA
+      - name: Download and verify gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          curl -sSfL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+      - name: Scan full history
+        # --redact: a finding must never print candidate secret bytes into
+        # a CI log (the log would out-leak the leak).
+        run: ./gitleaks git --no-banner --redact .
