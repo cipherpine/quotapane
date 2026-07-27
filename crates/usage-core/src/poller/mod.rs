@@ -202,6 +202,7 @@ fn run_loop<P: UsageProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::credentials::Secret;
     use crate::model::SnapshotSource;
     use std::time::Instant;
 
@@ -305,14 +306,29 @@ mod tests {
         );
     }
 
-    struct FailingProvider;
+    /// Holds token material and — like careless future code might —
+    /// interpolates its [`Secret`] into the failure it returns. Combined
+    /// with the assertions below this proves the redaction invariant END TO
+    /// END through the poller: even a provider that formats its secret into
+    /// an error cannot leak token bytes onto the UI channel. (The previous
+    /// version of this test asserted only that the message was non-empty,
+    /// against a unit-variant error that could not carry a token at all —
+    /// gap report, test-harness blind spots.)
+    struct LeakyFailingProvider {
+        token: Secret<String>,
+    }
 
-    impl UsageProvider for FailingProvider {
+    /// Synthetic marker — recognizable bytes, deliberately NOT shaped like
+    /// a real credential, so secret scanners have nothing to flag.
+    const SENTINEL_TOKEN: &str = "synthetic-sentinel-token-DO-NOT-PRINT-1234567890";
+
+    impl UsageProvider for LeakyFailingProvider {
         fn id(&self) -> ProviderId {
             ProviderId::ClaudeSubscription
         }
         fn poll(&self, _http: &Egress) -> Result<ProviderSnapshot, ProviderError> {
-            Err(ProviderError::UnexpectedPayload)
+            let msg = format!("credential rejected for {:?}", self.token);
+            Err(ProviderError::Credential(msg))
         }
         fn cadence(&self) -> Cadence {
             Cadence::Normal
@@ -321,7 +337,12 @@ mod tests {
 
     #[test]
     fn failures_are_forwarded_as_non_secret_messages() {
-        let handle = spawn(FailingProvider, Egress::new(false));
+        let handle = spawn(
+            LeakyFailingProvider {
+                token: Secret::new(SENTINEL_TOKEN.to_string()),
+            },
+            Egress::new(false),
+        );
         let first = handle
             .updates()
             .recv_timeout(Duration::from_secs(5))
@@ -329,7 +350,19 @@ mod tests {
         match first {
             Update::Failure { provider, message } => {
                 assert_eq!(provider, ProviderId::ClaudeSubscription);
-                assert!(!message.is_empty());
+                assert!(
+                    !message.contains(SENTINEL_TOKEN),
+                    "token bytes leaked into a failure message: {message}"
+                );
+                assert!(
+                    message.contains("«redacted»"),
+                    "expected the redaction marker, proving the secret flowed \
+                     through this path; got: {message}"
+                );
+                assert!(
+                    message.starts_with("credential error:"),
+                    "message must be the error's Display output; got: {message}"
+                );
             }
             other => panic!("expected Failure, got {other:?}"),
         }
