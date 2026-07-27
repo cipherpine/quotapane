@@ -29,6 +29,35 @@ use usage_core::providers::{
 /// `claude_subscription` module docs in usage-core).
 const DEFAULT_CLIENT_VERSION: &str = "0.0.0";
 
+/// `--help` output. Every flag `parse_args` accepts must appear here verbatim;
+/// a test scans the parser's own source for its accepted literals and asserts
+/// each one is present, so a future flag cannot ship undocumented.
+const HELP: &str = "\
+QuotaPane CLI — read your own Claude and Codex subscription usage locally.
+
+usage: quotapane-cli --once [--json] [--provider claude|codex|all]
+                     [--client-version <VER>] [--debug-raw]
+
+Options:
+  --once                  Poll once and exit. Required — the only mode today.
+  --json                  Print the normalized snapshot as JSON instead of a
+                          text summary. With --provider all, prints an array.
+  --provider <WHICH>      Which provider to poll: claude, codex, or all.
+                          Default: claude.
+  --client-version <VER>  claude-code version string to send. Default: 0.0.0,
+                          which the provider throttles aggressively — pass a
+                          real version for normal use.
+  --debug-raw             Print the provider's exact wire response instead of
+                          a snapshot, for pinning an undocumented endpoint's
+                          schema. Takes precedence over --json.
+  -h, --help              Print this help and exit.
+  --version               Print the version and exit.
+
+Credentials are read from your local claude/codex CLI files, read-only; they
+are never written, logged, or persisted. If a token has expired, run `claude`
+or `codex` to refresh it.
+";
+
 /// Which provider(s) to poll (`--provider`). Defaults to Claude for backward
 /// compatibility with the M1 single-provider CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +99,9 @@ fn provider_cli_name(id: ProviderId) -> &'static str {
     }
 }
 
+/// Holds no credential material — `client_version` is a public version
+/// string — so deriving `Debug` here cannot leak a token.
+#[derive(Debug)]
 struct Args {
     json: bool,
     provider: ProviderSel,
@@ -78,7 +110,17 @@ struct Args {
     debug_raw: bool,
 }
 
-fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
+/// What the command line asked for. `--help`/`--version` are answered and
+/// exit 0 without polling anything — the first command a stranger types must
+/// not fail.
+#[derive(Debug)]
+enum Invocation {
+    Help,
+    Version,
+    Run(Args),
+}
+
+fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, String> {
     let mut once = false;
     let mut json = false;
     let mut provider: Option<ProviderSel> = None;
@@ -88,6 +130,11 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            // Answered before any other validation, so `--help` works on its
+            // own — without it the parser would reject the invocation for a
+            // missing `--once`.
+            "--help" | "-h" => return Ok(Invocation::Help),
+            "--version" => return Ok(Invocation::Version),
             "--once" => once = true,
             "--json" => json = true,
             "--debug-raw" => debug_raw = true,
@@ -112,13 +159,13 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
     }
 
     let client_version_defaulted = client_version.is_none();
-    Ok(Args {
+    Ok(Invocation::Run(Args {
         json,
         provider: provider.unwrap_or(ProviderSel::Claude),
         client_version: client_version.unwrap_or_else(|| DEFAULT_CLIENT_VERSION.to_string()),
         client_version_defaulted,
         debug_raw,
-    })
+    }))
 }
 
 /// Construct the selected provider as a trait object, or `None` if the
@@ -138,12 +185,21 @@ fn build_provider(id: ProviderId, client_version: &str) -> Option<Box<dyn UsageP
 
 fn main() -> ExitCode {
     let args = match parse_args(std::env::args().skip(1)) {
-        Ok(a) => a,
+        Ok(Invocation::Help) => {
+            print!("{HELP}");
+            return ExitCode::SUCCESS;
+        }
+        Ok(Invocation::Version) => {
+            println!("quotapane-cli {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        Ok(Invocation::Run(a)) => a,
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
                 "usage: quotapane-cli --once [--json] [--provider claude|codex|all] [--client-version <VER>] [--debug-raw]"
             );
+            eprintln!("try `quotapane-cli --help` for the full list of options");
             return ExitCode::from(2);
         }
     };
@@ -295,11 +351,19 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Parse an invocation expected to be a normal run, unwrapping to `Args`.
+    fn parse_run(v: &[&str]) -> Args {
+        match parse_args(args(v)) {
+            Ok(Invocation::Run(a)) => a,
+            other => panic!("expected a run invocation, got {other:?}"),
+        }
+    }
+
     // --- existing M1 behavior (backward compatibility) ---
 
     #[test]
     fn once_alone_defaults_json_off_version_defaulted_and_provider_claude() {
-        let parsed = parse_args(args(&["--once"])).unwrap();
+        let parsed = parse_run(&["--once"]);
         assert!(!parsed.json);
         assert_eq!(parsed.client_version, DEFAULT_CLIENT_VERSION);
         assert!(parsed.client_version_defaulted);
@@ -308,13 +372,13 @@ mod tests {
 
     #[test]
     fn json_flag_is_recognized() {
-        let parsed = parse_args(args(&["--once", "--json"])).unwrap();
+        let parsed = parse_run(&["--once", "--json"]);
         assert!(parsed.json);
     }
 
     #[test]
     fn client_version_flag_overrides_default() {
-        let parsed = parse_args(args(&["--once", "--client-version", "1.2.3"])).unwrap();
+        let parsed = parse_run(&["--once", "--client-version", "1.2.3"]);
         assert_eq!(parsed.client_version, "1.2.3");
         assert!(!parsed.client_version_defaulted);
     }
@@ -336,7 +400,7 @@ mod tests {
 
     #[test]
     fn flags_can_appear_in_any_order() {
-        let parsed = parse_args(args(&["--json", "--client-version", "9.9.9", "--once"])).unwrap();
+        let parsed = parse_run(&["--json", "--client-version", "9.9.9", "--once"]);
         assert!(parsed.json);
         assert_eq!(parsed.client_version, "9.9.9");
     }
@@ -390,13 +454,13 @@ mod tests {
 
     #[test]
     fn provider_flag_selects_codex() {
-        let parsed = parse_args(args(&["--once", "--provider", "codex"])).unwrap();
+        let parsed = parse_run(&["--once", "--provider", "codex"]);
         assert_eq!(parsed.provider, ProviderSel::Codex);
     }
 
     #[test]
     fn provider_flag_selects_all() {
-        let parsed = parse_args(args(&["--once", "--json", "--provider", "all"])).unwrap();
+        let parsed = parse_run(&["--once", "--json", "--provider", "all"]);
         assert_eq!(parsed.provider, ProviderSel::All);
         assert!(parsed.json);
     }
@@ -466,20 +530,115 @@ mod tests {
 
     #[test]
     fn debug_raw_flag_defaults_off() {
-        let parsed = parse_args(args(&["--once"])).unwrap();
+        let parsed = parse_run(&["--once"]);
         assert!(!parsed.debug_raw);
     }
 
     #[test]
     fn debug_raw_flag_is_recognized_with_codex_provider() {
-        let parsed = parse_args(args(&["--once", "--debug-raw", "--provider", "codex"])).unwrap();
+        let parsed = parse_run(&["--once", "--debug-raw", "--provider", "codex"]);
         assert!(parsed.debug_raw);
         assert_eq!(parsed.provider, ProviderSel::Codex);
     }
 
     #[test]
     fn debug_raw_flag_can_appear_in_any_order() {
-        let parsed = parse_args(args(&["--provider", "codex", "--once", "--debug-raw"])).unwrap();
+        let parsed = parse_run(&["--provider", "codex", "--once", "--debug-raw"]);
         assert!(parsed.debug_raw);
+    }
+
+    // --- --help / --version (M6-NAME) ---
+
+    #[test]
+    fn help_and_version_are_recognized_on_their_own() {
+        // Neither requires --once: a bare `--help` must not fail the way it
+        // did before (exit 2, "unrecognized argument").
+        assert!(matches!(
+            parse_args(args(&["--help"])),
+            Ok(Invocation::Help)
+        ));
+        assert!(matches!(parse_args(args(&["-h"])), Ok(Invocation::Help)));
+        assert!(matches!(
+            parse_args(args(&["--version"])),
+            Ok(Invocation::Version)
+        ));
+    }
+
+    #[test]
+    fn help_wins_over_other_flags_and_over_parse_errors() {
+        // Asking for help never turns into an error, whatever else is present.
+        assert!(matches!(
+            parse_args(args(&["--once", "--json", "--help"])),
+            Ok(Invocation::Help)
+        ));
+        assert!(matches!(
+            parse_args(args(&["--help", "--bogus"])),
+            Ok(Invocation::Help)
+        ));
+    }
+
+    #[test]
+    fn unknown_flags_still_error_after_adding_help() {
+        // The regression guard for this change: adding --help must not turn
+        // the parser permissive.
+        assert!(parse_args(args(&["--once", "--bogus"])).is_err());
+        assert!(parse_args(args(&["--help-me"])).is_err());
+        assert!(parse_args(args(&["-x"])).is_err());
+    }
+
+    #[test]
+    fn help_text_documents_every_flag_the_parser_accepts() {
+        // Enumerate the accepted set from `parse_args`'s OWN SOURCE rather
+        // than from a hand-kept list, so a flag added to the parser without a
+        // help entry fails this test instead of shipping undocumented.
+        const SRC: &str = include_str!("main.rs");
+
+        let start = SRC.find("fn parse_args").expect("parse_args not found");
+        let body = &SRC[start..];
+        // rustfmt puts the function's closing brace at column 0.
+        let end = body.find("\n}\n").expect("end of parse_args not found");
+        let body = &body[..end];
+
+        // String literals are the odd-indexed pieces when splitting on `"`.
+        // A flag literal starts with `-` and contains no whitespace, which
+        // excludes the parser's error messages ("--provider requires a value").
+        let flags: Vec<&str> = body
+            .split('"')
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 1)
+            .map(|(_, lit)| lit)
+            .filter(|lit| lit.starts_with('-') && !lit.contains(char::is_whitespace))
+            .collect();
+
+        // Guard the scanner itself: if it silently matched nothing, or the
+        // source layout moved, the assertions below would pass vacuously.
+        for expected in [
+            "--once",
+            "--json",
+            "--debug-raw",
+            "--provider",
+            "--client-version",
+            "--help",
+            "-h",
+            "--version",
+        ] {
+            assert!(
+                flags.contains(&expected),
+                "scanner missed {expected}; found {flags:?}"
+            );
+        }
+
+        for flag in &flags {
+            assert!(
+                HELP.contains(flag),
+                "`{flag}` is accepted by parse_args but absent from --help text"
+            );
+        }
+    }
+
+    #[test]
+    fn help_text_names_the_renamed_binary() {
+        assert!(HELP.contains("quotapane-cli"));
+        assert!(!HELP.contains("usage-cli"));
     }
 }
