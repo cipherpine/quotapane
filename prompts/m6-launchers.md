@@ -11,8 +11,9 @@ Prompt A's launcher works today because its spec file is already on disk in
 every session reads its spec from the tree.
 
 Rules that apply to every launcher: run them in order A → B → C → D → E → F →
-G, one per session, never two in one session. D is not launchable yet — its
-content is §4.1 workflow bytes I author only after C reports real SHAs.
+G, one per session, never two in one session. Order note (owner decision
+2026-07-27): the public flip now precedes the v1.0.0 tag — D → E → G's
+history scan + flip → F.
 
 ---
 
@@ -98,13 +99,36 @@ verify. End gate: STOP, one commit, report.
 
 ---
 
-## D — supply-chain CI (NOT LAUNCHABLE YET)
+## D — supply-chain CI (after C; bytes pre-authored, already on disk)
 
-No launcher exists yet, deliberately. D's content is two §4.1 workflow files
-(the gitleaks job and release.yml) that I author from C's report — real SHAs,
-the gitleaks approach C recommends, the artifact paths C confirms. When C's
-report lands, hand it back to me; I return D's spec plus its launcher, and the
-floor's role in D is §4a diff-and-commit of pre-authored bytes, not authoring.
+Authored 2026-07-27 from C's pin report. The workflow files and the two §4.1
+code corrections are already written into the working tree by the top tier;
+this session verifies and commits, per §4a. Gate order changed by owner
+decision 2026-07-27: the public flip now precedes the v1.0.0 tag, so the
+order is D → E → G(scan+flip) → F.
+
+```
+# Goal prompt: M6-CI — land the supply-chain workflows and §4.1 fixes
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m6-supply-chain.md IN FULL and execute it as this
+session's goal prompt, verbatim. It is a §4a verify-and-commit: every
+byte landing in a §4.1 path was authored at the top tier — the two Rust
+files are already on disk; the two workflow files are embedded verbatim
+in the spec's §W and your first act is transcribing them to disk
+byte-exactly. You verify (md5 table in the spec), build,
+test, commit with the given messages, push once — you author nothing and
+fix nothing. If any hash mismatches, any test fails, or fmt/clippy would
+change a byte of a pre-authored file: STOP and hand back. If the new
+gitleaks job flags anything on its first full-history run: STOP and
+report each finding as file + commit + rule id, redacted, never the
+candidate value (§4.4). End gate: STOP; report the five SHAs, all six CI
+job results, the gitleaks outcome, and the test count. Do not start
+Prompt E.
+```
 
 ---
 
