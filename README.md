@@ -1,6 +1,5 @@
 # QuotaPane
 
-> **Working name** — will be renamed before the first public release.
 > Status: **M0 — trust boundary & scaffolding.** Not yet useful on a desk; the security core ships before the features do, on purpose.
 
 A live, always-on-top desktop window showing your AI usage and quota across **Anthropic (Claude)** and **OpenAI (Codex)**, read locally from **your own** credentials. Single Rust binary, no web layer, no telemetry, no auto-update.
@@ -28,7 +27,7 @@ Requires Rust 1.85+. Windows is the primary target; macOS and Linux are built an
 
 ## Roadmap
 
-Security-first, deliberately: **M0** trust boundary + CI (this) → **M1** Claude subscription provider, headless (`usage-cli --json`) → **M2** the always-on-top window → **M3** Codex provider → **M4** opt-in official billing APIs → **M5** history/forecasts → **M6** signed releases + packaging. See `ARCHITECTURE.md` §9.
+Security-first, deliberately: **M0** trust boundary + CI (this) → **M1** Claude subscription provider, headless (`quotapane-cli --json`) → **M2** the always-on-top window → **M3** Codex provider → **M4** opt-in official billing APIs → **M5** history/forecasts → **M6** signed releases + packaging. See `ARCHITECTURE.md` §9.
 
 ## Disclaimer
 

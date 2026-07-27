@@ -10,7 +10,7 @@
 
 ## 1. Settled decisions (do not relitigate)
 
-- License: dual **MIT OR Apache-2.0**. Placeholder name **QuotaPane** stays until the pre-release naming decision (owner-only, M6).
+- License: dual **MIT OR Apache-2.0**. Name: **QuotaPane** is the product name — the working name was adopted permanently by owner decision **D2, 2026-07-26**. The pre-release naming gate is closed; there is no rename pending. Binaries are `quotapane` (window) and `quotapane-cli` (headless) per **D3**; the crate names `usage-core` / `usage-ui` / `usage-cli` are product-neutral and deliberately unchanged.
 - v1 scope: **Claude + Codex subscription quota only.** Official Admin/usage billing APIs are **out of scope (ADR-002, 2026-07-23):** admin-key-only, unavailable to individual subscribers, no audience overlap, and holding an org-admin key would break the trust-boundary thesis. Any future cost view is token-free via `OtelSource` (M5), never an admin key.
 - Undocumented endpoints are **in**, gated behind the runtime disclaimer, failing closed on schema drift. QuotaPane sends official-client User-Agents (`claude-code/<ver>`, and the Codex equivalent) — a deliberate, disclosed choice (README + SECURITY.md).
 - Stack: Rust + egui/eframe (glow, no wgpu; ADR-001 rejected Tauri). `ureq` + `rustls`, synchronous, thread-based poller (no tokio). Windows is the primary target; macOS/Linux best-effort.

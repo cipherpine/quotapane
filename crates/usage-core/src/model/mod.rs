@@ -5,7 +5,7 @@
 //! construction (no secret-typed fields), which is what makes the
 //! process → UI channel a non-boundary (THREAT_MODEL.md §4).
 //!
-//! These types derive `Serialize` (for `usage-cli --json`). That is safe
+//! These types derive `Serialize` (for `quotapane-cli --json`). That is safe
 //! **because** they hold no secrets — the exact inverse of `Secret<T>`,
 //! which forbids `Serialize` for the same reason. Adding a secret-bearing
 //! field to any type here would be a breaking security change and must be

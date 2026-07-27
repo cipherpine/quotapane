@@ -142,7 +142,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
-                "usage: usage-cli --once [--json] [--provider claude|codex|all] [--client-version <VER>] [--debug-raw]"
+                "usage: quotapane-cli --once [--json] [--provider claude|codex|all] [--client-version <VER>] [--debug-raw]"
             );
             return ExitCode::from(2);
         }

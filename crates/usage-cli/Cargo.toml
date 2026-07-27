@@ -8,6 +8,12 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false # distributed as a signed binary, not on crates.io
 
+# The shipped executable is `quotapane-cli` (D2/D3, 2026-07-26): the product
+# name is QuotaPane, while the crate name stays product-neutral.
+[[bin]]
+name = "quotapane-cli"
+path = "src/main.rs"
+
 [dependencies]
 usage-core = { path = "../usage-core" }
 serde_json = { workspace = true }
