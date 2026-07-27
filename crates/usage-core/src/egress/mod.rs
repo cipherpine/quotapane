@@ -49,8 +49,10 @@ pub const ALLOWED_HOSTS: &[&str] = &[
     // Verified M3 against openai/codex source (codex-rs/backend-client) —
     // ChatGPT-plan usage is served by chatgpt.com, NOT api.openai.com.
     "chatgpt.com",
-    // GitHub: release update *check* only, and only when the user enables it (invariant 5).
-    "api.github.com",
+    // api.github.com was REMOVED 2026-07-27 (M6): it existed for the optional
+    // release update *check* (invariant 5), which is not implemented — zero
+    // callers in the workspace (gap report). Re-add it ONLY together with the
+    // update-check code itself, per the rules above.
 ];
 
 /// Connect timeout for outbound requests.
@@ -283,6 +285,7 @@ mod tests {
             "chatgpt.com:8443",     // port smuggling on the M3 host
             "openai.com",           // bare apex is NOT allowlisted
             "api.openai.com",       // withdrawn with M4 (ADR-002) — no longer allowlisted
+            "api.github.com",       // removed 2026-07-27 — update check unimplemented, zero callers
             "localhost",
             "127.0.0.1",
             "",
