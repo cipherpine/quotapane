@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "usage-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde_json",
  "usage-core",
@@ -2648,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "usage-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "usage-ui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "eframe",
  "tray-icon",
