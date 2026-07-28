@@ -190,27 +190,35 @@ authoring pass, never an inline edit mid-release.
 
 ---
 
-## G — pre-flip audit (after F phase 3; scan BEFORE deciding D7)
+## G — history scan + hygiene + flip (after E; BEFORE F under the new order)
+
+The spec at prompts/m6-public-flip.md supersedes the B–G file's Prompt G
+section, whose preconditions predate the gate reorder.
 
 ```
-# Goal prompt: M6-PUBLIC — pre-flip history scan and hygiene
+# Goal prompt: M6-PUBLIC — history scan, hygiene, and the flip
 
 Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
 
 Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
 
-Then read prompts/m6-prompts-b-to-g.md, section "Prompt G — public flip"
-INCLUDING the warning paragraph above its code block, and execute that
-spec verbatim. The spec is authoritative over this launcher.
+Then read prompts/m6-public-flip.md IN FULL and execute it as this
+session's goal prompt, verbatim. It SUPERSEDES the Prompt G section of
+prompts/m6-prompts-b-to-g.md (old gate order); the new file governs.
 
-Phase 1 first and alone: full-history secret scan, every commit on every
-ref including deleted files — gitleaks plus an independent pass for this
-project's own credential shapes. §4.4 absolutely: report file + commit +
-matched key NAME only, never a candidate value. Also enumerate every path
-history exposes that no longer exists (prompts/, _claude_setup, anything
-else). Write prompts/m6-history-scan.md, commit, then HARD STOP — that
-report decides rename-in-place vs fresh repo (D7) and whether keeping
-prompts/ private is even possible, and both are mine. Phase 2 (hygiene
-files) only after I resolve D7 in a later turn. You do not flip
-visibility or change any GitHub setting — that list is reported to me.
+Shape (the spec governs): Phase 0 commits the spec files. Phase 1 is the
+full-history secret scan — the pinned gitleaks binary locally PLUS an
+independent pass for this project's own credential shapes, every commit
+on every ref, deleted files included, never printing a candidate value
+(§4.4) — plus the exposure inventory of every path history reveals, into
+prompts/m6-history-scan.md. Then HARD STOP: the owner decides D7
+(rename-in-place vs fresh repo) and whether prompts/ publishes, on your
+report. Phase 2 runs only on the owner's explicit go-ahead in a later
+turn: transcribe the pre-authored .github templates from the spec's §W
+(md5-gated, §4a), author CODE_OF_CONDUCT.md, push. You never flip
+visibility or change a GitHub setting — that list is reported to the
+owner, verbatim. End gate: STOP; scan verdict first and most prominent.
 ```
+
+---
+
