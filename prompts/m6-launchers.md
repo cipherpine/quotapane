@@ -225,6 +225,38 @@ m6-public-flip phase 2.
 
 ---
 
+## G½b — author display name rewrite (after G½; before phase 2)
+
+Owner decision 2026-07-28: public history reads "Justin Parsons
+<justin.parsons@cipherpine.com>".
+
+```
+# Goal prompt: M6-REWRITE-2 — author display name (G½b)
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m6-history-rewrite-2.md IN FULL and execute it as this
+session's goal prompt, verbatim. The spec is authoritative over this
+launcher.
+
+Shape (the spec governs): same machinery as G½, one variable — a second
+mirror backup + fsck first; git filter-repo --name-callback maps
+justinparsons919 → Justin Parsons (author + committer), touching nothing
+else; the R3 invariants must ALL hold before the force-push — zero
+justinparsons919 hits on any ref, unchanged commit count, BYTE-IDENTICAL
+ordered tree list, unchanged Co-Authored-By count, and message bodies
+hash-equal before/after (this pass must not touch them); then commit the
+commit-map as prompts/m6-sha-map-2.txt (pre-G½ pins now chain through
+BOTH maps in order — the spec extends G½'s standing rule), set repo-local
+git config user.name, re-add origin, force-push, CI green. Any invariant
+failure = STOP before pushing. End gate: STOP with the invariant table
+and new tip. Do not start m6-public-flip phase 2.
+```
+
+---
+
 ## G — history scan + hygiene + flip (after E; BEFORE F under the new order)
 
 The spec at prompts/m6-public-flip.md supersedes the B–G file's Prompt G
