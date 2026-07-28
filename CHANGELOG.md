@@ -81,9 +81,11 @@ this project exists to keep small.
 - Release archives are **built only in CI** from a version tag, never on a
   maintainer's machine.
 - Every release ships **`SHA256SUMS`** covering all archives, a **cosign
-  keyless signature** over that file (`SHA256SUMS.sig` and `SHA256SUMS.pem`)
-  whose identity is this repository's release workflow rather than a long-lived
-  key, and a **GitHub build-provenance attestation** on each archive.
+  keyless signature** over that file as a Sigstore bundle
+  (`SHA256SUMS.sigstore.json`, carrying both the signature and the signing
+  certificate) whose identity is this repository's release workflow rather than
+  a long-lived key, and a **GitHub build-provenance attestation** on each
+  archive.
 - Each archive contains a **`TOOLCHAIN.txt`** recording the exact `rustc` and
   `cargo` versions that built it.
 - Every GitHub Action used is **pinned by full commit SHA**.

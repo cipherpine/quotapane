@@ -42,9 +42,9 @@ QuotaPane reads credentials your provider CLI already wrote, so sign in with `cl
 
 ## Verify a release
 
-Release artifacts are built only by [`.github/workflows/release.yml`](.github/workflows/release.yml) on a version tag, never on a maintainer's machine. Every release ships `SHA256SUMS` covering all archives, a `cosign` keyless signature over that file, and a build-provenance attestation on each archive. Verifying all three takes about a minute.
+Release artifacts are built only by [`.github/workflows/release.yml`](.github/workflows/release.yml) on a version tag, never on a maintainer's machine. Every release ships `SHA256SUMS` covering all archives, a `cosign` keyless signature over that file as a Sigstore bundle (`SHA256SUMS.sigstore.json`, which carries both the signature and the signing certificate), and a build-provenance attestation on each archive. Verifying all three takes about a minute.
 
-<!-- Maintainers: Prompt F's release-candidate dry-run executes these three commands verbatim against a real rc tag. If reality differs from what is written here, correct this section from that transcript — it is the authority, not this text. -->
+<!-- Maintainers: these three commands were run verbatim against the v1.0.0-rc.2 draft release and this section was corrected from that transcript (2026-07-28). Re-confirm against a real rc whenever the signing tooling changes — the transcript is the authority, not this text. -->
 
 **1. Checksum.** Put the archive next to `SHA256SUMS`, then:
 
@@ -62,11 +62,16 @@ Get-FileHash quotapane-v<version>-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 
 ```sh
 cosign verify-blob SHA256SUMS \
-  --signature SHA256SUMS.sig \
-  --certificate SHA256SUMS.pem \
+  --bundle SHA256SUMS.sigstore.json \
   --certificate-identity-regexp '^https://github\.com/cipherpine/quotapane/\.github/workflows/release\.yml@refs/tags/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
+
+This prints `Verified OK`. The identity regex is deliberately narrow: it matches only this repository's `release.yml` running on a tag ref, so a signature produced by any other workflow, or by this one on a branch, fails.
+
+You need a cosign that understands Sigstore bundles — confirmed with cosign 3.1.2 against a bundle produced by cosign 3.0.6 in CI. Releases no longer ship the detached `SHA256SUMS.sig` / `SHA256SUMS.pem` pair that cosign 2.x used.
+
+On Windows, run this from PowerShell or WSL rather than Git Bash. Git Bash rewrites the `\.` escapes in the identity regex before cosign sees them and the match fails; if you must use Git Bash, write `[.]` in place of each `\.`.
 
 **3. Provenance.** Each archive carries a GitHub build-provenance attestation, verifiable with the `gh` CLI:
 
