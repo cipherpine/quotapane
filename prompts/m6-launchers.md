@@ -164,28 +164,37 @@ history scan and public flip (Prompt G phase 1, owner-gated) first.
 
 ---
 
-## F — cut v1.0.0 (after B, D, E)
+## F — cut v1.0.0 (LAST; after the flip — repo must be public)
+
+The spec at prompts/m6-release.md supersedes the B–G file's Prompt F
+section (pre-reorder, pre-rewrite). It also carries the corrected SHA
+transposition rule: resolve old pins through m6-sha-map-2.txt ALONE.
 
 ```
-# Goal prompt: M6-RELEASE — cut v1.0.0
+# Goal prompt: M6-RELEASE — cut v1.0.0 (final form)
 
 Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
 
 Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
 
-Then read prompts/m6-prompts-b-to-g.md, section "Prompt F — v1.0.0", and
-execute that spec verbatim. The spec is authoritative over this launcher.
+Then read prompts/m6-release.md IN FULL and execute it as this session's
+goal prompt, verbatim. It SUPERSEDES the Prompt F section of
+prompts/m6-prompts-b-to-g.md; the new file governs, including the
+corrected rule that old SHA pins resolve through m6-sha-map-2.txt alone.
 
-Three phases (the spec governs): 1 — version bump 0.1.0 → 1.0.0 +
-CHANGELOG, one commit; if any third-party Cargo.lock entry moves, STOP.
-2 — tag v1.0.0-rc.1 and verify the draft release AS AN OUTSIDER: fresh
-downloads, SHA256SUMS, cosign verify-blob with explicit identity flags,
-gh attestation verify, extract and run --help; record exact commands and
-output — they become the README verify section. HARD STOP after phase 2:
-tagging v1.0.0 is the owner's call (§4.8). Phase 3 only on my explicit
-go-ahead in a later turn, and even then you hand me the draft — YOU DO
-NOT PUBLISH. If release.yml needs any fix, that is a STOP and a top-tier
-authoring pass, never an inline edit mid-release.
+Shape (the spec governs): P1 requires the repo to already be PUBLIC —
+if it is private, STOP; the flip is the owner's act. Phase 1: version
+0.1.0 → 1.0.0 + CHANGELOG, one commit; if any third-party Cargo.lock
+entry moves, STOP. Phase 2: tag v1.0.0-rc.1 and verify the draft AS AN
+OUTSIDER — fresh downloads, sha256sum -c, cosign verify-blob with
+explicit identity flags, gh attestation verify with commit-SHA match,
+archive contents, run --help from the extracted binary — recording every
+command verbatim, then correct README's verify section from the
+transcript if reality differs. HARD STOP: tagging v1.0.0 is the owner's
+call. Phase 3 only on explicit owner go-ahead: tag, re-verify fully,
+delete the rc, hand over the draft URL — YOU DO NOT PUBLISH. If
+release.yml needs any fix, that is a STOP and a top-tier authoring pass,
+never an inline edit mid-release.
 ```
 
 ---
