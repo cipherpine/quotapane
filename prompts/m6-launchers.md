@@ -190,6 +190,41 @@ authoring pass, never an inline edit mid-release.
 
 ---
 
+## G½ — history identity rewrite (between G phase 1 and phase 2)
+
+Owner decisions 2026-07-28 (after the clean phase-1 scan): rewrite the
+commit email to justin.parsons@cipherpine.com, strip Claude-Session lines,
+keep Co-Authored-By; publish everything, prompts/ stays in place.
+
+```
+# Goal prompt: M6-REWRITE — history identity rewrite (G½)
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m6-history-rewrite.md IN FULL and execute it as this
+session's goal prompt, verbatim. The spec is authoritative over this
+launcher.
+
+Shape (the spec governs): resolve the dependabot branch per §3 first, so
+no unrewritten ref survives; mirror-backup and fsck BEFORE anything;
+git filter-repo maps justin.parsons919@gmail.com →
+justin.parsons@cipherpine.com (author + committer) and strips
+Claude-Session: lines, keeping Co-Authored-By; the R5 invariants must ALL
+hold before the force-push — same commit count, same Co-Authored-By
+count, zero session lines, zero gmail hits, and a BYTE-IDENTICAL ordered
+tree list proving no file content changed anywhere in history; then
+commit the filter-repo commit-map as prompts/m6-sha-map.txt (all older
+SHA pins transpose through it — a standing rule the spec authorizes),
+re-add origin, force-push main, CI green. Any invariant failure = STOP
+before pushing; the backup stays private and is never pushed. End gate:
+STOP with the invariant table and the new tip. Do not start
+m6-public-flip phase 2.
+```
+
+---
+
 ## G — history scan + hygiene + flip (after E; BEFORE F under the new order)
 
 The spec at prompts/m6-public-flip.md supersedes the B–G file's Prompt G
