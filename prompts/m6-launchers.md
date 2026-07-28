@@ -132,35 +132,34 @@ Prompt E.
 
 ---
 
-## E — doc truth pass (after D; needs the security contact)
+## E — doc truth pass (after D; D5 resolved: no e-mail contact)
 
-Fill SECURITY_CONTACT with a real address, or the literal word NONE to delete
-the backup-channel line and rely on GitHub private vulnerability reporting.
+No fill-in values — the owner resolved D5 on 2026-07-28: GitHub private
+vulnerability reporting is the only channel, and the pre-authored
+SECURITY.md already reflects it. The two §4.1 docs are already on disk.
 
 ```
 # Goal prompt: M6-DOCS — make every claim in this repo true
 
 Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
 
-OWNER VALUE: SECURITY_CONTACT = FILL_ME
-
 Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
 
-Then read prompts/m6-prompts-b-to-g.md, section "Prompt E — doc truth
-pass", and execute that spec verbatim with the value above. The spec is
-authoritative over this launcher.
+Then read prompts/m6-doc-truth.md IN FULL and execute it as this
+session's goal prompt, verbatim. The spec is authoritative over this
+launcher.
 
-Shape (the spec governs): commit 1 is yours — a real README rewrite
-(current status, accurate roadmap with M4 withdrawn and M5 frozen at M5a,
-Rust 1.92 floor, install + verify sections, disclaimer substance intact)
-and CONTRIBUTING corrections. Commit 2 is §4a — SECURITY.md and
-THREAT_MODEL.md replacement bytes carried in the spec's marked TOP TIER
-block; if that block is still a bracketed placeholder, STOP: the top tier
-has not filled it yet and this prompt is not ready to run. Precondition
-P1 (gitleaks job + release.yml exist) is verified by reading the
-workflows, not by trusting the launcher. End gate: STOP, report findings
-closed vs deferred, and every claim you had to soften — the owner rules
-on those.
+Shape (the spec governs): commit 0 lands the spec files; commit 1 is
+YOURS — a real README rewrite (status, roadmap with M4 withdrawn and M5
+frozen at M5a, Rust 1.92, install + "Verify a release" with the exact
+release.yml-matching commands, disclaimer substance intact), CONTRIBUTING
+and ARCHITECTURE corrections per the gap-report checklist. Commits 2 and
+3 are §4a — SECURITY.md and THREAT_MODEL.md were fully re-authored at the
+top tier and sit in your working tree; verify the md5 table, read every
+hunk, commit verbatim, author nothing. End gate: STOP; report the four
+SHAs, CI, and the closed-vs-deferred table covering every G## finding in
+the gap report. Do not start Prompt F — the reordered gates put the
+history scan and public flip (Prompt G phase 1, owner-gated) first.
 ```
 
 ---
