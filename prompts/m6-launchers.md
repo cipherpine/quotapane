@@ -199,6 +199,37 @@ never an inline edit mid-release.
 
 ---
 
+## F½ — release.yml v2 fix + resume rc (after F's phase-2 STOP on rc.1)
+
+The rc.1 dry run caught two defects in the top-tier release.yml (upload
+glob matched the staging dir; cosign v3 removed the old signing flags).
+Fixed bytes are embedded in the spec; rc.1 is authorized for deletion.
+
+```
+# Goal prompt: M6-RELEASE-FIX — release.yml v2, then resume F (F½)
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m6-release-fix.md IN FULL and execute it as this
+session's goal prompt, verbatim. The spec is authoritative over this
+launcher.
+
+Shape (the spec governs): transcribe the embedded release.yml v2
+byte-exactly (§4a, md5-gated) — it fixes the staging-dir glob and moves
+signing to cosign v3's --bundle SHA256SUMS.sigstore.json; commit, push;
+delete the rc.1 tag (authorized by this spec, narrowly); then resume
+m6-release.md PHASE 2 verbatim with v1.0.0-rc.2 — tag, let the workflow
+run (any new failure = STOP, no inline fixes), verify the draft AS AN
+OUTSIDER including the new bundle-form cosign verify, and correct
+README's "Verify a release" to the bundle commands from your transcript.
+SECURITY.md needs no edit; if you think it does, that is a §4.1 STOP.
+HARD STOP after verification: tagging v1.0.0 stays the owner's call.
+```
+
+---
+
 ## G½ — history identity rewrite (between G phase 1 and phase 2)
 
 Owner decisions 2026-07-28 (after the clean phase-1 scan): rewrite the
