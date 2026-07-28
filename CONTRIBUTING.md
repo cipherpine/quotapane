@@ -7,7 +7,7 @@ Thanks for helping. This project's headline feature is a **small, auditable trus
 1. **Read `SECURITY.md` and `THREAT_MODEL.md` first.** The seven invariants are binding. A change that weakens one is a breaking security change: call it out explicitly in the PR description and update the docs in the same PR.
 2. **The trust boundary stays tiny.** Changes to `crates/usage-core/src/credentials/` or `crates/usage-core/src/egress/` get the strictest review. If your change grows the sensitive surface, expect to be asked for an alternative.
 3. **No new dependencies without justification.** Add a row to the table below in the same PR. `cargo-deny` and `cargo-audit` must stay green. Prefer std.
-4. **No secrets in the repo, ever.** Test fixtures are synthetic and generated at test runtime. CI runs secret scanning; don't make it earn its keep.
+4. **No secrets in the repo, ever.** Test fixtures are synthetic and generated at test runtime. CI runs `gitleaks` over the **full git history** on every push and pull request — not just the tip, because a secret deleted in a later commit is still a leak. There is deliberately no pre-commit hook: a hook cannot be enforced on contributors, and CI can. Don't make the scan earn its keep.
 5. **Every security invariant keeps a test.** Use the traceability table in `THREAT_MODEL.md` §9; if you touch an enforcing module, the corresponding test must still pass (and grow if behavior grew).
 6. **Threat-model review triggers** (`THREAT_MODEL.md` §11): adding a provider or data source, changing the egress allowlist, changing the update mechanism, or adding a dependency with network or serialization capability all require re-checking §6/§9 in the same PR.
 
@@ -31,7 +31,17 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-CI runs the same, plus `cargo-deny`, `cargo-audit`, and a no-telemetry check, on Windows/macOS/Linux.
+CI (`.github/workflows/ci.yml`) runs on every push to `main` and every pull request. It defines five jobs — the first is a three-OS matrix, so a green run shows seven checks:
+
+| Job | What it gates |
+|---|---|
+| `test` (×3: Windows, macOS, Linux) | `cargo build --locked`, `cargo test --locked` (including the invariant tests), `cargo fmt --check`, `cargo clippy -- -D warnings` |
+| `deny` | `cargo-deny`: licenses, bans, advisories, sources |
+| `audit` | `cargo-audit` against the RustSec advisory database |
+| `no-telemetry` | Greps `Cargo.toml` files and `*.rs` sources for analytics dependencies and telemetry endpoints — invariant 4 enforced as an absence check |
+| `gitleaks` | Full-history secret scan using a checksum-pinned `gitleaks` release binary, run with `--redact` so a finding never prints candidate secret bytes into a public CI log |
+
+A separate tag-triggered workflow (`.github/workflows/release.yml`) builds, checksums, signs, and attests release artifacts; it never runs on a push.
 
 ## Reporting security issues
 
