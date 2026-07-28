@@ -1,6 +1,6 @@
 # Threat Model
 
-> Project: **QuotaPane** (working name). Companion to `ARCHITECTURE.md` (design) and `SECURITY.md` (policy & disclosure).
+> Project: **QuotaPane**. Companion to `ARCHITECTURE.md` (design) and `SECURITY.md` (policy & disclosure).
 > Method: asset-centric analysis + STRIDE enumeration over the system's data flows, with explicit residual-risk and non-goal sections.
 > Audience: reviewers deciding whether to trust this tool with their provider credentials.
 
@@ -59,7 +59,7 @@ credential files (read-only) ─┐
 | Actor | Capability | In our scope? |
 |---|---|---|
 | **Auditing reviewer** | Reads all source; runs the binary under instrumentation | Yes — we want them to succeed and come away satisfied. |
-| **Network attacker / MITM** | On-path between the app and provider | Yes — TLS + optional pinning. |
+| **Network attacker / MITM** | On-path between the app and provider | Yes — mandatory TLS; no certificate pinning (see R1). |
 | **TLS-inspecting proxy** | Terminates TLS at a corporate gateway | Partial — surfaced + opt-in; see residual risk R3. |
 | **Malicious contributor** | Submits a PR | Yes — review + CI invariant tests + small surface. |
 | **Compromised dependency** | Ships malicious code in a crate we depend on | Yes — pinning, `cargo-deny`/`cargo-audit`, minimal deps. |
@@ -74,15 +74,15 @@ credential files (read-only) ─┐
 Scoped to the two trust boundaries and the release pipeline.
 
 ### Spoofing
-- **T-S1 — Impersonated provider endpoint / DNS or MITM redirection.** *Mitigation:* TLS verification is mandatory; provider hosts may be certificate-pinned; egress allowlist means the app will not follow a redirect to an off-list host. *Residual:* R1.
+- **T-S1 — Impersonated provider endpoint / DNS or MITM redirection.** *Mitigation:* TLS verification is mandatory (`rustls`, platform trust anchors); redirects are never followed, and the egress allowlist means a redirect cannot carry a request to an off-list host anyway. **Certificate pinning is not implemented** — it was considered and has not been built, so it appears under residual risk, not here. *Residual:* R1.
 
 ### Tampering
-- **T-T1 — Tampered release binary exfiltrates tokens.** *Mitigation:* CI-only builds, signed artifacts + provenance/attestations, published checksums, reproducible-where-feasible; "build from source" documented. *Residual:* R2.
+- **T-T1 — Tampered release binary exfiltrates tokens.** *Mitigation:* releases are built only by the tag-triggered CI workflow (`release.yml`): `--locked` builds, published `SHA256SUMS` signed with cosign keyless signing, and build provenance attestations on every archive; per-release toolchain recorded (`TOOLCHAIN.txt`); "build from source" documented as the maximum-assurance path. *Residual:* R2.
 - **T-T2 — Malicious dependency introduces a covert egress or a redaction bypass.** *Mitigation:* committed `Cargo.lock`, minimal justified deps, `cargo-deny` + `cargo-audit` in CI, small enough surface that a covert egress path would have to route around the single chokepoint (which tests guard).
 - **T-T3 — App corrupts the user's `auth.json`.** *Mitigation:* credential files opened read-only; refresh delegated to official CLIs; the app never writes them. (Addresses A3.)
 
 ### Repudiation
-- Low relevance for a local, single-user read-only tool. Optional local, non-sensitive debug logs are opt-in and redacted; they contain no secrets and no first-party telemetry is emitted.
+- Low relevance for a local, single-user read-only tool. The app writes **no logs at all**: no logging backend is linked (`deny.toml` bans logger-backend crates, so every `log` macro in the dependency tree is a no-op), and no first-party telemetry exists.
 
 ### Information disclosure  *(primary risk category)*
 - **T-I1 — Token written to disk.** *Mitigation:* invariant 1 (no persistence) + test.
@@ -92,11 +92,11 @@ Scoped to the two trust boundaries and the release pipeline.
 - **T-I5 — Token observed by a TLS-inspecting proxy.** *Mitigation:* invariant 7 — proxy off by default, explicit warning + opt-in. *Residual:* R3.
 
 ### Denial of service
-- **T-D1 — Provider rate-limits the app (`429`) or the fallback call consumes quota.** *Mitigation:* adaptive polling with exponential backoff; the header-fallback call is minimal; polling cadence is user-configurable. Impact is limited to stale display, never a crash.
+- **T-D1 — Provider rate-limits the app (`429`).** *Mitigation:* a hard ≥180 s floor between polls, exponential backoff capped at 30 min, and `retry-after` honored when longer — all in one pure, tested function (`next_delay`). Impact is limited to stale display, never a crash.
 
 ### Elevation of privilege
 - **T-E1 — App requests or requires elevated privileges.** *Mitigation:* runs as a normal user; no elevation requested. Autostart (opt-in) registers only a user-scope login entry.
-- **T-E2 — Silent auto-update escalates into arbitrary code execution as the user.** *Mitigation:* invariant 5 — no silent auto-update; update check notifies only and is off by default.
+- **T-E2 — Silent auto-update escalates into arbitrary code execution as the user.** *Mitigation:* invariant 5, in its strongest form — **no update mechanism exists at all**: no updater code path, no update check, nothing to misconfigure. The egress allowlist (two provider hosts) leaves a covert updater nowhere to call.
 
 ---
 
@@ -115,8 +115,8 @@ Stating these plainly is part of being trustworthy:
 
 | # | Risk | Why it remains | User mitigation |
 |---|---|---|---|
-| **R1** | On-path attacker with a trusted-CA cert could MITM if pinning is disabled | Pinning is optional to avoid breakage on legitimate proxies | Enable pinning; avoid untrusted networks; verify egress. |
-| **R2** | A compromised maintainer account could publish a signed-but-malicious release | Signing proves *who* built it, not that the code is benign | Build from source; pin to a reviewed commit; diff releases. |
+| **R1** | On-path attacker holding a certificate your OS trusts could MITM the provider connection | **Certificate pinning is not implemented**; TLS trusts the platform root store | Keep your OS trust store clean; avoid untrusted networks; for maximum assurance build from source and verify egress with a packet capture (`SECURITY.md`, hardening §3). |
+| **R2** | A compromised maintainer account could publish a malicious release — signed, because the signing identity is the CI workflow itself | Keyless signing + provenance prove an artifact came from this repo's CI at a given commit; they cannot prove the commit was benign | Build from source; pin to a reviewed commit; diff releases; check the provenance's commit SHA against the audited source. |
 | **R3** | TLS-inspecting corporate proxy can see the bearer token | Inherent to TLS interception; can't be prevented once opted in | Keep proxy off; understand your managed-device posture. |
 | **R4** | Undocumented endpoint change could alter behavior unexpectedly | We don't control the provider | Graceful degradation; the app fails closed (shows stale/error, never leaks). |
 
@@ -124,15 +124,20 @@ Stating these plainly is part of being trustworthy:
 
 ## 9. Invariant → control → test traceability
 
-| Invariant (`SECURITY.md`) | Enforcing module | Test |
+This table is honest about its two kinds of rows: invariants that assert a
+**behavior** are backed by named tests; invariants that assert an **absence**
+(1, 5) are enforced by there being no code path — the control is the empty
+grep, re-checked at every review touching the trust boundary (§11).
+
+| Invariant (`SECURITY.md`) | Enforcing control | Test / check |
 |---|---|---|
-| 1. No credential persistence | `credentials`, config layer | assert no write path emits token bytes |
-| 2. No credential leakage | `credentials::Secret<T>` | redaction + zeroize tests; `Debug` scrub test |
-| 3. Deny-by-default egress | `egress` | allowlist test: non-listed host → error |
-| 4. No first-party telemetry | (absence) | grep/CI check: no analytics deps or endpoints |
-| 5. No silent auto-update | updater | update-check is notify-only; disabled by default (unit test) |
-| 6. Read-only credentials | `credentials` | no write handle opened; refresh delegates to CLI |
-| 7. Proxy opt-in | `egress` | proxy env set → requires explicit flag before send |
+| 1. No credential persistence | absence of any credential write path in the workspace | enforced by absence; the read path's invariant-6 test (`loads_credential_readonly_and_redacted`) pins the only file access as read-only |
+| 2. No credential leakage | `credentials::Secret<T>` | redaction + zeroize tests (`secret.rs`); `Debug` scrub test (`credentials/mod.rs`); end-to-end failure-path redaction test (`poller::tests::failures_are_forwarded_as_non_secret_messages` — a provider that formats its `Secret` into an error provably cannot leak it to the UI channel) |
+| 3. Deny-by-default egress | `egress` (`ALLOWED_HOSTS`, exactly two hosts) | `non_allowlisted_host_is_rejected` (incl. removed hosts `api.openai.com`, `api.github.com`), `get_refuses_non_allowlisted_host`, `authority_smuggling_paths_are_rejected` |
+| 4. No first-party telemetry | (absence) | CI `no-telemetry` job: greps deps and sources for analytics |
+| 5. No self-update | absence of any updater code path | enforced by absence; the two-host allowlist test above doubles as the check that a covert updater has nowhere to call |
+| 6. Read-only credentials | `credentials` | `loads_credential_readonly_and_redacted`: file bytes identical after load; no write handle exists |
+| 7. Proxy opt-in | `egress` | `proxy_env_without_opt_in_fails_closed` + opt-in and empty-var tests |
 
 ---
 
