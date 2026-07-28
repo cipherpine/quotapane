@@ -1,0 +1,66 @@
+name: Bug report
+description: Something broke, rendered wrong, or behaved unexpectedly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste credential material.** No tokens, no `auth.json` or
+        `.credentials.json` contents, no `Authorization` headers, no
+        environment dumps. QuotaPane's own outputs are designed to contain
+        no secrets, but skim anything you paste before you post it. A report
+        that includes a credential will be edited/deleted on sight — and you
+        should rotate that credential immediately.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `quotapane-cli --version` (or the release tag you downloaded).
+      placeholder: quotapane-cli 1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows (release binary)
+        - Linux (release binary)
+        - Built from source (any OS — say which below)
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Area
+      options:
+        - Claude provider
+        - Codex provider
+        - Both providers
+        - Window / rendering
+        - CLI
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Normalized CLI output (optional)
+      description: >
+        If relevant, paste the output of `quotapane-cli --once --json`.
+        This is the normalized snapshot — percentages and reset times only,
+        no token material by design — but read it before posting anyway.
+      render: json
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Credential check
+      options:
+        - label: I confirm this report contains no tokens, credential-file contents, or other secret material.
+          required: true
