@@ -390,3 +390,30 @@ Claude). Full bar from cargo clean, push, CI 7/7. End gate: STOP — the
 owner's visual check covers M7a + this together (Fable row, no Spark,
 resets available: 1). Do not bump the version or tag.
 ```
+
+## M7-RELEASE — v1.1.0 (paste ONLY after your visual acceptance)
+
+```
+Owner acceptance: I have visually accepted M7a + M7A2 (Fable row, no
+Codex toggle, resets available: 1). Proceed.
+
+# Goal prompt: M7-RELEASE — cut v1.1.0
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m7-release.md IN FULL and execute it as this session's
+goal prompt, verbatim. The spec is authoritative over this launcher and
+governs over m6-release.md where they differ.
+
+Shape (the spec governs): Phase 1 bumps 1.0.0 → 1.1.0 + CHANGELOG entry,
+one commit, STOP if any third-party Cargo.lock entry moves. Phase 2 tags
+v1.1.0-rc.1 and verifies the draft AS AN OUTSIDER — all six steps with
+negative controls; release.yml is unchanged since v1.0.0 verified it and
+is never edited inline. HARD STOP after verification: tagging v1.1.0 is
+the owner's call. Phase 3 on explicit go-ahead: tag, re-verify, delete
+the rc, hand over the draft URL — you do not publish. Phase 4, after the
+owner confirms publication: apply the spec's exact DECISIONS.md patch
+(§4a) stamping M7a/M7A2 accepted and v1.1.0 shipped.
+```
