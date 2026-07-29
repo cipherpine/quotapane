@@ -329,3 +329,35 @@ owner, verbatim. End gate: STOP; scan verdict first and most prominent.
 
 ---
 
+
+## M7a — per-model truth, v1.1.0 (after v1.0.0 published)
+
+Owner decisions 2026-07-29: Claude per-model via the endpoint's new
+`limits` array (Fable); UI hides untouched buckets, CLI/JSON stay
+truthful; v1.1.0 is exactly this slice. M6-CLOSE landed at 843a09a;
+this spec's patch now only opens M7a.
+
+```
+# Goal prompt: M7A — per-model truth (v1.1.0)
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m7a-per-model-truth.md IN FULL and execute it as this
+session's goal prompt, verbatim. The spec is authoritative over this
+launcher. Note P0: the working tree may be detached at the v1.0.0 tag —
+`git checkout main` first; the spec files survive the checkout.
+
+Shape (the spec governs): Phase 0 commits the spec files, then applies
+the exact DECISIONS.md patch (§4a, byte-match gate — inserts the M7a
+segment after the M6 ✅ stamp that landed at 843a09a). Phase 1 is yours: parse the Claude limits
+array (only percent/resets_at/scope.model.display_name — no id, no PII
+field ever), per_model from model-scoped entries with the legacy keys as
+fallback, synthetic fixtures for the new shape. Phase 2: UI hides
+per-model rows at 0%/unknown usage and drops the toggle when none are
+visible; a new CLI test pins that zero-usage buckets STAY in --json.
+Full bar from cargo clean, push, CI 7/7. End gate: STOP for the owner's
+visual check (Fable row appears, Spark row gone, CLI still truthful).
+Do not bump the version or tag — the v1.1.0 release is a later prompt.
+```
