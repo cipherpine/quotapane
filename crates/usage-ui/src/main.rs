@@ -88,6 +88,14 @@ const CARDINAL: egui::Color32 = egui::Color32::from_rgb(196, 30, 58);
 /// so it draws its own. ~24px tall.
 const TITLEBAR_HEIGHT: f32 = 24.0;
 
+/// Status-cursor blink period. Steps, not a fade — a terminal cursor is on or
+/// off.
+const CURSOR_BLINK_PERIOD: Duration = Duration::from_millis(1100);
+/// Block-cursor size at titlebar scale.
+const CURSOR_SIZE: egui::Vec2 = egui::vec2(7.0, 13.0);
+/// Gap between the prompt text and the block cursor.
+const CURSOR_GAP: f32 = 3.0;
+
 /// Blueprint grid pitch, both axes.
 const GRID_PITCH: f32 = 40.0;
 /// Grid line alpha, out of 255. Texture, not noise — high enough to read as
@@ -316,6 +324,80 @@ fn install_theme(ctx: &egui::Context) {
     });
 
     ctx.set_theme(egui::ThemePreference::Dark);
+}
+
+/// The status cursor's state for one frame: `(visible, needs_repaint)`.
+///
+/// The cursor is a **status indicator, not decoration**: solid means idle and
+/// healthy, blinking means the app is working or the data has gone stale.
+///
+/// `needs_repaint` is the load-bearing half. A solid cursor returns `false`, so
+/// an idle healthy window schedules no repaint on the cursor's account and
+/// costs nothing while it sits on screen. Only a blinking cursor asks to be
+/// woken. Pure, so all three states are unit-testable without a window.
+fn cursor_phase(blinking: bool, elapsed: Duration) -> (bool, bool) {
+    if !blinking {
+        return (true, false);
+    }
+    let period = CURSOR_BLINK_PERIOD.as_millis();
+    let phase = elapsed.as_millis() % period;
+    // On for the first half of the period, off for the second — steps.
+    (phase * 2 < period, true)
+}
+
+/// How long until the blinking cursor next flips, so a repaint can be
+/// scheduled exactly at the boundary instead of polling at some safe-but-chatty
+/// interval.
+fn cursor_next_toggle(elapsed: Duration) -> Duration {
+    let half = CURSOR_BLINK_PERIOD.as_millis() / 2;
+    let into_half = elapsed.as_millis() % half;
+    Duration::from_millis((half - into_half) as u64)
+}
+
+/// Whether the status cursor should blink: any provider still awaiting its
+/// first poll, or any provider's data gone stale.
+///
+/// "A poll is in flight" is read as *awaiting the first snapshot* — the poller
+/// reports only `Snapshot` and `Failure`, with no in-flight event, so this is
+/// the honest signal available without inventing one. A pane that has a
+/// snapshot polls again on its own cadence without the window knowing.
+fn cursor_should_blink(panes: &[ProviderPane]) -> bool {
+    panes.iter().any(|pane| {
+        pane_wants_blink(
+            pane.handle.is_some(),
+            pane.latest_snapshot.is_some(),
+            pane.latest_failure.is_some(),
+            pane.snapshot_received_at.map(|t| t.elapsed()),
+        )
+    })
+}
+
+/// Whether one pane's state warrants a blinking cursor.
+///
+/// Split out from [`cursor_should_blink`] as a pure predicate over plain facts:
+/// a live `PollerHandle` cannot be constructed in a test without spawning a
+/// real poller thread, so testing through `ProviderPane` could only ever
+/// exercise the no-handle cases and would quietly assert nothing about the
+/// in-flight one.
+fn pane_wants_blink(
+    has_poller: bool,
+    has_snapshot: bool,
+    has_failure: bool,
+    age: Option<Duration>,
+) -> bool {
+    let awaiting_first_poll = has_poller && !has_snapshot && !has_failure;
+    let stale = age.is_some_and(is_stale);
+    awaiting_first_poll || stale
+}
+
+/// Paint the block cursor, always allocating its space so the prompt does not
+/// jitter as the cursor blinks.
+fn render_cursor(ui: &mut egui::Ui, visible: bool) {
+    ui.add_space(CURSOR_GAP);
+    let (rect, _) = ui.allocate_exact_size(CURSOR_SIZE, egui::Sense::hover());
+    if visible {
+        ui.painter().rect_filled(rect, 0.0, CARDINAL);
+    }
 }
 
 /// The blueprint grid: hairline-thin PINE rules every [`GRID_PITCH`] px on both
@@ -697,6 +779,12 @@ impl QuotaPaneApp {
         let mut minimize = false;
         let mut close = false;
 
+        // Status cursor: computed before the panel closure so the pane borrow
+        // ends before the closure takes `&mut self` state.
+        let blinking = cursor_should_blink(&self.panes);
+        let elapsed = Duration::from_secs_f64(ctx.input(|i| i.time).max(0.0));
+        let (cursor_visible, cursor_needs_repaint) = cursor_phase(blinking, elapsed);
+
         let frame = egui::Frame::new().fill(PANEL).inner_margin(egui::Margin {
             left: 8,
             right: 2,
@@ -733,9 +821,17 @@ impl QuotaPaneApp {
                     }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         render_prompt(ui);
+                        render_cursor(ui, cursor_visible);
                     });
                 });
             });
+
+        // Only a blinking cursor schedules a repaint; a solid one costs
+        // nothing. Scheduled at the exact next flip rather than on a safe
+        // interval, so blinking is crisp without extra wake-ups.
+        if cursor_needs_repaint {
+            ctx.request_repaint_after(cursor_next_toggle(elapsed));
+        }
 
         // The 1px HAIRLINE rule under the strip. Painted rather than using
         // egui's separator line so it spans the full width with no margin.
@@ -2104,6 +2200,136 @@ mod tests {
         assert_eq!(size(egui::TextStyle::Heading), 15.0);
         assert_eq!(size(egui::TextStyle::Body), 12.0);
         assert_eq!(size(egui::TextStyle::Small), 10.5);
+    }
+
+    // --- M7b: the status cursor ---
+
+    #[test]
+    fn idle_healthy_cursor_is_solid_and_never_repaints() {
+        // The load-bearing assertion of the whole feature: an idle, fresh
+        // window must not schedule a single repaint on the cursor's account,
+        // at any point in the period.
+        for ms in [0, 100, 549, 550, 551, 1099, 5_000, 3_600_000] {
+            let (visible, needs_repaint) = cursor_phase(false, Duration::from_millis(ms));
+            assert!(visible, "solid cursor vanished at {ms}ms");
+            assert!(!needs_repaint, "idle cursor asked for a repaint at {ms}ms");
+        }
+    }
+
+    #[test]
+    fn blinking_cursor_steps_on_and_off_each_half_period() {
+        // 1.1s period: on for [0, 550), off for [550, 1100).
+        let on = |ms: u64| cursor_phase(true, Duration::from_millis(ms)).0;
+        assert!(on(0));
+        assert!(on(549));
+        assert!(!on(550));
+        assert!(!on(1_099));
+        // And it wraps.
+        assert!(on(1_100));
+        assert!(!on(1_650));
+    }
+
+    #[test]
+    fn blinking_cursor_always_requests_a_repaint() {
+        for ms in [0, 300, 550, 900, 1_100] {
+            assert!(cursor_phase(true, Duration::from_millis(ms)).1);
+        }
+    }
+
+    #[test]
+    fn next_toggle_lands_on_the_half_period_boundary() {
+        // Never zero (that would busy-loop) and never past a half period.
+        for ms in [0, 1, 274, 549, 550, 1_099] {
+            let d = cursor_next_toggle(Duration::from_millis(ms));
+            assert!(d > Duration::ZERO, "zero delay at {ms}ms would busy-loop");
+            assert!(d <= Duration::from_millis(550), "overshot at {ms}ms");
+        }
+        assert_eq!(
+            cursor_next_toggle(Duration::from_millis(0)),
+            Duration::from_millis(550)
+        );
+        assert_eq!(
+            cursor_next_toggle(Duration::from_millis(500)),
+            Duration::from_millis(50)
+        );
+    }
+
+    #[test]
+    fn cursor_blinks_while_a_first_poll_is_in_flight() {
+        // Live poller, nothing reported yet — the in-flight state.
+        assert!(pane_wants_blink(true, false, false, None));
+        // ...and it settles the moment a fresh snapshot lands.
+        assert!(!pane_wants_blink(
+            true,
+            true,
+            false,
+            Some(Duration::from_secs(1))
+        ));
+        // A failure is an answer too: it ends the in-flight state, and the
+        // failure banner carries the message rather than the cursor.
+        assert!(!pane_wants_blink(true, false, true, None));
+        // No poller at all (startup error) is not "in flight".
+        assert!(!pane_wants_blink(false, false, false, None));
+    }
+
+    #[test]
+    fn cursor_blinks_when_a_snapshot_has_gone_stale() {
+        let fresh = Some(Duration::from_secs(1));
+        let just_under = Some(STALE_AFTER - Duration::from_secs(1));
+        let stale = Some(STALE_AFTER + Duration::from_secs(1));
+
+        assert!(!pane_wants_blink(true, true, false, fresh));
+        assert!(!pane_wants_blink(true, true, false, just_under));
+        assert!(pane_wants_blink(true, true, false, stale));
+        // Stale wins even when everything else looks settled.
+        assert!(pane_wants_blink(false, true, true, stale));
+    }
+
+    #[test]
+    fn cursor_blink_is_any_pane_not_all_panes() {
+        // One unhealthy provider is enough — the cursor reports the window's
+        // worst state, not an average.
+        let healthy = ProviderPane::new::<ClaudeSubscription>(ProviderId::ClaudeSubscription, None);
+        // Both panes have no handle and a startup error => nothing blinks.
+        let panes = vec![healthy];
+        assert!(!cursor_should_blink(&panes));
+
+        // The predicate is what `any` is applied to; prove the OR directly.
+        assert!([false, true].iter().any(|&stale| pane_wants_blink(
+            true,
+            true,
+            false,
+            stale.then(|| STALE_AFTER + Duration::from_secs(1))
+        )));
+    }
+
+    #[test]
+    fn cursor_does_not_change_the_titlebar_height() {
+        // Space is allocated whether or not the cursor is painted, so the
+        // prompt cannot jitter between blink states.
+        let lay = |visible: bool| {
+            lay_out(|ui| {
+                ui.horizontal(|ui| {
+                    render_prompt(ui);
+                    render_cursor(ui, visible);
+                });
+            })
+        };
+        let on = lay(true);
+        let off = lay(false);
+        assert_eq!(
+            on.width, off.width,
+            "prompt width jitters as the cursor blinks"
+        );
+        assert_eq!(on.height, off.height);
+
+        // Measured, not asserted from constants: the prompt row plus its
+        // cursor still fits inside the fixed titlebar strip.
+        assert!(
+            on.height <= TITLEBAR_HEIGHT,
+            "prompt row wanted {}px inside the {TITLEBAR_HEIGHT}px titlebar",
+            on.height
+        );
     }
 
     #[test]
