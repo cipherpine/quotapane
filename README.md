@@ -1,5 +1,12 @@
 <img src="assets/quotapane-readme-banner.png" alt="QuotaPane — Claude & Codex quota left, read locally, nothing phoned home" width="100%">
 
+<p>
+  <a href="https://github.com/cipherpine/quotapane/actions/workflows/ci.yml"><img src="https://github.com/cipherpine/quotapane/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/cipherpine/quotapane/releases/latest"><img src="https://img.shields.io/github/v/release/cipherpine/quotapane" alt="Latest release"></a>
+  <a href="https://github.com/cipherpine/quotapane/releases"><img src="https://img.shields.io/github/downloads/cipherpine/quotapane/total" alt="Total downloads"></a>
+  <a href="https://github.com/cipherpine/quotapane#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"></a>
+</p>
+
 A small, always-on-top desktop window that shows how much of your **Claude** and **Codex** subscription quota you have left — read locally, from your own credentials, with no account to create and nothing phoned home.
 
 The entire value proposition is a **small, auditable trust boundary**. Only two modules ever touch a credential or the network — `crates/usage-core/src/credentials/` and `crates/usage-core/src/egress/` — and they are deliberately small enough to read end to end in one sitting. Everything else is scheduling and rendering.
