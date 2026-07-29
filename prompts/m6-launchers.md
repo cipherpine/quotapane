@@ -483,3 +483,36 @@ config/TOML/dirs crate is a STOP. Full bar from cargo clean, push,
 CI 7/7. End gate: STOP for the owner's round-2 visual pass; no
 DECISIONS change, no tag, version stays 1.1.0.
 ```
+
+## M7B-RELEASE — v1.2.0 (paste ONLY after your visual acceptance)
+
+Pasting this launcher records the owner's §4.5 acceptance of the M7b
+look (round 2). Spec: prompts/m7b-release.md — the proven release
+pipeline, verbatim.
+
+```
+# Goal prompt: M7B-RELEASE — v1.2.0
+
+Owner acceptance: I have visually accepted the M7b Cipher Pine pass
+(round 2 — calmed grid, brightened type, theme toggle, screenshots).
+Proceed.
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m7b-release.md IN FULL and execute it as this
+session's goal prompt, verbatim. The spec is authoritative over this
+launcher.
+
+Shape (the spec governs): Phase 1 bumps 1.1.0 → 1.2.0 and inserts the
+spec's verbatim CHANGELOG entry; full bar, push, CI 7/7 before any
+tag. Phase 2 tags v1.2.0-rc.1, runs the release workflow, then the
+six-step outsider verification with all six negative controls — and
+HARD STOPS with a report. Phase 3 runs only on the top tier's
+explicit go-ahead: tag v1.2.0 on the verified commit, re-verify
+fresh, delete the rc only after v1.2.0 verifies, hand back the draft
+URL — the owner publishes. Phase 4, only after the owner confirms
+publication: the exact §4a DECISIONS stamp, push, CI green, STOP.
+No code changes, no new dependencies, nothing published by you.
+```
