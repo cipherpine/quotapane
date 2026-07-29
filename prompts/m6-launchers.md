@@ -452,3 +452,34 @@ ZERO new dependencies anywhere — needing one is a STOP. Full bar from
 cargo clean, push, CI 7/7. End gate: STOP for the owner's visual pass;
 expect iteration rounds; version stays 1.1.0.
 ```
+
+## M7B-R1 — visual iteration 1 (owner round-1 feedback, 2026-07-29)
+
+Grid→noise, type weight, eye comfort, plain-vs-themed toggle. Owner
+decisions locked: fainter+wider grid; brighten+enlarge (font embed =
+round-2 escalation); tray toggle persisted; Plain = pre-M7b look.
+
+```
+# Goal prompt: M7B-R1 — visual pass iteration 1
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m7b-r1-visual-iteration.md IN FULL and execute it as
+this session's goal prompt, verbatim. The spec is authoritative over
+this launcher.
+
+Shape (the spec governs): the owner's round-1 feedback, applied.
+Phase 1 calms the theme — grid 64px at alpha 6, type up (16/13/11.5),
+ink brightened; the layout harness still arbitrates at 320px (shrink
+type, never widen). Phase 2 adds Theme::{CipherPine, Plain} with a
+one-word persisted config (std-only; garbage/absent → CipherPine) —
+Plain is the pre-M7b look; the semantic bar mapping stays in BOTH
+themes. Phase 3 wires the tray-menu toggle (live switch + persist),
+--plain/--themed run-only flags, and the spec's verbatim README
+"Theming" section. usage-core untouched; ZERO new dependencies — a
+config/TOML/dirs crate is a STOP. Full bar from cargo clean, push,
+CI 7/7. End gate: STOP for the owner's round-2 visual pass; no
+DECISIONS change, no tag, version stays 1.1.0.
+```
