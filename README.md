@@ -1,4 +1,4 @@
-# QuotaPane
+<img src="assets/quotapane-readme-banner.png" alt="QuotaPane — Claude & Codex quota left, read locally, nothing phoned home" width="100%">
 
 A small, always-on-top desktop window that shows how much of your **Claude** and **Codex** subscription quota you have left — read locally, from your own credentials, with no account to create and nothing phoned home.
 
