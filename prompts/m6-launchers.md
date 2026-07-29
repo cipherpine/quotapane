@@ -516,3 +516,36 @@ URL — the owner publishes. Phase 4, only after the owner confirms
 publication: the exact §4a DECISIONS stamp, push, CI green, STOP.
 No code changes, no new dependencies, nothing published by you.
 ```
+
+## M8 — pace slice (v1.3.0 scope; after v1.2.0 closed)
+
+Roadmap research accepted 2026-07-29: pace markers + burn forecast;
+sparklines/persistence deferred to v1.4. Zero new deps, no new
+persistence, no new network behavior.
+
+```
+# Goal prompt: M8 — pace
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m8-pace.md IN FULL and execute it as this session's
+goal prompt, verbatim. The spec is authoritative over this launcher.
+
+Shape (the spec governs): Phase 0 applies the exact DECISIONS.md
+patch opening M8. Phase 1 (usage-core): QuotaWindow.duration_secs —
+Codex passthrough, Claude derived from limit kind — with the JSON key
+always present (null when unknown), pin-tested. Phase 2 (usage-core):
+pure pace module — PaceRing, least-squares estimate over a 7200s
+trail (>=3 samples spanning >=600s), at_risk = exhaustion before
+reset; exhaustive edge tests, no clock reads inside. Phase 3
+(usage-ui): 1px elapsed-time tick on every bar with known duration,
+TEXT_DIM alpha 200, both themes, position pure-fn tested. Phase 4
+(usage-ui): rings fed per poll, ONE at-risk line per provider (amber;
+cardinal under 6h; silent when safe), --pace-demo flag (synthetic
+data, zero network) for the owner's review. ZERO new dependencies;
+no sparklines, no disk history — that is v1.4. Full bar from cargo
+clean, push, CI 7/7. Version stays 1.2.0. End gate: STOP for the
+owner's visual pass.
+```
