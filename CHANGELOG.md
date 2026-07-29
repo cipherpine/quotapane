@@ -5,6 +5,44 @@ All notable changes to QuotaPane are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-07-29
+
+Per-model quota truth, and Codex reset credits.
+
+Anthropic changed the shape of its usage response: the per-model numbers moved
+into a general `limits` array, and the two older per-model fields they replaced
+now come back empty. QuotaPane read only those older fields, so the Claude
+per-model breakdown had quietly gone blank. This release reads the new shape,
+so model-scoped quotas appear again.
+
+### Added
+
+- **Codex reset credits.** The Codex pane shows `resets available: N` when the
+  provider reports rate-limit reset credits — the allowance for clearing a rate
+  limit early. `--json` carries the same data as `reset_credits`: `available`
+  is how many you own, `applicable_now` is how many you could spend at this
+  moment, which is normally `0` unless you are actually rate-limited. A
+  provider with no such concept — Claude — reports `null` and shows no line.
+
+### Fixed
+
+- **Claude per-model quotas are visible again.** They are now read from the
+  provider's generalized `limits` array: any entry scoped to a model becomes a
+  per-model row, labelled with the provider's own name for that model. The
+  older `seven_day_opus` / `seven_day_sonnet` fields are still read as a
+  fallback for accounts that continue to send them, so nothing is lost either
+  way.
+
+### Changed
+
+- **The window hides per-model buckets you have never touched.** Providers list
+  every model on your plan, not only the ones you use, so an unused bucket
+  spent two lines saying `0%` in a window that cannot be resized. Those rows
+  are now hidden, and the per-model toggle disappears entirely when hiding them
+  leaves nothing to show. This is a display change only — `quotapane-cli
+  --json` still reports every bucket the provider sent, zeroes included, so
+  anything scripted against the JSON sees exactly what it saw before.
+
 ## [1.0.0] - 2026-07-28
 
 First stable release.
@@ -107,4 +145,5 @@ R2 in `THREAT_MODEL.md`. For maximum assurance, build from source.
   `prompts/m6-sha-map-2.txt`; `prompts/m6-sha-map.txt` is retained only as the
   record of the intermediate state.
 
+[1.1.0]: https://github.com/cipherpine/quotapane/releases/tag/v1.1.0
 [1.0.0]: https://github.com/cipherpine/quotapane/releases/tag/v1.0.0
