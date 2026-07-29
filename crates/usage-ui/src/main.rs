@@ -46,6 +46,8 @@ use usage_core::providers::{
     ClaudeSubscription, CodexSubscription, UsageProvider, CODEX_DEFAULT_USER_AGENT,
 };
 
+mod icon;
+
 /// Sent when `--client-version` is omitted. Mirrors `usage-cli`'s default —
 /// real Claude Code versions avoid the provider's aggressively rate-limited
 /// fallback bucket (see `claude_subscription` module docs in usage-core).
@@ -487,74 +489,11 @@ fn tray_tooltip(entries: &[(&str, Option<&ProviderSnapshot>)]) -> String {
         .join(" | ")
 }
 
-/// Side length (px) of the square tray icon generated at runtime.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-const ICON_SIZE: u32 = 32;
-
-/// Write one RGBA pixel into a row-major `size`×`size` buffer.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-fn put_px(px: &mut [u8], size: usize, x: usize, y: usize, rgba: [u8; 4]) {
-    let i = (y * size + x) * 4;
-    px[i..i + 4].copy_from_slice(&rgba);
-}
-
-/// Draw a horizontal gauge bar: the `track` color across `[left, right)` on
-/// rows `[top, bottom)`, with the leading `fraction` filled in `color`.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-#[allow(clippy::too_many_arguments)]
-fn fill_bar(
-    px: &mut [u8],
-    size: usize,
-    top: usize,
-    bottom: usize,
-    left: usize,
-    right: usize,
-    color: [u8; 4],
-    track: [u8; 4],
-    fraction: f64,
-) {
-    let span = right - left;
-    let fill_end = left + ((span as f64) * fraction.clamp(0.0, 1.0)).round() as usize;
-    for y in top..bottom {
-        for x in left..right {
-            put_px(px, size, x, y, if x < fill_end { color } else { track });
-        }
-    }
-}
-
-/// Generate the tray icon as raw RGBA8 (`ICON_SIZE`×`ICON_SIZE`, row-major).
+/// Side length (px) of the square icon generated at runtime.
 ///
-/// Drawn entirely in code — no asset file, no build script, no image decoder.
-/// It's a tiny two-bar gauge on a dark tile, echoing the window's quota bars: a
-/// fuller green bar over a shorter amber one.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-fn tray_icon_rgba() -> Vec<u8> {
-    let size = ICON_SIZE as usize;
-    let mut px = vec![0u8; size * size * 4]; // transparent background
-
-    const TILE: [u8; 4] = [24, 27, 33, 255]; // dark slate
-    const TRACK: [u8; 4] = [55, 60, 68, 255]; // unfilled bar background
-    const GREEN: [u8; 4] = [46, 160, 67, 255]; // matches NORMAL_COLOR
-    const AMBER: [u8; 4] = [230, 162, 60, 255]; // matches WARNING_COLOR
-
-    // Dark tile, inset 2px, with the four hard corners clipped for a soft look.
-    for y in 2..size - 2 {
-        for x in 2..size - 2 {
-            let corner = (x < 4 || x >= size - 4) && (y < 4 || y >= size - 4);
-            if !corner {
-                put_px(&mut px, size, x, y, TILE);
-            }
-        }
-    }
-
-    // Two horizontal gauge bars echoing the window's quota bars.
-    let left = 7;
-    let right = size - 7;
-    fill_bar(&mut px, size, 10, 15, left, right, GREEN, TRACK, 0.70);
-    fill_bar(&mut px, size, 18, 23, left, right, AMBER, TRACK, 0.40);
-
-    px
-}
+/// Not tray-gated: since M7b the same mark is also the window/taskbar icon,
+/// which every platform sets — Linux included.
+const ICON_SIZE: u32 = 32;
 
 /// Runtime tray-icon integration. Owns the live tray handle and the receiver
 /// its OS event handlers feed. Windows + macOS only.
@@ -580,6 +519,9 @@ mod tray {
         /// Whether the window is currently shown (the tray toggles this).
         pub visible: bool,
         last_tooltip: String,
+        /// The RGBA bytes currently on screen, so an unchanged render skips
+        /// the platform call entirely.
+        last_icon: Vec<u8>,
     }
 
     impl Tray {
@@ -640,8 +582,10 @@ mod tray {
                 }));
             }
 
-            let icon = Icon::from_rgba(super::tray_icon_rgba(), super::ICON_SIZE, super::ICON_SIZE)
-                .ok()?;
+            // Start from the neutral mark; `set_icon_if_changed` swaps in a
+            // live one as soon as the first snapshots land.
+            let initial = crate::icon::render_icon(None, None, super::ICON_SIZE);
+            let icon = Icon::from_rgba(initial.clone(), super::ICON_SIZE, super::ICON_SIZE).ok()?;
             let icon = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
                 // Left-click raises the window; the menu is a right-click.
@@ -656,6 +600,7 @@ mod tray {
                 rx,
                 visible: true,
                 last_tooltip: INITIAL_TOOLTIP.to_string(),
+                last_icon: initial,
             })
         }
 
@@ -670,6 +615,23 @@ mod tray {
             if tooltip != self.last_tooltip {
                 let _ = self.icon.set_tooltip(Some(tooltip));
                 self.last_tooltip = tooltip.to_string();
+            }
+        }
+
+        /// Swap in a freshly rendered mark, but only when its bytes differ from
+        /// what is already displayed.
+        ///
+        /// The icon is re-rendered every frame (pure arithmetic, cheap), so
+        /// without this guard the app would hand the OS an identical bitmap
+        /// dozens of times a second. Usage moves slowly; the bytes almost
+        /// always match.
+        pub fn set_icon_if_changed(&mut self, rgba: Vec<u8>) {
+            if rgba == self.last_icon {
+                return;
+            }
+            if let Ok(icon) = Icon::from_rgba(rgba.clone(), super::ICON_SIZE, super::ICON_SIZE) {
+                let _ = self.icon.set_icon(Some(icon));
+                self.last_icon = rgba;
             }
         }
     }
@@ -867,11 +829,32 @@ impl QuotaPaneApp {
             tray_tooltip(&entries)
         };
 
+        // The live miniature: the tray mark carries each provider's
+        // representative headline fraction, so the tray and the window report
+        // the same thing. Rendered from the same snapshots as the tooltip.
+        let rgba = {
+            let fraction = |id: ProviderId| {
+                self.panes
+                    .iter()
+                    .find(|pane| pane.id == id)
+                    .and_then(|pane| pane.latest_snapshot.as_ref())
+                    .and_then(representative_window)
+                    .and_then(|window| window.used_fraction)
+                    .map(|f| f as f32)
+            };
+            icon::render_icon(
+                fraction(ProviderId::ClaudeSubscription),
+                fraction(ProviderId::CodexSubscription),
+                ICON_SIZE,
+            )
+        };
+
         // Update the tooltip and collect events without holding the tray borrow
         // across the app mutations below.
         let messages = match self.tray.as_mut() {
             Some(tray) => {
                 tray.set_tooltip_if_changed(&tooltip);
+                tray.set_icon_if_changed(rgba);
                 tray.take_messages()
             }
             None => return,
@@ -1371,11 +1354,20 @@ fn main() -> ExitCode {
         CodexSubscription::with_default_path(args.codex_user_agent),
     );
 
+    // The window/taskbar icon is the neutral mark — no usage yet at startup,
+    // and a taskbar entry is not the place for a live gauge. The tray is.
+    let window_icon = egui::IconData {
+        rgba: icon::render_icon(None, None, ICON_SIZE),
+        width: ICON_SIZE,
+        height: ICON_SIZE,
+    };
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
             .with_decorations(false)
             .with_resizable(false)
+            .with_icon(window_icon)
             .with_always_on_top(),
         ..Default::default()
     };
@@ -2443,43 +2435,53 @@ mod tray_tests {
         assert!(!tip.contains('|'));
     }
 
-    // --- icon pixel generation invariants ---
+    // --- tray icon at tray scale (M7b) ---
+    //
+    // The mark's geometry and colour mapping are covered in `icon`'s own
+    // tests at native 64px scale; these pin what the *tray* specifically
+    // depends on at ICON_SIZE.
 
     #[test]
-    fn icon_has_expected_dimensions() {
-        let px = tray_icon_rgba();
+    fn tray_icon_has_expected_dimensions() {
+        let px = icon::render_icon(None, None, ICON_SIZE);
         assert_eq!(px.len(), (ICON_SIZE * ICON_SIZE * 4) as usize);
     }
 
     #[test]
-    fn icon_corner_is_transparent() {
-        let px = tray_icon_rgba();
+    fn tray_icon_corner_is_transparent() {
+        let px = icon::render_icon(None, None, ICON_SIZE);
         assert_eq!(pixel(&px, ICON_SIZE as usize, 0, 0), [0, 0, 0, 0]);
     }
 
     #[test]
-    fn icon_center_is_opaque() {
-        // The icon is not blank: its tile center is fully opaque.
-        let px = tray_icon_rgba();
+    fn tray_icon_center_is_opaque() {
+        // Not blank: the tile centre is fully opaque even with no usage.
+        let px = icon::render_icon(None, None, ICON_SIZE);
         let c = ICON_SIZE as usize / 2;
         assert_eq!(pixel(&px, ICON_SIZE as usize, c, c)[3], 255);
     }
 
     #[test]
-    fn icon_draws_green_and_amber_bars() {
-        let px = tray_icon_rgba();
-        let size = ICON_SIZE as usize;
-        // Green bar (rows 10..15), inside the filled portion.
-        assert_eq!(pixel(&px, size, 10, 12), [46, 160, 67, 255]);
-        // Amber bar (rows 18..23), inside the filled portion.
-        assert_eq!(pixel(&px, size, 10, 20), [230, 162, 60, 255]);
+    fn tray_icon_is_live_at_tray_scale() {
+        // The whole point of re-rendering per poll: different usage must
+        // produce a visibly different tray bitmap even at 32px, or the
+        // set_icon_if_changed guard would never fire and the tray would lie.
+        let quiet = icon::render_icon(Some(0.1), Some(0.1), ICON_SIZE);
+        let busy = icon::render_icon(Some(0.9), Some(0.9), ICON_SIZE);
+        assert_ne!(quiet, busy);
+
+        // ...and unknown differs from known-empty's neighbours too.
+        let unknown = icon::render_icon(None, None, ICON_SIZE);
+        assert_ne!(unknown, busy);
     }
 
     #[test]
-    fn icon_bar_shows_unfilled_track() {
-        let px = tray_icon_rgba();
-        let size = ICON_SIZE as usize;
-        // Past the 70% fill of the green bar: the track color.
-        assert_eq!(pixel(&px, size, 23, 12), [55, 60, 68, 255]);
+    fn tray_icon_is_stable_for_unchanged_usage() {
+        // The cache guard compares whole buffers, so identical input must give
+        // byte-identical output or the OS call would fire every frame.
+        assert_eq!(
+            icon::render_icon(Some(0.42), Some(0.17), ICON_SIZE),
+            icon::render_icon(Some(0.42), Some(0.17), ICON_SIZE)
+        );
     }
 }
