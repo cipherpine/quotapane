@@ -52,20 +52,47 @@ use usage_core::providers::{
 const DEFAULT_CLIENT_VERSION: &str = "0.0.0";
 
 /// A snapshot is considered stale once it's this old without a fresh poll.
-const STALE_AFTER: Duration = Duration::from_secs(15 * 60);
+///
+/// M7b lowered this from 15 minutes to 10: the stale treatment is now a
+/// whole-line CARDINAL flip rather than a single amber word, so it earns being
+/// reached sooner.
+const STALE_AFTER: Duration = Duration::from_secs(600);
 
-const NORMAL_COLOR: egui::Color32 = egui::Color32::from_rgb(46, 160, 67);
-const WARNING_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 162, 60);
-const CRITICAL_COLOR: egui::Color32 = egui::Color32::from_rgb(217, 62, 62);
+// --------------------------------------------------------------------------
+// Cipher Pine palette (M7b). Every colour in the window comes from here — a
+// literal `Color32::from_rgb` anywhere else in this file is a regression.
+// --------------------------------------------------------------------------
+
+/// Window fill. `#0a0f0d`
+const GROUND: egui::Color32 = egui::Color32::from_rgb(10, 15, 13);
+/// Titlebar fill, and the trough behind a quota bar. `#0e100f`
+const PANEL: egui::Color32 = egui::Color32::from_rgb(14, 16, 15);
+/// Borders and the blueprint grid's base hue. `#1e2422`
+const HAIRLINE: egui::Color32 = egui::Color32::from_rgb(30, 36, 34);
+/// Primary text. `#cdd6d1`
+const TEXT: egui::Color32 = egui::Color32::from_rgb(205, 214, 209);
+/// Labels and reset countdowns. `#8a938e`
+const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(138, 147, 142);
+/// The "updated Ns ago" line while fresh. `#5c665f`
+const TEXT_FAINT: egui::Color32 = egui::Color32::from_rgb(92, 102, 95);
+/// Healthy bar fill. `#2d7a4f`
+const PINE: egui::Color32 = egui::Color32::from_rgb(45, 122, 79);
+/// The "operational" dot beside a fresh update line. `#3fae6a`
+const OPER_GREEN: egui::Color32 = egui::Color32::from_rgb(63, 174, 106);
+/// Caution bar fill. `#d9a13b`
+const AMBER: egui::Color32 = egui::Color32::from_rgb(217, 161, 59);
+/// Prompt, cursor, critical fill, and every stale/error line. `#c41e3a`
+const CARDINAL: egui::Color32 = egui::Color32::from_rgb(196, 30, 58);
 
 /// Slim custom titlebar — the window is borderless (`with_decorations(false)`),
 /// so it draws its own. ~24px tall.
 const TITLEBAR_HEIGHT: f32 = 24.0;
-/// Dark strip echoing the tray icon's tile (the tray's `TILE` slate), so the
-/// titlebar reads as the same product as the tray.
-const TITLEBAR_BG: egui::Color32 = egui::Color32::from_rgb(24, 27, 33);
-/// Near-white app-name text on the dark strip.
-const TITLEBAR_TEXT: egui::Color32 = egui::Color32::from_rgb(220, 223, 228);
+
+/// Blueprint grid pitch, both axes.
+const GRID_PITCH: f32 = 40.0;
+/// Grid line alpha, out of 255. Texture, not noise — high enough to read as
+/// deliberate under the content, low enough never to compete with it.
+const GRID_ALPHA: u8 = 12;
 
 /// Caption beside the per-model disclosure triangle.
 const PER_MODEL_CAPTION: &str = "per-model";
@@ -77,6 +104,12 @@ const WINDOW_HEIGHT: f32 = 240.0;
 
 /// How far a per-model row's bar line is inset under its model label.
 const PER_MODEL_ROW_INDENT: f32 = 8.0;
+
+/// Quota bar width. Shared by the headline and per-model rows so a gauge stays
+/// comparable at a glance wherever it appears.
+const BAR_WIDTH: f32 = 120.0;
+/// Corner rounding on a quota bar and its border.
+const BAR_ROUNDING: u8 = 3;
 
 struct Args {
     /// Claude Code client version → `User-Agent: claude-code/<ver>`.
@@ -223,14 +256,87 @@ fn is_stale(age: Duration) -> bool {
     age >= STALE_AFTER
 }
 
-/// Bar color for a quota window's used fraction: green/amber/red by
+/// Bar color for a quota window's used fraction: pine/amber/cardinal by
 /// severity threshold, or gray when the fraction is unknown.
+///
+/// The thresholds are lower than the pre-M7b ones (0.80 / 0.95): a quota half
+/// spent is worth noticing, and the palette has a caution colour that reads
+/// calmly enough to use at that point.
 fn fraction_color(fraction: Option<f64>) -> egui::Color32 {
     match fraction {
+        // Unknown keeps the existing neutral treatment — an unknown fraction is
+        // not a severity, and colouring it would assert something we don't know.
         None => egui::Color32::GRAY,
-        Some(f) if f >= 0.95 => CRITICAL_COLOR,
-        Some(f) if f >= 0.80 => WARNING_COLOR,
-        Some(_) => NORMAL_COLOR,
+        Some(f) if f >= 0.80 => CARDINAL,
+        Some(f) if f >= 0.50 => AMBER,
+        Some(_) => PINE,
+    }
+}
+
+/// Install the Cipher Pine theme on a context.
+///
+/// Called from the eframe creation closure **and** from the test layout
+/// harness, so every width/height assertion measures the real shipped type
+/// rather than egui's proportional default. That shared call is the whole
+/// point: mono is wider per character, and a harness on the default font would
+/// have cheerfully passed a layout that clips in the real window.
+fn install_theme(ctx: &egui::Context) {
+    use egui::{FontFamily, FontId, TextStyle};
+
+    // Everything is egui's built-in monospace — no font asset, no new crate.
+    // Sizes were arbitrated by the layout harness, not chosen by eye.
+    let text_styles: std::collections::BTreeMap<TextStyle, FontId> = [
+        (TextStyle::Heading, FontId::new(15.0, FontFamily::Monospace)),
+        (TextStyle::Body, FontId::new(12.0, FontFamily::Monospace)),
+        (
+            TextStyle::Monospace,
+            FontId::new(12.0, FontFamily::Monospace),
+        ),
+        (TextStyle::Button, FontId::new(12.0, FontFamily::Monospace)),
+        (TextStyle::Small, FontId::new(10.5, FontFamily::Monospace)),
+    ]
+    .into();
+
+    // Applied to *both* the dark and light styles. The window pins itself to
+    // dark below, but a stray light-themed popup inheriting egui's defaults
+    // would break the look, and `all_styles_mut` costs nothing to prevent it.
+    ctx.all_styles_mut(|style| {
+        style.text_styles = text_styles.clone();
+
+        let v = &mut style.visuals;
+        v.panel_fill = GROUND;
+        v.window_fill = GROUND;
+        // `extreme_bg_color` is what `ProgressBar` paints its trough with.
+        v.extreme_bg_color = PANEL;
+        // Applies wherever text sets no explicit colour; an explicit
+        // `RichText::color` still wins, which is how the accents survive.
+        v.override_text_color = Some(TEXT);
+        v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, HAIRLINE);
+        v.window_stroke = egui::Stroke::new(1.0, HAIRLINE);
+    });
+
+    ctx.set_theme(egui::ThemePreference::Dark);
+}
+
+/// The blueprint grid: hairline-thin PINE rules every [`GRID_PITCH`] px on both
+/// axes, painted under the content.
+///
+/// Drawn with the painter rather than a background image for the same reason
+/// the disclosure triangle is painted: no asset, no decoder, no dependency.
+fn paint_grid(ui: &egui::Ui, rect: egui::Rect) {
+    let color = egui::Color32::from_rgba_unmultiplied(PINE.r(), PINE.g(), PINE.b(), GRID_ALPHA);
+    let stroke = egui::Stroke::new(1.0, color);
+    let painter = ui.painter();
+
+    let mut x = rect.left();
+    while x <= rect.right() {
+        painter.vline(x, rect.y_range(), stroke);
+        x += GRID_PITCH;
+    }
+    let mut y = rect.top();
+    while y <= rect.bottom() {
+        painter.hline(rect.x_range(), y, stroke);
+        y += GRID_PITCH;
     }
 }
 
@@ -591,14 +697,12 @@ impl QuotaPaneApp {
         let mut minimize = false;
         let mut close = false;
 
-        let frame = egui::Frame::new()
-            .fill(TITLEBAR_BG)
-            .inner_margin(egui::Margin {
-                left: 8,
-                right: 2,
-                top: 0,
-                bottom: 0,
-            });
+        let frame = egui::Frame::new().fill(PANEL).inner_margin(egui::Margin {
+            left: 8,
+            right: 2,
+            top: 0,
+            bottom: 0,
+        });
 
         egui::Panel::top("titlebar")
             .exact_size(TITLEBAR_HEIGHT)
@@ -628,14 +732,19 @@ impl QuotaPaneApp {
                         minimize = true;
                     }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new("QuotaPane")
-                                .color(TITLEBAR_TEXT)
-                                .strong(),
-                        );
+                        render_prompt(ui);
                     });
                 });
             });
+
+        // The 1px HAIRLINE rule under the strip. Painted rather than using
+        // egui's separator line so it spans the full width with no margin.
+        let bar = root_ui.max_rect();
+        root_ui.painter().hline(
+            bar.x_range(),
+            bar.top() + TITLEBAR_HEIGHT,
+            egui::Stroke::new(1.0, HAIRLINE),
+        );
 
         if minimize {
             self.hide_window(ctx);
@@ -751,6 +860,9 @@ impl eframe::App for QuotaPaneApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
+            // Blueprint grid, painted before any content so it sits underneath.
+            paint_grid(ui, bg_rect);
+
             // Vertical safety net. The window is a fixed 240px with no resize,
             // so content that outgrows it has nowhere to go: expanding several
             // per-model rows (two lines each), or Claude also reporting
@@ -790,12 +902,41 @@ impl eframe::App for QuotaPaneApp {
     }
 }
 
+/// The titlebar's shell prompt: `> quotapane`, the caret in CARDINAL.
+///
+/// Two labels with horizontal item spacing zeroed rather than one string:
+/// egui colours a `RichText` as a unit, and the caret is the only cardinal
+/// part. The leading space lives in the second label so the caret keeps tight
+/// bounds — which matters once the status cursor sits after the name.
+fn render_prompt(ui: &mut egui::Ui) {
+    ui.spacing_mut().item_spacing.x = 0.0;
+    ui.label(egui::RichText::new(">").color(CARDINAL).strong());
+    ui.label(egui::RichText::new(" quotapane").color(TEXT));
+}
+
+/// A provider section header: `// CLAUDE` — comment slashes CARDINAL, name
+/// uppercase TEXT_DIM.
+///
+/// egui has no letter-spacing control, so plain uppercase mono is the
+/// approximation the spec accepts rather than faking tracking with padding.
+fn render_provider_header(ui: &mut egui::Ui, id: ProviderId) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.label(egui::RichText::new("// ").small().color(CARDINAL));
+        ui.label(
+            egui::RichText::new(provider_label(id).to_uppercase())
+                .small()
+                .color(TEXT_DIM),
+        );
+    });
+}
+
 /// Render one provider's titled section.
 fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane) {
-    ui.heading(provider_label(pane.id));
+    render_provider_header(ui, pane.id);
 
     if let Some(err) = &pane.startup_error {
-        ui.colored_label(CRITICAL_COLOR, err);
+        ui.colored_label(CARDINAL, err);
         return;
     }
 
@@ -823,7 +964,7 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane) {
         }
         FailureDisplay::Banner => {
             if let Some(message) = &pane.latest_failure {
-                ui.colored_label(CRITICAL_COLOR, message);
+                ui.colored_label(CARDINAL, message);
             }
         }
     }
@@ -851,8 +992,7 @@ fn render_windows(
         ui.label(
             egui::RichText::new(reset_credits_line(&credits))
                 .small()
-                .monospace()
-                .color(ui.visuals().weak_text_color()),
+                .color(TEXT_DIM),
         );
     }
 
@@ -881,20 +1021,35 @@ fn render_windows(
     }
 
     if let Some(age) = age {
-        let age_secs = age.as_secs();
-        let mut age_text = format!("updated {}", format_age(age_secs));
-        if is_stale(age) {
-            age_text.push_str("  •  stale");
-        }
-        let color = if is_stale(age) {
-            WARNING_COLOR
-        } else {
-            ui.visuals().weak_text_color()
-        };
-        ui.colored_label(color, age_text);
+        render_age_line(ui, age);
     }
 
     toggled
+}
+
+/// The freshness footer: a status dot then `updated Ns ago`.
+///
+/// Fresh reads quietly — OPER_GREEN dot, TEXT_FAINT text. Stale turns the
+/// **whole** line CARDINAL, dot included, so staleness is legible from the
+/// colour alone without reading the words.
+fn render_age_line(ui: &mut egui::Ui, age: Duration) {
+    let stale = is_stale(age);
+    let (dot_color, text_color) = if stale {
+        (CARDINAL, CARDINAL)
+    } else {
+        (OPER_GREEN, TEXT_FAINT)
+    };
+
+    let mut text = format!("updated {}", format_age(age.as_secs()));
+    if stale {
+        text.push_str("  ·  stale");
+    }
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(egui::RichText::new("•").small().color(dot_color));
+        ui.label(egui::RichText::new(text).small().color(text_color));
+    });
 }
 
 /// The reset-credits line, e.g. `resets available: 1`.
@@ -922,19 +1077,39 @@ fn per_model_row_is_visible(window: &QuotaWindow) -> bool {
     window.used_fraction.is_some_and(|fraction| fraction > 0.0)
 }
 
+/// Add a quota bar and outline its trough with a HAIRLINE border.
+///
+/// `ProgressBar` paints its trough from `visuals.extreme_bg_color` (PANEL) but
+/// exposes no stroke, so the border is painted over the returned rect. One
+/// helper for both row renderers, so the headline and per-model bars cannot
+/// drift apart.
+fn add_quota_bar(ui: &mut egui::Ui, fraction: Option<f64>) {
+    let response = ui.add(
+        egui::ProgressBar::new(fraction.unwrap_or(0.0) as f32)
+            .desired_width(BAR_WIDTH)
+            .corner_radius(BAR_ROUNDING)
+            .fill(fraction_color(fraction))
+            .text(format_percent(fraction)),
+    );
+    ui.painter().rect_stroke(
+        response.rect,
+        BAR_ROUNDING,
+        egui::Stroke::new(1.0, HAIRLINE),
+        egui::StrokeKind::Inside,
+    );
+}
+
 fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow) {
     ui.horizontal(|ui| {
-        ui.label(&window.label);
+        ui.label(egui::RichText::new(&window.label).color(TEXT));
         // The numeric percent rides on the bar itself; `--` when unknown (an
         // unknown fraction also draws an empty gray bar).
-        ui.add(
-            egui::ProgressBar::new(window.used_fraction.unwrap_or(0.0) as f32)
-                .desired_width(120.0)
-                .fill(fraction_color(window.used_fraction))
-                .text(format_percent(window.used_fraction)),
-        );
+        add_quota_bar(ui, window.used_fraction);
         // Compact reset countdown, e.g. "resets in 3h 12m"; `--` when unknown.
-        ui.label(format!("resets in {}", format_reset(window.resets_in_secs)));
+        ui.label(
+            egui::RichText::new(format!("resets in {}", format_reset(window.resets_in_secs)))
+                .color(TEXT_DIM),
+        );
     });
 }
 
@@ -953,29 +1128,24 @@ fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow) {
 /// long. Widening the label column instead would only move the cliff, and
 /// model names trend longer over time.
 ///
-/// The label is small + weak so the two lines read as one subordinate row
-/// rather than as two unrelated ones. The bar keeps the headline row's
-/// `desired_width(120.0)`, `fraction_color`, `format_percent`, and the
-/// `"resets in {}"` phrasing, so a per-model gauge stays comparable at a
-/// glance with a headline gauge.
+/// The label is small + dim so the two lines read as one subordinate row
+/// rather than as two unrelated ones. The bar goes through the shared
+/// [`add_quota_bar`], so a per-model gauge stays comparable at a glance with a
+/// headline gauge — width, rounding, border and fill mapping all in step.
 fn render_per_model_row(ui: &mut egui::Ui, window: &QuotaWindow) {
-    let weak = ui.visuals().weak_text_color();
     ui.label(
         egui::RichText::new(window.label.as_str())
             .small()
-            .color(weak),
+            .color(TEXT_DIM),
     );
     ui.horizontal(|ui| {
         ui.add_space(PER_MODEL_ROW_INDENT);
-        // 120.0 deliberately matches `render_window_row`'s bar; that function
-        // is not edited to share a constant, so keep the two in step by hand.
-        ui.add(
-            egui::ProgressBar::new(window.used_fraction.unwrap_or(0.0) as f32)
-                .desired_width(120.0)
-                .fill(fraction_color(window.used_fraction))
-                .text(format_percent(window.used_fraction)),
+        add_quota_bar(ui, window.used_fraction);
+        ui.label(
+            egui::RichText::new(format!("resets in {}", format_reset(window.resets_in_secs)))
+                .small()
+                .color(TEXT_DIM),
         );
-        ui.label(format!("resets in {}", format_reset(window.resets_in_secs)));
     });
 }
 
@@ -1118,6 +1288,11 @@ fn main() -> ExitCode {
         "QuotaPane",
         native_options,
         Box::new(move |_cc| {
+            // Cipher Pine theme, installed before the first frame. The test
+            // layout harness installs the same one, so its width assertions
+            // measure the type this window actually renders.
+            install_theme(&_cc.egui_ctx);
+
             // Create the tray on the main thread, now that eframe/winit is up.
             // If creation fails, fall back to close-to-quit.
             #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -1284,6 +1459,11 @@ mod tests {
     /// extents.
     fn lay_out(mut add_contents: impl FnMut(&mut egui::Ui)) -> Laid {
         let ctx = egui::Context::default();
+        // The shipped theme, not egui's default. Monospace is wider per
+        // character than the proportional default, so a harness without this
+        // would happily pass a row that clips in the real window — which is
+        // precisely the blind spot these tests exist to close.
+        install_theme(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1859,13 +2039,14 @@ mod tests {
     // --- is_stale ---
 
     #[test]
-    fn not_stale_just_under_fifteen_minutes() {
-        assert!(!is_stale(Duration::from_secs(899)));
+    fn not_stale_just_under_ten_minutes() {
+        assert!(!is_stale(Duration::from_secs(599)));
     }
 
     #[test]
-    fn stale_at_fifteen_minutes() {
-        assert!(is_stale(Duration::from_secs(900)));
+    fn stale_at_ten_minutes() {
+        // M7b lowered the threshold from 15 minutes to 10.
+        assert!(is_stale(Duration::from_secs(600)));
     }
 
     // --- fraction_color ---
@@ -1876,21 +2057,61 @@ mod tests {
     }
 
     #[test]
-    fn low_usage_is_green() {
-        assert_eq!(fraction_color(Some(0.0)), NORMAL_COLOR);
-        assert_eq!(fraction_color(Some(0.79)), NORMAL_COLOR);
+    fn low_usage_is_pine() {
+        assert_eq!(fraction_color(Some(0.0)), PINE);
+        assert_eq!(fraction_color(Some(0.49)), PINE);
     }
 
     #[test]
-    fn eighty_percent_is_amber() {
-        assert_eq!(fraction_color(Some(0.80)), WARNING_COLOR);
-        assert_eq!(fraction_color(Some(0.94)), WARNING_COLOR);
+    fn half_spent_is_amber() {
+        assert_eq!(fraction_color(Some(0.50)), AMBER);
+        assert_eq!(fraction_color(Some(0.79)), AMBER);
     }
 
     #[test]
-    fn ninety_five_percent_is_red() {
-        assert_eq!(fraction_color(Some(0.95)), CRITICAL_COLOR);
-        assert_eq!(fraction_color(Some(1.0)), CRITICAL_COLOR);
+    fn eighty_percent_is_cardinal() {
+        assert_eq!(fraction_color(Some(0.80)), CARDINAL);
+        assert_eq!(fraction_color(Some(1.0)), CARDINAL);
+    }
+
+    // --- M7b palette wiring ---
+
+    #[test]
+    fn theme_installs_monospace_everywhere() {
+        // Every text style must be mono: one proportional leftover would make
+        // the harness's width arbitration meaningless for that style.
+        let ctx = egui::Context::default();
+        install_theme(&ctx);
+        let style = ctx.style_of(egui::Theme::Dark);
+        for (text_style, font_id) in &style.text_styles {
+            assert_eq!(
+                font_id.family,
+                egui::FontFamily::Monospace,
+                "{text_style:?} is not monospace"
+            );
+        }
+        assert_eq!(style.visuals.panel_fill, GROUND);
+        assert_eq!(style.visuals.extreme_bg_color, PANEL);
+        assert_eq!(style.visuals.override_text_color, Some(TEXT));
+    }
+
+    #[test]
+    fn theme_type_scale_matches_the_spec() {
+        let ctx = egui::Context::default();
+        install_theme(&ctx);
+        let style = ctx.style_of(egui::Theme::Dark);
+        let size = |s: egui::TextStyle| style.text_styles.get(&s).unwrap().size;
+        assert_eq!(size(egui::TextStyle::Heading), 15.0);
+        assert_eq!(size(egui::TextStyle::Body), 12.0);
+        assert_eq!(size(egui::TextStyle::Small), 10.5);
+    }
+
+    #[test]
+    fn grid_alpha_stays_texture_not_noise() {
+        // A grid loud enough to compete with content is the failure mode this
+        // guards; 12/255 is the accepted value.
+        assert_eq!(GRID_ALPHA, 12);
+        assert_eq!(GRID_PITCH, 40.0);
     }
 }
 
