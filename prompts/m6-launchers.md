@@ -361,3 +361,32 @@ Full bar from cargo clean, push, CI 7/7. End gate: STOP for the owner's
 visual check (Fable row appears, Spark row gone, CLI still truthful).
 Do not bump the version or tag — the v1.1.0 release is a later prompt.
 ```
+
+## M7a2 — Codex reset credits (after M7a; same v1.1.0 slice)
+
+Owner addition 2026-07-29: surface rate_limit_reset_credits from the
+Codex response. Runs after M7a landed (196fd56); no DECISIONS.md edit.
+
+```
+# Goal prompt: M7A2 — Codex rate-limit reset credits (v1.1.0 slice)
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m7a2-codex-reset-credits.md IN FULL and execute it as
+this session's goal prompt, verbatim. The spec is authoritative over
+this launcher.
+
+Shape (the spec governs): all floor-authorable, no §4.1 phase. Phase 1:
+ProviderSnapshot gains reset_credits: Option<ResetCredits> (available +
+applicable_now); the Codex parser reads ONLY available_count and
+applicable_available_count from rate_limit_reset_credits — the raw body
+carries PII fields and none may enter any struct; Claude sets None.
+Phase 2: the Codex pane renders one small line "resets available: N"
+(absent when None, so Claude is untouched), layout-harness tested; the
+CLI JSON-pinning tests extend to reset_credits always present (null for
+Claude). Full bar from cargo clean, push, CI 7/7. End gate: STOP — the
+owner's visual check covers M7a + this together (Fable row, no Spark,
+resets available: 1). Do not bump the version or tag.
+```
