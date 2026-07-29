@@ -39,9 +39,12 @@ so model-scoped quotas appear again.
   every model on your plan, not only the ones you use, so an unused bucket
   spent two lines saying `0%` in a window that cannot be resized. Those rows
   are now hidden, and the per-model toggle disappears entirely when hiding them
-  leaves nothing to show. This is a display change only — `quotapane-cli
-  --json` still reports every bucket the provider sent, zeroes included, so
-  anything scripted against the JSON sees exactly what it saw before.
+  leaves nothing to show. The hiding itself is a display change only —
+  `quotapane-cli --json` still reports every bucket the provider sent, zeroes
+  included. The JSON surface does change elsewhere in this release:
+  `reset_credits` is a new key on every snapshot, and Claude's per-model entries
+  are named by the provider's display names rather than the old fixed
+  opus/sonnet labels — both changes documented above.
 
 ## [1.0.0] - 2026-07-28
 
