@@ -19,11 +19,18 @@
 //! (window-only) and compiles to exactly the pre-M3.5 behavior.
 //!
 //! M5a adds a per-provider disclosure toggle for the per-model rows a snapshot
-//! carries in `per_model` (Claude's `7d-opus`/`7d-sonnet`, Codex's
+//! carries in `per_model` (Claude's model-scoped `limits` entries, Codex's
 //! `additional_rate_limits`). It is collapsed by default and its state is per
 //! pane, so the providers expand independently. The toggle is suppressed when
 //! a provider reports no per-model data. This is presentational only: the rows
 //! use the same renderer as the headline rows and no label is ever parsed.
+//!
+//! M7a narrows what the disclosure shows: an untouched bucket (0%, or usage the
+//! provider did not report) is hidden, and the toggle disappears when that
+//! leaves nothing to show. Providers list every model on the plan, not just the
+//! ones in use, so those rows are noise in a 320px window. The filter is
+//! **display-only** — `quotapane-cli --json` still emits every bucket the
+//! provider sent, pinned by a test in `usage-cli`.
 
 use eframe::egui;
 use std::process::ExitCode;
@@ -835,15 +842,22 @@ fn render_windows(
 
     // Per-model disclosure, between the headline rows and the age footer.
     // Suppressed entirely when there is nothing to disclose — no affordance
-    // that opens onto an empty list.
+    // that opens onto an empty list. "Nothing to disclose" counts *visible*
+    // rows, so a provider whose per-model buckets are all untouched shows no
+    // toggle at all rather than one that opens onto blank space.
     let mut toggled = false;
-    if !snapshot.per_model.is_empty() {
+    let visible: Vec<&QuotaWindow> = snapshot
+        .per_model
+        .iter()
+        .filter(|w| per_model_row_is_visible(w))
+        .collect();
+    if !visible.is_empty() {
         toggled = disclosure_toggle(ui, expanded, PER_MODEL_CAPTION).clicked();
         if expanded {
             // Salted with the provider so the two panes' indent regions get
             // distinct ids.
             ui.indent(("per_model", snapshot.provider), |ui| {
-                for window in &snapshot.per_model {
+                for window in visible {
                     render_per_model_row(ui, window);
                 }
             });
@@ -865,6 +879,21 @@ fn render_windows(
     }
 
     toggled
+}
+
+/// Whether a per-model row earns its space in the window.
+///
+/// Hidden when usage is `0.0` or unknown. Both providers enumerate every model
+/// bucket on the plan, so a subscriber who has never touched one still gets a
+/// row for it — two lines of "0% · resets in 7d" in a 320px window that cannot
+/// be resized. Anything actually used, however little, still shows.
+///
+/// Display-only, and deliberately not pushed down into `usage-core`: the
+/// snapshot stays the full truth for `--json` and any future consumer. A
+/// `usage-cli` test pins that zero-usage buckets remain in the JSON, so this
+/// filter cannot quietly grow into the data.
+fn per_model_row_is_visible(window: &QuotaWindow) -> bool {
+    window.used_fraction.is_some_and(|fraction| fraction > 0.0)
 }
 
 fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow) {
@@ -1423,6 +1452,126 @@ mod tests {
     fn per_model_rows_use_the_dedicated_two_line_renderer() {
         // The signature the expanded branch depends on.
         let _: fn(&mut egui::Ui, &QuotaWindow) = render_per_model_row;
+    }
+
+    // --- M7a: untouched buckets are hidden ---
+
+    /// A per-model window with an explicit usage fraction.
+    fn model_window_at(label: &str, used_fraction: Option<f64>) -> QuotaWindow {
+        QuotaWindow {
+            used_fraction,
+            ..model_window(label)
+        }
+    }
+
+    /// A one-headline-window snapshot carrying `per_model`, so the layouts
+    /// below differ only in their per-model content.
+    fn per_model_snapshot(per_model: Vec<QuotaWindow>) -> ProviderSnapshot {
+        ProviderSnapshot {
+            provider: ProviderId::CodexSubscription,
+            taken_at_unix_secs: 0,
+            windows: vec![QuotaWindow {
+                label: "5h".to_string(),
+                used_fraction: Some(0.25),
+                resets_in_secs: Some(3600),
+            }],
+            per_model,
+            source: SnapshotSource::UsageEndpoint,
+        }
+    }
+
+    fn lay_out_pane(snapshot: &ProviderSnapshot, expanded: bool) -> Laid {
+        lay_out(|ui| {
+            render_windows(ui, snapshot, Some(Duration::from_secs(30)), expanded);
+        })
+    }
+
+    #[test]
+    fn only_touched_buckets_are_visible() {
+        assert!(per_model_row_is_visible(&model_window_at(
+            "Barely",
+            Some(0.01)
+        )));
+        assert!(per_model_row_is_visible(&model_window_at(
+            "Full",
+            Some(1.0)
+        )));
+        assert!(!per_model_row_is_visible(&model_window_at(
+            "Untouched",
+            Some(0.0)
+        )));
+        assert!(!per_model_row_is_visible(&model_window_at("Unknown", None)));
+    }
+
+    #[test]
+    fn all_untouched_per_model_renders_no_toggle() {
+        // The Codex case that prompted this: every listed bucket at 0%. The
+        // pane must lay out exactly as if it carried no per-model data at all
+        // — equal height means no toggle row was allocated.
+        let untouched = per_model_snapshot(vec![
+            model_window_at("GPT-5.3-Codex-Spark", Some(0.0)),
+            model_window_at("GPT-5.3-Codex-Mini", None),
+        ]);
+        let empty = per_model_snapshot(vec![]);
+
+        // Both disclosure states: neither may reveal an affordance.
+        for expanded in [false, true] {
+            let with = lay_out_pane(&untouched, expanded);
+            let without = lay_out_pane(&empty, expanded);
+            assert_eq!(
+                with.height, without.height,
+                "all-untouched pane (expanded={expanded}) took {}px vs {}px with no per-model data",
+                with.height, without.height
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_buckets_show_only_the_used_rows() {
+        // One used bucket among untouched ones lays out exactly like a
+        // snapshot carrying that bucket alone — the 0%/unknown rows are gone.
+        let mixed = per_model_snapshot(vec![
+            model_window_at("GPT-5.3-Codex-Spark", Some(0.0)),
+            model_window_at("GPT-5.3-Codex-Max", Some(0.42)),
+            model_window_at("GPT-5.3-Codex-Mini", None),
+        ]);
+        let used_only = per_model_snapshot(vec![model_window_at("GPT-5.3-Codex-Max", Some(0.42))]);
+
+        let mixed_laid = lay_out_pane(&mixed, true);
+        let used_laid = lay_out_pane(&used_only, true);
+        assert_eq!(
+            mixed_laid.height, used_laid.height,
+            "mixed pane took {}px vs {}px for the used bucket alone",
+            mixed_laid.height, used_laid.height
+        );
+
+        // Guard against a vacuous comparison: one visible row still earns the
+        // toggle, so this must be taller than the no-per-model pane.
+        let empty_laid = lay_out_pane(&per_model_snapshot(vec![]), true);
+        assert!(
+            mixed_laid.height > empty_laid.height,
+            "expected a visible row to render; got {}px vs {}px",
+            mixed_laid.height,
+            empty_laid.height
+        );
+
+        // Width still holds with the filter in place.
+        assert!(mixed_laid.width <= mixed_laid.available_width);
+    }
+
+    #[test]
+    fn hidden_rows_stay_in_the_snapshot() {
+        // The filter is display-only. The snapshot the CLI serializes is
+        // untouched by rendering — pinned end-to-end by the `usage-cli` test
+        // `zero_usage_per_model_buckets_stay_in_json`.
+        let snapshot = per_model_snapshot(vec![
+            model_window_at("GPT-5.3-Codex-Spark", Some(0.0)),
+            model_window_at("GPT-5.3-Codex-Max", Some(0.42)),
+        ]);
+        let _ = lay_out_pane(&snapshot, true);
+        assert_eq!(snapshot.per_model.len(), 2);
+        assert_eq!(snapshot.per_model[0].label, "GPT-5.3-Codex-Spark");
+        assert_eq!(snapshot.per_model[0].used_fraction, Some(0.0));
     }
 
     // --- per-model disclosure state (M5a) ---

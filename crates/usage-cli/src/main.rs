@@ -526,6 +526,68 @@ mod tests {
         assert!(json.contains("\"per_model\":[]"), "was: {json}");
     }
 
+    #[test]
+    fn zero_usage_per_model_buckets_stay_in_json() {
+        // M7a: the window *hides* untouched per-model rows (0% or unknown
+        // usage) because providers enumerate every bucket on the plan. That
+        // filter is display-only and lives in `usage-ui`. This pins the other
+        // half of the decision: `--json` stays the full truth, so a script
+        // reading it still sees every bucket the provider reported.
+        //
+        // Deliberately a guard against a *future* change: if anyone ever
+        // "cleans up" by pushing the UI filter down into the snapshot, this
+        // test is what fails.
+        use usage_core::model::{QuotaWindow, SnapshotSource};
+
+        let bucket = |label: &str, used_fraction: Option<f64>| QuotaWindow {
+            label: label.to_string(),
+            used_fraction,
+            resets_in_secs: Some(604_800),
+        };
+
+        let snapshot = ProviderSnapshot {
+            provider: ProviderId::CodexSubscription,
+            taken_at_unix_secs: 1_784_000_000,
+            windows: vec![bucket("5h", Some(0.25))],
+            per_model: vec![
+                bucket("GPT-5.3-Codex-Spark", Some(0.0)), // untouched — hidden in the window
+                bucket("GPT-5.3-Codex-Max", Some(0.42)),  // used — shown in the window
+                bucket("GPT-5.3-Codex-Mini", None),       // unknown — hidden in the window
+            ],
+            source: SnapshotSource::UsageEndpoint,
+        };
+
+        // Round-trip through `Value` so the assertions pin the data, not the
+        // float formatting.
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let per_model = parsed["per_model"].as_array().unwrap();
+
+        assert_eq!(per_model.len(), 3, "a bucket was dropped: {json}");
+        let labels: Vec<&str> = per_model
+            .iter()
+            .map(|w| w["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "GPT-5.3-Codex-Spark",
+                "GPT-5.3-Codex-Max",
+                "GPT-5.3-Codex-Mini"
+            ]
+        );
+
+        // The zero is a real zero, not a dropped/nulled field.
+        assert_eq!(per_model[0]["used_fraction"].as_f64(), Some(0.0));
+        assert_eq!(per_model[1]["used_fraction"].as_f64(), Some(0.42));
+        assert!(per_model[2]["used_fraction"].is_null());
+
+        // Same for the `--provider all` array form.
+        let array = serde_json::to_string(&vec![snapshot]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&array).unwrap();
+        assert_eq!(parsed[0]["per_model"].as_array().unwrap().len(), 3);
+    }
+
     // --- --debug-raw parsing (new) ---
 
     #[test]
