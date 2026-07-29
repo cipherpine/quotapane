@@ -31,12 +31,16 @@
 //! ones in use, so those rows are noise in a 320px window. The filter is
 //! **display-only** — `quotapane-cli --json` still emits every bucket the
 //! provider sent, pinned by a test in `usage-cli`.
+//!
+//! M7a2 adds one dim line for a provider's reset credits (`resets available:
+//! N`), between the headline rows and the per-model toggle. Only Codex reports
+//! them, so the line is absent for Claude and that pane is untouched.
 
 use eframe::egui;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use usage_core::egress::Egress;
-use usage_core::model::{ProviderId, ProviderSnapshot, QuotaWindow};
+use usage_core::model::{ProviderId, ProviderSnapshot, QuotaWindow, ResetCredits};
 use usage_core::poller::{self, PollerHandle, Update};
 use usage_core::providers::{
     ClaudeSubscription, CodexSubscription, UsageProvider, CODEX_DEFAULT_USER_AGENT,
@@ -840,6 +844,18 @@ fn render_windows(
         render_window_row(ui, window);
     }
 
+    // Reset credits, between the headline rows and the per-model disclosure.
+    // Absent entirely when the provider has no such concept, so the Claude
+    // pane renders exactly as it did before this line existed.
+    if let Some(credits) = snapshot.reset_credits {
+        ui.label(
+            egui::RichText::new(reset_credits_line(&credits))
+                .small()
+                .monospace()
+                .color(ui.visuals().weak_text_color()),
+        );
+    }
+
     // Per-model disclosure, between the headline rows and the age footer.
     // Suppressed entirely when there is nothing to disclose — no affordance
     // that opens onto an empty list. "Nothing to disclose" counts *visible*
@@ -879,6 +895,16 @@ fn render_windows(
     }
 
     toggled
+}
+
+/// The reset-credits line, e.g. `resets available: 1`.
+///
+/// Shows the owned count only. `applicable_now` is `0` except while the
+/// account is actually rate-limited, so surfacing it here would park a
+/// permanent, meaningless "0" in a 320px window; it stays in the snapshot for
+/// `--json` consumers, who can tell the two counts apart.
+fn reset_credits_line(credits: &ResetCredits) -> String {
+    format!("resets available: {}", credits.available)
 }
 
 /// Whether a per-model row earns its space in the window.
@@ -1575,6 +1601,87 @@ mod tests {
         assert_eq!(snapshot.per_model.len(), 2);
         assert_eq!(snapshot.per_model[0].label, "GPT-5.3-Codex-Spark");
         assert_eq!(snapshot.per_model[0].used_fraction, Some(0.0));
+    }
+
+    // --- M7a2: the reset-credits line ---
+
+    /// The M7a2 snapshot: one headline window, no per-model rows, and the
+    /// given reset credits — so these layouts differ only in that field.
+    fn credits_snapshot(reset_credits: Option<ResetCredits>) -> ProviderSnapshot {
+        ProviderSnapshot {
+            reset_credits,
+            ..per_model_snapshot(vec![])
+        }
+    }
+
+    #[test]
+    fn reset_credits_line_shows_the_owned_count() {
+        // The evidence shape: owns 1, none applicable right now. The line
+        // reports what the account *has*, not the transient applicable count.
+        assert_eq!(
+            reset_credits_line(&ResetCredits {
+                available: 1,
+                applicable_now: Some(0),
+            }),
+            "resets available: 1"
+        );
+        // A genuine zero still prints — it is a fact, unlike `None`.
+        assert_eq!(
+            reset_credits_line(&ResetCredits {
+                available: 0,
+                applicable_now: None,
+            }),
+            "resets available: 0"
+        );
+    }
+
+    #[test]
+    fn reset_credits_line_renders_for_codex_and_not_for_none() {
+        // Present adds exactly one line; absent must lay out identically to a
+        // pane that never had the field — that equality is what keeps the
+        // Claude pane untouched.
+        let with = lay_out_pane(
+            &credits_snapshot(Some(ResetCredits {
+                available: 1,
+                applicable_now: Some(0),
+            })),
+            false,
+        );
+        let without = lay_out_pane(&credits_snapshot(None), false);
+
+        assert!(
+            with.height > without.height,
+            "expected the credits line to add height; got {}px vs {}px",
+            with.height,
+            without.height
+        );
+        // Width must still fit the fixed, non-resizable window.
+        assert!(
+            with.width <= with.available_width,
+            "credits line wanted {}px inside {}px",
+            with.width,
+            with.available_width
+        );
+    }
+
+    #[test]
+    fn reset_credits_line_fits_beside_the_per_model_disclosure() {
+        // Both M7a2 features at once, expanded: the line and a visible
+        // per-model row coexist without overflowing the window's width.
+        let snapshot = ProviderSnapshot {
+            reset_credits: Some(ResetCredits {
+                available: 99,
+                applicable_now: Some(99),
+            }),
+            ..per_model_snapshot(vec![model_window_at("GPT-5.3-Codex-Max", Some(0.42))])
+        };
+        let laid = lay_out_pane(&snapshot, true);
+        assert!(
+            laid.width <= laid.available_width,
+            "combined pane wanted {}px inside {}px",
+            laid.width,
+            laid.available_width
+        );
     }
 
     // --- per-model disclosure state (M5a) ---

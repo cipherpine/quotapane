@@ -591,6 +591,63 @@ mod tests {
         assert_eq!(parsed[0]["per_model"].as_array().unwrap().len(), 3);
     }
 
+    #[test]
+    fn reset_credits_key_is_always_present_in_json() {
+        // M7a2: `reset_credits` gets no `skip_serializing_if`, so the key is
+        // in every snapshot — `null` for a provider with no such concept
+        // (Claude), an object for one that reports them (Codex). A consumer
+        // can therefore read `.reset_credits` unconditionally, and "absent"
+        // and "zero" stay distinguishable.
+        use usage_core::model::{QuotaWindow, ResetCredits, SnapshotSource};
+
+        let claude = ProviderSnapshot {
+            provider: ProviderId::ClaudeSubscription,
+            taken_at_unix_secs: 1_784_000_000,
+            windows: vec![QuotaWindow {
+                label: "5h".to_string(),
+                used_fraction: Some(0.18),
+                resets_in_secs: Some(2805),
+            }],
+            per_model: vec![],
+            reset_credits: None,
+            source: SnapshotSource::UsageEndpoint,
+        };
+        let codex = ProviderSnapshot {
+            provider: ProviderId::CodexSubscription,
+            taken_at_unix_secs: 1_784_000_000,
+            windows: vec![],
+            per_model: vec![],
+            reset_credits: Some(ResetCredits {
+                available: 1,
+                applicable_now: Some(0),
+            }),
+            source: SnapshotSource::UsageEndpoint,
+        };
+
+        // Claude: the key exists and is null — not omitted.
+        let json = serde_json::to_string(&claude).unwrap();
+        assert!(
+            json.contains("\"reset_credits\":null"),
+            "Claude must emit an explicit null: {json}"
+        );
+
+        // Codex: an object carrying both counts, with the zero preserved.
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&codex).unwrap()).unwrap();
+        assert_eq!(parsed["reset_credits"]["available"].as_u64(), Some(1));
+        assert_eq!(parsed["reset_credits"]["applicable_now"].as_u64(), Some(0));
+
+        // And the `--provider all` array form carries both shapes.
+        let array = serde_json::to_string(&vec![claude, codex]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&array).unwrap();
+        assert!(
+            parsed[0].get("reset_credits").is_some(),
+            "key missing from the array form: {array}"
+        );
+        assert!(parsed[0]["reset_credits"].is_null());
+        assert_eq!(parsed[1]["reset_credits"]["available"].as_u64(), Some(1));
+    }
+
     // --- --debug-raw parsing (new) ---
 
     #[test]
