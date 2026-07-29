@@ -1399,6 +1399,7 @@ mod tests {
                 model_window("GPT-5.3-Codex-Spark"),
                 model_window("GPT-5.3-Codex-Max"),
             ],
+            reset_credits: None,
             source: SnapshotSource::UsageEndpoint,
         };
         let laid = lay_out(|ui| {
@@ -1434,6 +1435,7 @@ mod tests {
             per_model: (0..6)
                 .map(|i| model_window(&format!("GPT-5.3-Codex-Variant-{i}")))
                 .collect(),
+            reset_credits: None,
             source: SnapshotSource::UsageEndpoint,
         };
         let laid = lay_out(|ui| {
@@ -1476,6 +1478,7 @@ mod tests {
                 resets_in_secs: Some(3600),
             }],
             per_model,
+            reset_credits: None,
             source: SnapshotSource::UsageEndpoint,
         }
     }
@@ -1797,6 +1800,7 @@ mod tray_tests {
             taken_at_unix_secs: 0,
             windows,
             per_model: vec![],
+            reset_credits: None,
             source: SnapshotSource::UsageEndpoint,
         }
     }

@@ -43,7 +43,7 @@
 
 use crate::credentials::{load_credential_file, Secret};
 use crate::egress::Egress;
-use crate::model::{ProviderId, ProviderSnapshot, QuotaWindow, SnapshotSource};
+use crate::model::{ProviderId, ProviderSnapshot, QuotaWindow, ResetCredits, SnapshotSource};
 use crate::providers::{Cadence, ProviderError, UsageProvider};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -219,15 +219,27 @@ struct RawAdditionalRateLimit {
     rate_limit: Option<RawRateLimit>,
 }
 
-/// Top-level response (verified 2026-07-15). The singular top-level
-/// `rate_limit` supplies the headline windows and `additional_rate_limits`
-/// the per-model ones. Account PII (`user_id`, `account_id`, `email`) has no
-/// field here and so is dropped by serde as an unknown field — it cannot
-/// reach a snapshot because there is nowhere for it to land.
+/// `rate_limit_reset_credits` — the account's reset-credit allowance
+/// (observed 2026-07-29). Only the two counts are declared; whatever else the
+/// object carries has no field here and is dropped, same defense as
+/// [`RawUsage`].
+#[derive(Deserialize, Default)]
+struct RawResetCredits {
+    available_count: Option<u32>,
+    applicable_available_count: Option<u32>,
+}
+
+/// Top-level response (verified 2026-07-15, `rate_limit_reset_credits` added
+/// 2026-07-29). The singular top-level `rate_limit` supplies the headline
+/// windows and `additional_rate_limits` the per-model ones. Account PII
+/// (`user_id`, `account_id`, `email`) has no field here and so is dropped by
+/// serde as an unknown field — it cannot reach a snapshot because there is
+/// nowhere for it to land.
 #[derive(Deserialize, Default)]
 struct RawUsage {
     rate_limit: Option<RawRateLimit>,
     additional_rate_limits: Option<Vec<RawAdditionalRateLimit>>,
+    rate_limit_reset_credits: Option<RawResetCredits>,
 }
 
 /// Human label for a window from its duration in **seconds**:
@@ -300,11 +312,23 @@ fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
         per_model.push(to_quota_window(label, &w, now_unix_secs));
     }
 
+    // `available_count` is what makes the object meaningful: without it there
+    // is no credit count to report, so the whole thing degrades to None rather
+    // than to a fabricated zero.
+    let reset_credits = usage
+        .rate_limit_reset_credits
+        .and_then(|c| c.available_count.map(|available| (available, c)))
+        .map(|(available, c)| ResetCredits {
+            available,
+            applicable_now: c.applicable_available_count,
+        });
+
     ProviderSnapshot {
         provider: ProviderId::CodexSubscription,
         taken_at_unix_secs: now_unix_secs,
         windows,
         per_model,
+        reset_credits,
         source: SnapshotSource::UsageEndpoint,
     }
 }
@@ -546,6 +570,74 @@ mod tests {
         let usage: RawUsage = serde_json::from_str(json).unwrap();
         let snap = build_snapshot(usage, 0);
         assert_eq!(snap.per_model[0].used_fraction, Some(1.0));
+    }
+
+    // --- rate_limit_reset_credits (M7a2) ---
+
+    #[test]
+    fn reset_credits_parse_and_carry_no_pii() {
+        // The shape observed 2026-07-29, alongside the PII the real body
+        // carries. Synthetic values throughout.
+        let json = format!(
+            r#"{{
+                "user_id":"{PII_USER_ID}","account_id":"{PII_ACCOUNT_ID}","email":"{PII_EMAIL}",
+                "rate_limit":{{"primary_window":{{"used_percent":17,"limit_window_seconds":604800}}}},
+                "rate_limit_reset_credits":{{
+                    "available_count":1,
+                    "applicable_available_count":0
+                }}
+            }}"#
+        );
+        for pii in [PII_USER_ID, PII_ACCOUNT_ID, PII_EMAIL] {
+            assert!(json.contains(pii), "fixture lost its PII: {pii}");
+        }
+
+        let usage: RawUsage = serde_json::from_str(&json).unwrap();
+        let snap = build_snapshot(usage, 0);
+
+        let credits = snap.reset_credits.expect("reset credits should parse");
+        assert_eq!(credits.available, 1);
+        // 0 usable right now is the normal state when not rate-limited, and it
+        // must survive as `Some(0)` — distinct from "the provider didn't say".
+        assert_eq!(credits.applicable_now, Some(0));
+
+        // The reset-credits addition must not open a PII path either.
+        let debug = format!("{snap:?}");
+        let json_out = serde_json::to_string(&snap).unwrap();
+        for pii in [PII_USER_ID, PII_ACCOUNT_ID, PII_EMAIL] {
+            assert!(!debug.contains(pii), "PII leaked into Debug: {pii}");
+            assert!(!json_out.contains(pii), "PII leaked into JSON: {pii}");
+        }
+        assert!(!debug.contains("SYNTHETIC-PII"));
+        assert!(!debug.contains("example.invalid"));
+    }
+
+    #[test]
+    fn reset_credits_absent_yields_none() {
+        // Accounts or plans that omit the key degrade to None — never a
+        // fabricated zero, which would read as "you have no credits left".
+        let json = r#"{"rate_limit":{"primary_window":{"used_percent":5}}}"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        assert!(build_snapshot(usage, 0).reset_credits.is_none());
+    }
+
+    #[test]
+    fn reset_credits_without_available_count_yields_none() {
+        // The object present but the count missing is the same story: there is
+        // no number to report, so report nothing.
+        let json = r#"{"rate_limit_reset_credits":{"applicable_available_count":0}}"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        assert!(build_snapshot(usage, 0).reset_credits.is_none());
+    }
+
+    #[test]
+    fn reset_credits_without_applicable_count_still_reports_available() {
+        // Partial data still beats no data: the owned count is the headline.
+        let json = r#"{"rate_limit_reset_credits":{"available_count":3}}"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let credits = build_snapshot(usage, 0).reset_credits.unwrap();
+        assert_eq!(credits.available, 3);
+        assert_eq!(credits.applicable_now, None);
     }
 
     #[test]

@@ -61,8 +61,32 @@ pub struct ProviderSnapshot {
     /// data, which is why there is no `Option` wrapper: "none reported" and
     /// "none exist" are the same thing to every consumer.
     pub per_model: Vec<QuotaWindow>,
+    /// Reset credits the provider reports, when it reports any.
+    ///
+    /// `Option` rather than a default-zero value because "this provider has no
+    /// such concept" and "this account has zero credits" are different facts
+    /// and must render differently: Claude has no equivalent at all, so it
+    /// sets `None` and shows nothing, while a genuine zero would still be a
+    /// line worth printing.
+    pub reset_credits: Option<ResetCredits>,
     /// Whether the data came from the primary endpoint or a fallback.
     pub source: SnapshotSource,
+}
+
+/// Reset credits: a provider-granted allowance for clearing a rate limit
+/// early. Codex reports these; Claude has no equivalent.
+///
+/// Two counts, because the provider distinguishes owning a credit from being
+/// able to spend one: `applicable_now` is normally `0` while under no rate
+/// limit, and only becomes non-zero when a credit could actually be applied.
+/// Collapsing them into one number would misreport an account that owns
+/// credits it cannot currently use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ResetCredits {
+    /// Credits the account owns.
+    pub available: u32,
+    /// Credits usable right now, when the provider says.
+    pub applicable_now: Option<u32>,
 }
 
 /// Where a snapshot's data came from.

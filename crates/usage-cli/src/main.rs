@@ -498,6 +498,7 @@ mod tests {
                 used_fraction: Some(0.5),
                 resets_in_secs: None,
             }],
+            reset_credits: None,
             source: SnapshotSource::UsageEndpoint,
         };
 
@@ -520,6 +521,7 @@ mod tests {
             taken_at_unix_secs: 0,
             windows: vec![],
             per_model: vec![],
+            reset_credits: None,
             source: SnapshotSource::UsageEndpoint,
         };
         let json = serde_json::to_string(&snapshot).unwrap();
@@ -554,6 +556,7 @@ mod tests {
                 bucket("GPT-5.3-Codex-Max", Some(0.42)),  // used — shown in the window
                 bucket("GPT-5.3-Codex-Mini", None),       // unknown — hidden in the window
             ],
+            reset_credits: None,
             source: SnapshotSource::UsageEndpoint,
         };
 

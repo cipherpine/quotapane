@@ -311,6 +311,8 @@ fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
         taken_at_unix_secs: now_unix_secs,
         windows,
         per_model,
+        // Claude reports no reset-credit equivalent.
+        reset_credits: None,
         source: SnapshotSource::UsageEndpoint,
     }
 }
@@ -592,6 +594,23 @@ mod tests {
         // The local parts alone must not survive either.
         assert!(!debug.contains("SYNTHETIC-PII"));
         assert!(!debug.contains("example.invalid"));
+    }
+
+    #[test]
+    fn claude_snapshots_never_carry_reset_credits() {
+        // Reset credits are a Codex concept; Claude has no equivalent, so the
+        // field stays None and the window renders nothing for it. Asserted on
+        // a fully-populated response so this cannot pass vacuously.
+        let json = r#"{
+            "five_hour": {"utilization": 15.0},
+            "seven_day": {"utilization": 42.0},
+            "limits":[{"percent":40,"scope":{"model":{"display_name":"TestModel"}}}]
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert!(!snap.windows.is_empty());
+        assert_eq!(snap.per_model.len(), 1);
+        assert!(snap.reset_credits.is_none());
     }
 
     #[test]

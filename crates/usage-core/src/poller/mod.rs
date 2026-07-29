@@ -276,6 +276,7 @@ mod tests {
                 taken_at_unix_secs: 0,
                 windows: vec![],
                 per_model: vec![],
+                reset_credits: None,
                 source: SnapshotSource::UsageEndpoint,
             })
         }
