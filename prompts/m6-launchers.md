@@ -417,3 +417,38 @@ the rc, hand over the draft URL — you do not publish. Phase 4, after the
 owner confirms publication: apply the spec's exact DECISIONS.md patch
 (§4a) stamping M7a/M7A2 accepted and v1.1.0 shipped.
 ```
+
+## M7b — Cipher Pine visual pass (after v1.1.0 closes)
+
+Direction B locked 2026-07-29; marks 1b/1c adopted; live tray miniature.
+Pre-steps DONE: brand kit + README banner committed at the top tier;
+avatar and social preview set in the GitHub UI. Tree is clean at launch.
+
+```
+# Goal prompt: M7B — Cipher Pine visual pass
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m7b-visual-pass.md IN FULL and execute it as this
+session's goal prompt, verbatim. The spec is authoritative over this
+launcher.
+
+Shape (the spec governs): Phase 0 applies the exact DECISIONS.md patch
+(§4a, byte-match) opening M7b — spec, launcher index, brand assets, and
+README banner are already committed. Phase 1 is the
+theme — exact Color32 palette in the spec, full built-in-mono type,
+blueprint grid, "// PROVIDER" headers, cardinal "> quotapane" titlebar,
+semantic pine/amber/cardinal bar fills, stale lines go cardinal — with
+the layout harness as arbiter: shrink type before widening layout.
+Phase 2: the block cursor as a STATUS indicator — solid when idle and
+fresh, blinking only while polling or stale, zero idle repaints,
+unit-tested. Phase 3: dependency-free icon.rs painting mark 1c as RGBA;
+window icon at startup, live tray icon re-rendered per poll from real
+fractions, set only when bytes change; pure-function pixel tests.
+Phase 4 is VERIFY-ONLY — brand assets and README banner already landed.
+ZERO new dependencies anywhere — needing one is a STOP. Full bar from
+cargo clean, push, CI 7/7. End gate: STOP for the owner's visual pass;
+expect iteration rounds; version stays 1.1.0.
+```
