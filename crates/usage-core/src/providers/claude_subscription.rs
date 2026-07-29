@@ -182,12 +182,18 @@ fn parse_credentials(raw_json: &str) -> Option<ParsedCredentials> {
 
 /// Raw usage response. Every field optional: the endpoint is undocumented and
 /// may change, so parsing degrades instead of failing hard.
+///
+/// `limits` is the generalized array the endpoint grew (observed 2026-07-29);
+/// the legacy `seven_day_opus`/`seven_day_sonnet` keys still exist but are now
+/// null on current accounts, so both shapes are parsed and the legacy pair is
+/// kept as the fallback (see [`build_snapshot`]).
 #[derive(Deserialize, Default)]
 struct RawUsage {
     five_hour: Option<RawWindow>,
     seven_day: Option<RawWindow>,
     seven_day_opus: Option<RawWindow>,
     seven_day_sonnet: Option<RawWindow>,
+    limits: Option<Vec<RawLimit>>,
 }
 
 #[derive(Deserialize)]
@@ -196,27 +202,75 @@ struct RawWindow {
     resets_at: Option<String>,
 }
 
+/// One entry of the generalized `limits` array.
+///
+/// Only the three fields the snapshot actually uses are declared. Deliberately
+/// **not** parsed: `kind`, `group`, `severity`, `is_active`, `scope.surface`,
+/// and — most importantly — `scope.model.id`. The field-ignoring defense is
+/// structural: serde drops every key with no matching field, so a value that
+/// has nowhere to land cannot reach a snapshot, a log, or the CLI's JSON.
+/// Declaring a field "for completeness" would quietly undo that, so don't.
+#[derive(Deserialize)]
+struct RawLimit {
+    percent: Option<f64>,
+    resets_at: Option<String>,
+    scope: Option<RawScope>,
+}
+
+/// `limits[].scope` — an unscoped (subscription-wide) entry has `null` here.
+#[derive(Deserialize)]
+struct RawScope {
+    model: Option<RawScopeModel>,
+}
+
+/// `limits[].scope.model` — presence of `display_name` is what marks an entry
+/// as per-model. `id` is deliberately absent (see [`RawLimit`]).
+#[derive(Deserialize)]
+struct RawScopeModel {
+    display_name: Option<String>,
+}
+
+/// Percent (0–100) → the `used_fraction` convention (0.0–1.0), clamped.
+///
+/// One place for the conversion so the legacy-window path and the `limits`
+/// path cannot drift into two conventions.
+fn percent_to_fraction(percent: Option<f64>) -> Option<f64> {
+    percent.map(|p| (p / 100.0).clamp(0.0, 1.0))
+}
+
+/// Seconds until an RFC 3339 reset timestamp, never negative. Shared by both
+/// per-model paths for the same reason as [`percent_to_fraction`].
+fn resets_in_secs(resets_at: Option<&str>, now_unix_secs: u64) -> Option<u64> {
+    resets_at
+        .and_then(parse_rfc3339_to_unix)
+        .map(|reset| reset.saturating_sub(now_unix_secs as i64).max(0) as u64)
+}
+
 /// Normalize one raw window into a [`QuotaWindow`] under `label`.
 fn to_quota_window(label: &str, w: RawWindow, now_unix_secs: u64) -> QuotaWindow {
     QuotaWindow {
         label: label.to_string(),
-        used_fraction: w.utilization.map(|u| (u / 100.0).clamp(0.0, 1.0)),
-        resets_in_secs: w
-            .resets_at
-            .as_deref()
-            .and_then(parse_rfc3339_to_unix)
-            .map(|reset| reset.saturating_sub(now_unix_secs as i64).max(0) as u64),
+        used_fraction: percent_to_fraction(w.utilization),
+        resets_in_secs: resets_in_secs(w.resets_at.as_deref(), now_unix_secs),
     }
 }
 
 /// Build a normalized, non-secret snapshot from a usage response.
 ///
-/// The endpoint reports four windows; they split by *scope*, not by kind.
-/// `five_hour`/`seven_day` describe the subscription as a whole and are the
-/// headline rows; `seven_day_opus`/`seven_day_sonnet` are the same seven-day
-/// window sliced per model, so they go to `per_model`. Labels are unchanged
-/// by the split — `"7d-opus"`/`"7d-sonnet"` are still emitted verbatim, so
-/// nothing downstream has to parse a label to know which bucket a row is in.
+/// Windows split by *scope*, not by kind. `five_hour`/`seven_day` describe the
+/// subscription as a whole and are the headline rows — they stay the headline
+/// source even now that the `limits` array duplicates them as its unscoped
+/// `session`/`weekly_all` entries, because they are the shape this provider
+/// has always verified against.
+///
+/// `per_model` prefers the generalized `limits` array: an entry is per-model
+/// exactly when it carries a `scope.model.display_name`, and that name becomes
+/// the row's label **verbatim** — the provider's own name for a model is the
+/// honest one, and normalizing it here would invent a vocabulary the UI would
+/// then have to parse back (same rule as the Codex provider's `limit_name`).
+/// If `limits` is absent, or present but yields no model-scoped entries, the
+/// legacy `seven_day_opus`/`seven_day_sonnet` keys populate `per_model` as
+/// before, under their unchanged `"7d-opus"`/`"7d-sonnet"` labels.
 fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
     let mut windows = Vec::new();
     for (label, win) in [("5h", usage.five_hour), ("7d", usage.seven_day)] {
@@ -225,13 +279,30 @@ fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
         }
     }
 
-    let mut per_model = Vec::new();
-    for (label, win) in [
-        ("7d-opus", usage.seven_day_opus),
-        ("7d-sonnet", usage.seven_day_sonnet),
-    ] {
-        if let Some(w) = win {
-            per_model.push(to_quota_window(label, w, now_unix_secs));
+    let mut per_model: Vec<QuotaWindow> = usage
+        .limits
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|limit| {
+            // Unscoped entries (`scope: null`) duplicate the headline windows
+            // and are dropped here; only a model-scoped one becomes a row.
+            let label = limit.scope?.model?.display_name?;
+            Some(QuotaWindow {
+                label,
+                used_fraction: percent_to_fraction(limit.percent),
+                resets_in_secs: resets_in_secs(limit.resets_at.as_deref(), now_unix_secs),
+            })
+        })
+        .collect();
+
+    if per_model.is_empty() {
+        for (label, win) in [
+            ("7d-opus", usage.seven_day_opus),
+            ("7d-sonnet", usage.seven_day_sonnet),
+        ] {
+            if let Some(w) = win {
+                per_model.push(to_quota_window(label, w, now_unix_secs));
+            }
         }
     }
 
@@ -446,5 +517,159 @@ mod tests {
             }
             other => panic!("expected Credential, got: {other:?}"),
         }
+    }
+
+    // --- generalized `limits` array (M7a) ---
+
+    // Synthetic PII, deliberately distinctive so the absence assertions below
+    // are meaningful. `.invalid` is the reserved never-resolvable TLD.
+    const PII_USER_ID: &str = "user-SYNTHETIC-PII-4b8e";
+    const PII_ACCOUNT_ID: &str = "acct-SYNTHETIC-PII-2d61";
+    const PII_EMAIL: &str = "not-real-person@example.invalid";
+    const PII_MODEL_ID: &str = "model-SYNTHETIC-PII-a70f";
+
+    #[test]
+    fn limits_array_supplies_per_model_and_carries_no_pii() {
+        // Mirrors the shape observed 2026-07-29: the legacy per-model keys are
+        // null, the headline keys remain, and `limits` carries two unscoped
+        // entries (duplicating the headline) plus one model-scoped entry.
+        // Every value here is synthetic.
+        let json = format!(
+            r#"{{
+                "user_id":"{PII_USER_ID}","account_id":"{PII_ACCOUNT_ID}","email":"{PII_EMAIL}",
+                "five_hour": {{"utilization": 15.0, "resets_at": "2026-04-11T07:00:00+00:00"}},
+                "seven_day": {{"utilization": 42.0, "resets_at": "2026-04-18T07:00:00+00:00"}},
+                "seven_day_opus": null,
+                "seven_day_sonnet": null,
+                "limits":[
+                  {{"kind":"session","group":"session","percent":15,"severity":"low",
+                    "resets_at":"2026-04-11T07:00:00+00:00","scope":null,"is_active":true}},
+                  {{"kind":"weekly_all","group":"weekly","percent":42,"severity":"low",
+                    "resets_at":"2026-04-18T07:00:00+00:00","scope":null,"is_active":true}},
+                  {{"kind":"weekly_scoped","group":"weekly","percent":40,"severity":"low",
+                    "resets_at":"2026-04-11T07:00:00+00:00",
+                    "scope":{{"model":{{"id":"{PII_MODEL_ID}","display_name":"TestModel"}},
+                              "surface":null}},
+                    "is_active":false}}
+                ]
+            }}"#
+        );
+        // Guard against a vacuous test: the fixture must really carry the
+        // values whose absence is asserted below.
+        for pii in [PII_USER_ID, PII_ACCOUNT_ID, PII_EMAIL, PII_MODEL_ID] {
+            assert!(json.contains(pii), "fixture lost its PII: {pii}");
+        }
+
+        let usage: RawUsage = serde_json::from_str(&json).unwrap();
+        // now = 2026-04-11T06:00:00Z → the 07:00 resets are 3600s out.
+        let now = parse_rfc3339_to_unix("2026-04-11T06:00:00Z").unwrap() as u64;
+        let snap = build_snapshot(usage, now);
+
+        // Headline stays the legacy top-level pair; the unscoped `limits`
+        // entries that duplicate it must not become extra rows.
+        let headline: Vec<&str> = snap.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(headline, vec!["5h", "7d"]);
+        assert_eq!(snap.windows[0].used_fraction, Some(0.15));
+        assert_eq!(snap.windows[1].used_fraction, Some(0.42));
+
+        // Exactly the one model-scoped entry, labeled with `display_name`
+        // verbatim.
+        assert_eq!(snap.per_model.len(), 1);
+        assert_eq!(snap.per_model[0].label, "TestModel");
+        assert_eq!(snap.per_model[0].used_fraction, Some(0.40));
+        assert_eq!(snap.per_model[0].resets_in_secs, Some(3600));
+
+        // Positive absence check: no PII value — including the model `id`
+        // sitting right beside the `display_name` we do read — appears in the
+        // snapshot's `Debug` or in the JSON the CLI emits. This fails the
+        // moment anyone declares a field for one, which is the point.
+        let debug = format!("{snap:?}");
+        let json_out = serde_json::to_string(&snap).unwrap();
+        for pii in [PII_USER_ID, PII_ACCOUNT_ID, PII_EMAIL, PII_MODEL_ID] {
+            assert!(!debug.contains(pii), "PII leaked into Debug: {pii}");
+            assert!(!json_out.contains(pii), "PII leaked into JSON: {pii}");
+        }
+        // The local parts alone must not survive either.
+        assert!(!debug.contains("SYNTHETIC-PII"));
+        assert!(!debug.contains("example.invalid"));
+    }
+
+    #[test]
+    fn limits_absent_falls_back_to_legacy_per_model_keys() {
+        // Accounts still on the old shape send no `limits` at all.
+        let json = r#"{
+            "five_hour": {"utilization": 10.0, "resets_at": null},
+            "seven_day": {"utilization": 20.0, "resets_at": null},
+            "seven_day_opus": {"utilization": 30.0, "resets_at": null},
+            "seven_day_sonnet": {"utilization": 40.0, "resets_at": null}
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+
+        let per_model: Vec<&str> = snap.per_model.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(per_model, vec!["7d-opus", "7d-sonnet"]);
+        assert_eq!(snap.per_model[0].used_fraction, Some(0.30));
+        assert_eq!(snap.per_model[1].used_fraction, Some(0.40));
+    }
+
+    #[test]
+    fn limits_without_model_scope_yields_empty_per_model() {
+        // `limits` present but every entry unscoped, and the legacy keys null
+        // (the 2026-07-29 reality for an account with no model-scoped quota):
+        // per_model is empty, never an error and never a duplicated headline.
+        let json = r#"{
+            "five_hour": {"utilization": 10.0},
+            "seven_day": {"utilization": 20.0},
+            "seven_day_opus": null,
+            "seven_day_sonnet": null,
+            "limits":[
+              {"kind":"session","group":"session","percent":10,"scope":null},
+              {"kind":"weekly_all","group":"weekly","percent":20,"scope":{"model":null,"surface":null}}
+            ]
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+
+        assert_eq!(snap.windows.len(), 2);
+        assert!(snap.per_model.is_empty());
+    }
+
+    #[test]
+    fn model_scoped_limits_win_over_the_legacy_keys() {
+        // Both shapes populated at once: the new array is authoritative, so
+        // the legacy fallback must not append duplicate rows behind it.
+        let json = r#"{
+            "seven_day_opus": {"utilization": 30.0},
+            "seven_day_sonnet": {"utilization": 40.0},
+            "limits":[
+              {"percent":55,"scope":{"model":{"display_name":"TestModel"}}}
+            ]
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+
+        assert_eq!(snap.per_model.len(), 1);
+        assert_eq!(snap.per_model[0].label, "TestModel");
+        assert_eq!(snap.per_model[0].used_fraction, Some(0.55));
+    }
+
+    #[test]
+    fn limit_percent_is_clamped_and_missing_fields_degrade() {
+        // Same fail-closed contract as the legacy path: out-of-range percent
+        // clamps, an absent percent/resets_at degrades to None, not a panic.
+        let json = r#"{
+            "limits":[
+              {"percent":150,"scope":{"model":{"display_name":"OverModel"}}},
+              {"scope":{"model":{"display_name":"BareModel"}}}
+            ]
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+
+        assert_eq!(snap.per_model.len(), 2);
+        assert_eq!(snap.per_model[0].used_fraction, Some(1.0));
+        assert_eq!(snap.per_model[1].label, "BareModel");
+        assert_eq!(snap.per_model[1].used_fraction, None);
+        assert_eq!(snap.per_model[1].resets_in_secs, None);
     }
 }
