@@ -4,6 +4,10 @@ A small, always-on-top desktop window that shows how much of your **Claude** and
 
 The entire value proposition is a **small, auditable trust boundary**. Only two modules ever touch a credential or the network — `crates/usage-core/src/credentials/` and `crates/usage-core/src/egress/` — and they are deliberately small enough to read end to end in one sitting. Everything else is scheduling and rendering.
 
+<p align="center">
+  <img src="assets/quotapane-window-cipherpine.png" width="319" alt="The QuotaPane window in the Cipher Pine theme: Claude 5h and 7d windows with percent bars and reset countdowns, a per-model toggle, and the Codex 7d window with reset credits">
+</p>
+
 ## What it shows
 
 - **Claude (Anthropic)** — your 5-hour and 7-day subscription windows: percent used, and how long until each resets.
@@ -25,6 +29,11 @@ remembered as a single word (`plain` or `cipherpine`) in
 Linux). No tray on your platform? Launch with `--plain` or
 `--themed` to pick per run. The file stores nothing but that word;
 deleting it restores the default.
+
+<p align="center">
+  <img src="assets/quotapane-window-plain.png" width="313" alt="The plain theme">
+  <img src="assets/quotapane-window-plain-expanded.png" width="311" alt="The plain theme with per-model rows expanded">
+</p>
 
 ## Security posture (the short version)
 
