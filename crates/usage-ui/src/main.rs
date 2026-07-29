@@ -490,6 +490,8 @@ enum TrayMessage {
     ShowAndFocus,
     /// "Show/Hide" menu item: flip the window's visibility.
     ToggleShowHide,
+    /// "Theme: …" menu item: switch between Cipher Pine and Plain.
+    ToggleTheme,
     /// "Quit" menu item: exit the app for real.
     Quit,
 }
@@ -559,7 +561,7 @@ mod tray {
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     };
 
-    use super::TrayMessage;
+    use super::{Theme, TrayMessage};
 
     const INITIAL_TOOLTIP: &str = "QuotaPane";
 
@@ -570,6 +572,8 @@ mod tray {
         rx: Receiver<TrayMessage>,
         /// Whether the window is currently shown (the tray toggles this).
         pub visible: bool,
+        /// Kept so the label can follow the active theme.
+        theme_item: MenuItem,
         last_tooltip: String,
         /// The RGBA bytes currently on screen, so an unchanged render skips
         /// the platform call entirely.
@@ -582,7 +586,7 @@ mod tray {
         /// which case the app falls back to close-to-quit. Registers the
         /// process-wide tray/menu event handlers, which forward into an mpsc
         /// channel drained each frame.
-        pub fn create(ctx: &egui::Context) -> Option<Tray> {
+        pub fn create(ctx: &egui::Context, theme: Theme) -> Option<Tray> {
             let (tx, rx) = mpsc::channel::<TrayMessage>();
             // The event handlers must be `Send + Sync`; a bare `Sender` is not
             // `Sync`, so guard it behind a mutex.
@@ -590,10 +594,19 @@ mod tray {
 
             let menu = Menu::new();
             let show_hide = MenuItem::new("Show/Hide", true, None);
+            // Label names the *current* theme, and is relabelled on every
+            // switch — the same shape as the Show/Hide item beside it.
+            let theme_item = MenuItem::new(theme.menu_label(), true, None);
             let quit = MenuItem::new("Quit", true, None);
-            menu.append_items(&[&show_hide, &PredefinedMenuItem::separator(), &quit])
-                .ok()?;
+            menu.append_items(&[
+                &show_hide,
+                &theme_item,
+                &PredefinedMenuItem::separator(),
+                &quit,
+            ])
+            .ok()?;
             let show_hide_id = show_hide.id().clone();
+            let theme_id = theme_item.id().clone();
             let quit_id = quit.id().clone();
 
             {
@@ -602,6 +615,8 @@ mod tray {
                 MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                     let msg = if event.id == show_hide_id {
                         TrayMessage::ToggleShowHide
+                    } else if event.id == theme_id {
+                        TrayMessage::ToggleTheme
                     } else if event.id == quit_id {
                         TrayMessage::Quit
                     } else {
@@ -651,6 +666,7 @@ mod tray {
                 icon,
                 rx,
                 visible: true,
+                theme_item,
                 last_tooltip: INITIAL_TOOLTIP.to_string(),
                 last_icon: initial,
             })
@@ -668,6 +684,11 @@ mod tray {
                 let _ = self.icon.set_tooltip(Some(tooltip));
                 self.last_tooltip = tooltip.to_string();
             }
+        }
+
+        /// Relabel the theme item after a switch.
+        pub fn set_theme_label(&self, theme: Theme) {
+            self.theme_item.set_text(theme.menu_label());
         }
 
         /// Swap in a freshly rendered mark, but only when its bytes differ from
@@ -949,6 +970,21 @@ impl QuotaPaneApp {
                         if visible {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                         }
+                    }
+                }
+                TrayMessage::ToggleTheme => {
+                    self.theme = self.theme.toggled();
+                    // Live switch: restyle the context and repaint once.
+                    install_theme(ctx, self.theme);
+                    ctx.request_repaint();
+                    if let Some(tray) = self.tray.as_mut() {
+                        tray.set_theme_label(self.theme);
+                    }
+                    // A `--plain`/`--themed` launch picked the theme for this
+                    // run only, so a toggle during it must not rewrite the
+                    // stored default.
+                    if !self.theme_overridden {
+                        config::save(self.theme);
                     }
                 }
                 TrayMessage::Quit => {
@@ -1429,7 +1465,8 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
-                "usage: quotapane [--client-version <VER>] [--codex-user-agent <UA>] [--no-tray]"
+                "usage: quotapane [--client-version <VER>] [--codex-user-agent <UA>] [--no-tray]\n\
+                 \x20                [--plain | --themed]"
             );
             return ExitCode::from(2);
         }
@@ -1495,7 +1532,7 @@ fn main() -> ExitCode {
             // If creation fails, fall back to close-to-quit.
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             let (tray, tray_active) = if tray_active {
-                let tray = tray::Tray::create(&_cc.egui_ctx);
+                let tray = tray::Tray::create(&_cc.egui_ctx, theme);
                 let active = tray.is_some();
                 (tray, active)
             } else {
@@ -1618,6 +1655,52 @@ mod tests {
         assert!(parsed.no_tray);
         assert_eq!(parsed.client_version, "1.2.3");
         assert_eq!(parsed.codex_user_agent, "ua-y");
+    }
+
+    // --- M7b-r1: theme flags ---
+
+    #[test]
+    fn no_theme_flag_leaves_the_saved_preference_alone() {
+        assert_eq!(parse_args(args(&[])).unwrap().theme_override, None);
+    }
+
+    #[test]
+    fn plain_and_themed_flags_are_recognised() {
+        assert_eq!(
+            parse_args(args(&["--plain"])).unwrap().theme_override,
+            Some(Theme::Plain)
+        );
+        assert_eq!(
+            parse_args(args(&["--themed"])).unwrap().theme_override,
+            Some(Theme::CipherPine)
+        );
+    }
+
+    #[test]
+    fn the_later_theme_flag_wins() {
+        // Ordinary shell convention, rather than erroring on a harmless
+        // duplicate.
+        assert_eq!(
+            parse_args(args(&["--themed", "--plain"]))
+                .unwrap()
+                .theme_override,
+            Some(Theme::Plain)
+        );
+        assert_eq!(
+            parse_args(args(&["--plain", "--themed"]))
+                .unwrap()
+                .theme_override,
+            Some(Theme::CipherPine)
+        );
+    }
+
+    #[test]
+    fn theme_flags_combine_with_the_others() {
+        let parsed =
+            parse_args(args(&["--plain", "--no-tray", "--client-version", "1.2.3"])).unwrap();
+        assert_eq!(parsed.theme_override, Some(Theme::Plain));
+        assert!(parsed.no_tray);
+        assert_eq!(parsed.client_version, "1.2.3");
     }
 
     // --- provider_label: label mapping ---

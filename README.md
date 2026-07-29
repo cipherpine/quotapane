@@ -15,6 +15,17 @@ The entire value proposition is a **small, auditable trust boundary**. Only two 
 
 Two binaries are produced: `quotapane` (the window) and `quotapane-cli` (headless).
 
+## Theming
+
+The window ships with the Cipher Pine terminal theme. A tray-menu
+item switches between it and a plain look, live; the choice is
+remembered as a single word (`plain` or `cipherpine`) in
+`theme.cfg` under your platform's config directory
+(`%APPDATA%\quotapane\` on Windows, `~/.config/quotapane/` on
+Linux). No tray on your platform? Launch with `--plain` or
+`--themed` to pick per run. The file stores nothing but that word;
+deleting it restores the default.
+
 ## Security posture (the short version)
 
 - Tokens are never persisted, never logged, never serialized. They live in memory in a `Secret<T>` that zeroizes on drop and prints `«redacted»`.
