@@ -72,11 +72,11 @@ const PANEL: egui::Color32 = egui::Color32::from_rgb(14, 16, 15);
 /// Borders and the blueprint grid's base hue. `#1e2422`
 const HAIRLINE: egui::Color32 = egui::Color32::from_rgb(30, 36, 34);
 /// Primary text. `#cdd6d1`
-const TEXT: egui::Color32 = egui::Color32::from_rgb(205, 214, 209);
+const TEXT: egui::Color32 = egui::Color32::from_rgb(222, 230, 225);
 /// Labels and reset countdowns. `#8a938e`
-const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(138, 147, 142);
+const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(158, 168, 162);
 /// The "updated Ns ago" line while fresh. `#5c665f`
-const TEXT_FAINT: egui::Color32 = egui::Color32::from_rgb(92, 102, 95);
+const TEXT_FAINT: egui::Color32 = egui::Color32::from_rgb(118, 128, 121);
 /// Healthy bar fill. `#2d7a4f`
 const PINE: egui::Color32 = egui::Color32::from_rgb(45, 122, 79);
 /// The "operational" dot beside a fresh update line. `#3fae6a`
@@ -99,10 +99,10 @@ const CURSOR_SIZE: egui::Vec2 = egui::vec2(7.0, 13.0);
 const CURSOR_GAP: f32 = 3.0;
 
 /// Blueprint grid pitch, both axes.
-const GRID_PITCH: f32 = 40.0;
+const GRID_PITCH: f32 = 64.0;
 /// Grid line alpha, out of 255. Texture, not noise — high enough to read as
 /// deliberate under the content, low enough never to compete with it.
-const GRID_ALPHA: u8 = 12;
+const GRID_ALPHA: u8 = 6;
 
 /// Caption beside the per-model disclosure triangle.
 const PER_MODEL_CAPTION: &str = "per-model";
@@ -296,14 +296,14 @@ fn install_theme(ctx: &egui::Context) {
     // Everything is egui's built-in monospace — no font asset, no new crate.
     // Sizes were arbitrated by the layout harness, not chosen by eye.
     let text_styles: std::collections::BTreeMap<TextStyle, FontId> = [
-        (TextStyle::Heading, FontId::new(15.0, FontFamily::Monospace)),
-        (TextStyle::Body, FontId::new(12.0, FontFamily::Monospace)),
+        (TextStyle::Heading, FontId::new(16.0, FontFamily::Monospace)),
+        (TextStyle::Body, FontId::new(13.0, FontFamily::Monospace)),
         (
             TextStyle::Monospace,
-            FontId::new(12.0, FontFamily::Monospace),
+            FontId::new(13.0, FontFamily::Monospace),
         ),
-        (TextStyle::Button, FontId::new(12.0, FontFamily::Monospace)),
-        (TextStyle::Small, FontId::new(10.5, FontFamily::Monospace)),
+        (TextStyle::Button, FontId::new(13.0, FontFamily::Monospace)),
+        (TextStyle::Small, FontId::new(11.5, FontFamily::Monospace)),
     ]
     .into();
 
@@ -2189,9 +2189,9 @@ mod tests {
         install_theme(&ctx);
         let style = ctx.style_of(egui::Theme::Dark);
         let size = |s: egui::TextStyle| style.text_styles.get(&s).unwrap().size;
-        assert_eq!(size(egui::TextStyle::Heading), 15.0);
-        assert_eq!(size(egui::TextStyle::Body), 12.0);
-        assert_eq!(size(egui::TextStyle::Small), 10.5);
+        assert_eq!(size(egui::TextStyle::Heading), 16.0);
+        assert_eq!(size(egui::TextStyle::Body), 13.0);
+        assert_eq!(size(egui::TextStyle::Small), 11.5);
     }
 
     // --- M7b: the status cursor ---
@@ -2328,8 +2328,8 @@ mod tests {
     fn grid_alpha_stays_texture_not_noise() {
         // A grid loud enough to compete with content is the failure mode this
         // guards; 12/255 is the accepted value.
-        assert_eq!(GRID_ALPHA, 12);
-        assert_eq!(GRID_PITCH, 40.0);
+        assert_eq!(GRID_ALPHA, 6);
+        assert_eq!(GRID_PITCH, 64.0);
     }
 }
 
