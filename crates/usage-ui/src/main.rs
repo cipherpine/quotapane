@@ -46,7 +46,10 @@ use usage_core::providers::{
     ClaudeSubscription, CodexSubscription, UsageProvider, CODEX_DEFAULT_USER_AGENT,
 };
 
+mod config;
 mod icon;
+
+use config::Theme;
 
 /// Sent when `--client-version` is omitted. Mirrors `usage-cli`'s default —
 /// real Claude Code versions avoid the provider's aggressively rate-limited
@@ -85,6 +88,9 @@ const OPER_GREEN: egui::Color32 = egui::Color32::from_rgb(63, 174, 106);
 const AMBER: egui::Color32 = egui::Color32::from_rgb(217, 161, 59);
 /// Prompt, cursor, critical fill, and every stale/error line. `#c41e3a`
 const CARDINAL: egui::Color32 = egui::Color32::from_rgb(196, 30, 58);
+
+/// The pre-M7b titlebar slate, restored under [`Theme::Plain`].
+const PLAIN_TITLEBAR_BG: egui::Color32 = egui::Color32::from_rgb(24, 27, 33);
 
 /// Slim custom titlebar — the window is borderless (`with_decorations(false)`),
 /// so it draws its own. ~24px tall.
@@ -133,12 +139,17 @@ struct Args {
     /// Disable the system tray, restoring close-to-quit. On platforms without a
     /// tray (Linux) the flag is accepted and ignored.
     no_tray: bool,
+    /// Theme for this run only, from `--plain` / `--themed`. `None` means use
+    /// the saved preference. Never written back to disk: a flag is a choice
+    /// about one launch, not a new default.
+    theme_override: Option<Theme>,
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
     let mut client_version: Option<String> = None;
     let mut codex_user_agent: Option<String> = None;
     let mut no_tray = false;
+    let mut theme_override: Option<Theme> = None;
 
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
@@ -160,6 +171,14 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
             "--no-tray" => {
                 no_tray = true;
             }
+            // Theme for this run only. The later flag wins if both are given,
+            // which is the ordinary shell convention.
+            "--plain" => {
+                theme_override = Some(Theme::Plain);
+            }
+            "--themed" => {
+                theme_override = Some(Theme::CipherPine);
+            }
             other => return Err(format!("unrecognized argument: {other}")),
         }
     }
@@ -170,6 +189,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
         client_version_defaulted,
         codex_user_agent: codex_user_agent.unwrap_or_else(|| CODEX_DEFAULT_USER_AGENT.to_string()),
         no_tray,
+        theme_override,
     })
 }
 
@@ -283,14 +303,24 @@ fn fraction_color(fraction: Option<f64>) -> egui::Color32 {
     }
 }
 
-/// Install the Cipher Pine theme on a context.
+/// Install a theme on a context.
 ///
-/// Called from the eframe creation closure **and** from the test layout
-/// harness, so every width/height assertion measures the real shipped type
-/// rather than egui's proportional default. That shared call is the whole
-/// point: mono is wider per character, and a harness on the default font would
-/// have cheerfully passed a layout that clips in the real window.
-fn install_theme(ctx: &egui::Context) {
+/// Called from the eframe creation closure, from the tray toggle, **and** from
+/// the test layout harness, so every width/height assertion measures the real
+/// shipped type rather than egui's proportional default. That shared call is
+/// the whole point: mono is wider per character, and a harness on the default
+/// font would have cheerfully passed a layout that clips in the real window.
+///
+/// [`Theme::Plain`] restores egui's own dark defaults wholesale — it is the
+/// pre-M7b look, so the honest way to produce it is to install nothing rather
+/// than to hand-tune a second palette that would drift.
+fn install_theme(ctx: &egui::Context, theme: Theme) {
+    if theme == Theme::Plain {
+        ctx.all_styles_mut(|style| *style = egui::Style::default());
+        ctx.set_theme(egui::ThemePreference::Dark);
+        return;
+    }
+
     use egui::{FontFamily, FontId, TextStyle};
 
     // Everything is egui's built-in monospace — no font asset, no new crate.
@@ -326,6 +356,28 @@ fn install_theme(ctx: &egui::Context) {
     });
 
     ctx.set_theme(egui::ThemePreference::Dark);
+}
+
+// --------------------------------------------------------------------------
+// Theme-aware ink. Under CipherPine these are the palette consts; under Plain
+// they defer to egui's own visuals, because an explicit `RichText::color`
+// overrides the style and would otherwise drag palette colours into the plain
+// look. Bar fills are deliberately NOT here — `fraction_color` is shared by
+// both themes, since severity is data truth rather than decoration.
+// --------------------------------------------------------------------------
+
+fn text_color(ui: &egui::Ui, theme: Theme) -> egui::Color32 {
+    match theme {
+        Theme::CipherPine => TEXT,
+        Theme::Plain => ui.visuals().text_color(),
+    }
+}
+
+fn dim_color(ui: &egui::Ui, theme: Theme) -> egui::Color32 {
+    match theme {
+        Theme::CipherPine => TEXT_DIM,
+        Theme::Plain => ui.visuals().weak_text_color(),
+    }
 }
 
 /// The status cursor's state for one frame: `(visible, needs_repaint)`.
@@ -716,6 +768,13 @@ struct QuotaPaneApp {
     /// Set once the user picks "Quit" from the tray, so the close interceptor
     /// lets the real exit through.
     quitting: bool,
+    /// The active look. Lives here — one field on the app — and is the single
+    /// value every render path branches on. Changed only by the tray toggle,
+    /// which also persists it.
+    theme: Theme,
+    /// True when `--plain`/`--themed` picked the theme for this run, so the
+    /// flag is not written back to disk.
+    theme_overridden: bool,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     tray: Option<tray::Tray>,
 }
@@ -741,18 +800,27 @@ impl QuotaPaneApp {
         let mut minimize = false;
         let mut close = false;
 
+        let theme = self.theme;
+
         // Status cursor: computed before the panel closure so the pane borrow
-        // ends before the closure takes `&mut self` state.
-        let blinking = cursor_should_blink(&self.panes);
+        // ends before the closure takes `&mut self` state. Plain has no cursor
+        // at all, so it never asks for a repaint either.
+        let blinking = theme == Theme::CipherPine && cursor_should_blink(&self.panes);
         let elapsed = Duration::from_secs_f64(ctx.input(|i| i.time).max(0.0));
         let (cursor_visible, cursor_needs_repaint) = cursor_phase(blinking, elapsed);
 
-        let frame = egui::Frame::new().fill(PANEL).inner_margin(egui::Margin {
-            left: 8,
-            right: 2,
-            top: 0,
-            bottom: 0,
-        });
+        let titlebar_fill = match theme {
+            Theme::CipherPine => PANEL,
+            Theme::Plain => PLAIN_TITLEBAR_BG,
+        };
+        let frame = egui::Frame::new()
+            .fill(titlebar_fill)
+            .inner_margin(egui::Margin {
+                left: 8,
+                right: 2,
+                top: 0,
+                bottom: 0,
+            });
 
         egui::Panel::top("titlebar")
             .exact_size(TITLEBAR_HEIGHT)
@@ -782,8 +850,10 @@ impl QuotaPaneApp {
                         minimize = true;
                     }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        render_prompt(ui);
-                        render_cursor(ui, cursor_visible);
+                        render_prompt(ui, theme);
+                        if theme == Theme::CipherPine {
+                            render_cursor(ui, cursor_visible);
+                        }
                     });
                 });
             });
@@ -797,12 +867,14 @@ impl QuotaPaneApp {
 
         // The 1px HAIRLINE rule under the strip. Painted rather than using
         // egui's separator line so it spans the full width with no margin.
-        let bar = root_ui.max_rect();
-        root_ui.painter().hline(
-            bar.x_range(),
-            bar.top() + TITLEBAR_HEIGHT,
-            egui::Stroke::new(1.0, HAIRLINE),
-        );
+        if theme == Theme::CipherPine {
+            let bar = root_ui.max_rect();
+            root_ui.painter().hline(
+                bar.x_range(),
+                bar.top() + TITLEBAR_HEIGHT,
+                egui::Stroke::new(1.0, HAIRLINE),
+            );
+        }
 
         if minimize {
             self.hide_window(ctx);
@@ -918,6 +990,7 @@ impl eframe::App for QuotaPaneApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let theme = self.theme;
 
         // Slim custom titlebar first (a top panel): app name + minimize/close,
         // and a window-drag handle. Takes its ~24px; the CentralPanel fills the
@@ -939,8 +1012,11 @@ impl eframe::App for QuotaPaneApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
-            // Blueprint grid, painted before any content so it sits underneath.
-            paint_grid(ui, bg_rect);
+            // Blueprint grid, painted before any content so it sits
+            // underneath. Cipher Pine only — Plain is the pre-M7b look.
+            if theme == Theme::CipherPine {
+                paint_grid(ui, bg_rect);
+            }
 
             // Vertical safety net. The window is a fixed 240px with no resize,
             // so content that outgrows it has nowhere to go: expanding several
@@ -967,7 +1043,7 @@ impl eframe::App for QuotaPaneApp {
                         if i > 0 {
                             ui.separator();
                         }
-                        render_pane(ui, pane);
+                        render_pane(ui, pane, theme);
                     }
                 });
         });
@@ -987,7 +1063,12 @@ impl eframe::App for QuotaPaneApp {
 /// egui colours a `RichText` as a unit, and the caret is the only cardinal
 /// part. The leading space lives in the second label so the caret keeps tight
 /// bounds — which matters once the status cursor sits after the name.
-fn render_prompt(ui: &mut egui::Ui) {
+fn render_prompt(ui: &mut egui::Ui, theme: Theme) {
+    if theme == Theme::Plain {
+        // The pre-M7b titlebar: just the product name.
+        ui.label(egui::RichText::new("QuotaPane").strong());
+        return;
+    }
     ui.spacing_mut().item_spacing.x = 0.0;
     ui.label(egui::RichText::new(">").color(CARDINAL).strong());
     ui.label(egui::RichText::new(" quotapane").color(TEXT));
@@ -998,7 +1079,12 @@ fn render_prompt(ui: &mut egui::Ui) {
 ///
 /// egui has no letter-spacing control, so plain uppercase mono is the
 /// approximation the spec accepts rather than faking tracking with padding.
-fn render_provider_header(ui: &mut egui::Ui, id: ProviderId) {
+fn render_provider_header(ui: &mut egui::Ui, id: ProviderId, theme: Theme) {
+    if theme == Theme::Plain {
+        // The pre-M7b heading: the provider's name, title-cased.
+        ui.heading(provider_label(id));
+        return;
+    }
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.label(egui::RichText::new("// ").small().color(CARDINAL));
@@ -1011,8 +1097,8 @@ fn render_provider_header(ui: &mut egui::Ui, id: ProviderId) {
 }
 
 /// Render one provider's titled section.
-fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane) {
-    render_provider_header(ui, pane.id);
+fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
+    render_provider_header(ui, pane.id, theme);
 
     if let Some(err) = &pane.startup_error {
         ui.colored_label(CARDINAL, err);
@@ -1024,7 +1110,7 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane) {
     let mut toggled = false;
     if let Some(snapshot) = &pane.latest_snapshot {
         let age = pane.snapshot_received_at.map(|t| t.elapsed());
-        toggled = render_windows(ui, snapshot, age, pane.expanded);
+        toggled = render_windows(ui, snapshot, age, pane.expanded, theme);
     }
     if toggled {
         pane.expanded = !pane.expanded;
@@ -1059,9 +1145,10 @@ fn render_windows(
     snapshot: &ProviderSnapshot,
     age: Option<Duration>,
     expanded: bool,
+    theme: Theme,
 ) -> bool {
     for window in &snapshot.windows {
-        render_window_row(ui, window);
+        render_window_row(ui, window, theme);
     }
 
     // Reset credits, between the headline rows and the per-model disclosure.
@@ -1071,7 +1158,7 @@ fn render_windows(
         ui.label(
             egui::RichText::new(reset_credits_line(&credits))
                 .small()
-                .color(TEXT_DIM),
+                .color(dim_color(ui, theme)),
         );
     }
 
@@ -1093,14 +1180,14 @@ fn render_windows(
             // distinct ids.
             ui.indent(("per_model", snapshot.provider), |ui| {
                 for window in visible {
-                    render_per_model_row(ui, window);
+                    render_per_model_row(ui, window, theme);
                 }
             });
         }
     }
 
     if let Some(age) = age {
-        render_age_line(ui, age);
+        render_age_line(ui, age, theme);
     }
 
     toggled
@@ -1111,9 +1198,25 @@ fn render_windows(
 /// Fresh reads quietly — OPER_GREEN dot, TEXT_FAINT text. Stale turns the
 /// **whole** line CARDINAL, dot included, so staleness is legible from the
 /// colour alone without reading the words.
-fn render_age_line(ui: &mut egui::Ui, age: Duration) {
+fn render_age_line(ui: &mut egui::Ui, age: Duration, theme: Theme) {
     let stale = is_stale(age);
-    let (dot_color, text_color) = if stale {
+
+    if theme == Theme::Plain {
+        // The pre-M7b footer: one line, amber when stale.
+        let mut text = format!("updated {}", format_age(age.as_secs()));
+        if stale {
+            text.push_str("  •  stale");
+        }
+        let color = if stale {
+            AMBER
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        ui.colored_label(color, text);
+        return;
+    }
+
+    let (dot, ink) = if stale {
         (CARDINAL, CARDINAL)
     } else {
         (OPER_GREEN, TEXT_FAINT)
@@ -1126,8 +1229,8 @@ fn render_age_line(ui: &mut egui::Ui, age: Duration) {
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        ui.label(egui::RichText::new("•").small().color(dot_color));
-        ui.label(egui::RichText::new(text).small().color(text_color));
+        ui.label(egui::RichText::new("•").small().color(dot));
+        ui.label(egui::RichText::new(text).small().color(ink));
     });
 }
 
@@ -1178,16 +1281,16 @@ fn add_quota_bar(ui: &mut egui::Ui, fraction: Option<f64>) {
     );
 }
 
-fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow) {
+fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow, theme: Theme) {
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(&window.label).color(TEXT));
+        ui.label(egui::RichText::new(&window.label).color(text_color(ui, theme)));
         // The numeric percent rides on the bar itself; `--` when unknown (an
         // unknown fraction also draws an empty gray bar).
         add_quota_bar(ui, window.used_fraction);
         // Compact reset countdown, e.g. "resets in 3h 12m"; `--` when unknown.
         ui.label(
             egui::RichText::new(format!("resets in {}", format_reset(window.resets_in_secs)))
-                .color(TEXT_DIM),
+                .color(dim_color(ui, theme)),
         );
     });
 }
@@ -1211,11 +1314,12 @@ fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow) {
 /// rather than as two unrelated ones. The bar goes through the shared
 /// [`add_quota_bar`], so a per-model gauge stays comparable at a glance with a
 /// headline gauge — width, rounding, border and fill mapping all in step.
-fn render_per_model_row(ui: &mut egui::Ui, window: &QuotaWindow) {
+fn render_per_model_row(ui: &mut egui::Ui, window: &QuotaWindow, theme: Theme) {
+    let dim = dim_color(ui, theme);
     ui.label(
         egui::RichText::new(window.label.as_str())
             .small()
-            .color(TEXT_DIM),
+            .color(dim),
     );
     ui.horizontal(|ui| {
         ui.add_space(PER_MODEL_ROW_INDENT);
@@ -1223,7 +1327,7 @@ fn render_per_model_row(ui: &mut egui::Ui, window: &QuotaWindow) {
         ui.label(
             egui::RichText::new(format!("resets in {}", format_reset(window.resets_in_secs)))
                 .small()
-                .color(TEXT_DIM),
+                .color(dim),
         );
     });
 }
@@ -1341,6 +1445,7 @@ fn main() -> ExitCode {
     // is accepted and ignored. Reading it via `cfg!` keeps the field live on
     // every platform and yields today's behavior wherever there is no tray.
     let tray_active = !args.no_tray && cfg!(any(target_os = "windows", target_os = "macos"));
+    let theme_override = args.theme_override;
 
     // One pane per provider. A missing home directory becomes a per-pane
     // startup error; a missing credential file surfaces later as a quiet
@@ -1376,10 +1481,15 @@ fn main() -> ExitCode {
         "QuotaPane",
         native_options,
         Box::new(move |_cc| {
-            // Cipher Pine theme, installed before the first frame. The test
-            // layout harness installs the same one, so its width assertions
-            // measure the type this window actually renders.
-            install_theme(&_cc.egui_ctx);
+            // A run-only flag beats the saved preference; otherwise the saved
+            // preference, which itself defaults to Cipher Pine.
+            let theme_overridden = theme_override.is_some();
+            let theme = theme_override.unwrap_or_else(config::load);
+
+            // Installed before the first frame. The test layout harness
+            // installs the same theme, so its width assertions measure the
+            // type this window actually renders.
+            install_theme(&_cc.egui_ctx, theme);
 
             // Create the tray on the main thread, now that eframe/winit is up.
             // If creation fails, fall back to close-to-quit.
@@ -1396,6 +1506,8 @@ fn main() -> ExitCode {
                 panes: vec![claude, codex],
                 tray_active,
                 quitting: false,
+                theme,
+                theme_overridden,
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
                 tray,
             };
@@ -1545,13 +1657,19 @@ mod tests {
     /// overflowed — it would recreate exactly the blind spot that let this bug
     /// ship. A default `Context` keeps egui's real fonts and real text
     /// extents.
-    fn lay_out(mut add_contents: impl FnMut(&mut egui::Ui)) -> Laid {
+    fn lay_out(add_contents: impl FnMut(&mut egui::Ui)) -> Laid {
+        // Cipher Pine is the binding case: its monospace is wider per
+        // character than Plain's proportional default. Proven by
+        // `plain_is_never_wider_than_cipher_pine`, not assumed.
+        lay_out_themed(Theme::CipherPine, add_contents)
+    }
+
+    fn lay_out_themed(theme: Theme, mut add_contents: impl FnMut(&mut egui::Ui)) -> Laid {
         let ctx = egui::Context::default();
-        // The shipped theme, not egui's default. Monospace is wider per
-        // character than the proportional default, so a harness without this
-        // would happily pass a row that clips in the real window — which is
-        // precisely the blind spot these tests exist to close.
-        install_theme(&ctx);
+        // The shipped theme, not egui's default. A harness without this would
+        // happily pass a row that clips in the real window — precisely the
+        // blind spot these tests exist to close.
+        install_theme(&ctx, theme);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1597,7 +1715,7 @@ mod tests {
         // The exact label from the Codex fixture that clipped in the window.
         let laid = lay_out(|ui| {
             ui.indent("t", |ui| {
-                render_per_model_row(ui, &model_window("GPT-5.3-Codex-Spark"))
+                render_per_model_row(ui, &model_window("GPT-5.3-Codex-Spark"), Theme::CipherPine)
             });
         });
         assert!(
@@ -1614,7 +1732,9 @@ mod tests {
         // longer, and a fix that merely bought some pixels would fail here.
         let absurd = "Claude-Opus-5-20260501-Extended-Thinking-Preview";
         let laid = lay_out(|ui| {
-            ui.indent("t", |ui| render_per_model_row(ui, &model_window(absurd)));
+            ui.indent("t", |ui| {
+                render_per_model_row(ui, &model_window(absurd), Theme::CipherPine)
+            });
         });
         assert!(
             laid.width <= laid.available_width,
@@ -1633,7 +1753,7 @@ mod tests {
         // "simplifies" the two-line row back to one line.
         let laid = lay_out(|ui| {
             ui.indent("t", |ui| {
-                render_window_row(ui, &model_window("GPT-5.3-Codex-Spark"))
+                render_window_row(ui, &model_window("GPT-5.3-Codex-Spark"), Theme::CipherPine)
             });
         });
         assert!(
@@ -1657,6 +1777,7 @@ mod tests {
                         used_fraction: Some(0.33),
                         resets_in_secs: Some(446_400),
                     },
+                    Theme::CipherPine,
                 )
             });
             assert!(
@@ -1697,7 +1818,13 @@ mod tests {
             source: SnapshotSource::UsageEndpoint,
         };
         let laid = lay_out(|ui| {
-            render_windows(ui, &snapshot, Some(Duration::from_secs(30)), true);
+            render_windows(
+                ui,
+                &snapshot,
+                Some(Duration::from_secs(30)),
+                true,
+                Theme::CipherPine,
+            );
         });
         assert!(
             laid.width <= laid.available_width,
@@ -1733,7 +1860,13 @@ mod tests {
             source: SnapshotSource::UsageEndpoint,
         };
         let laid = lay_out(|ui| {
-            render_windows(ui, &snapshot, Some(Duration::from_secs(30)), true);
+            render_windows(
+                ui,
+                &snapshot,
+                Some(Duration::from_secs(30)),
+                true,
+                Theme::CipherPine,
+            );
         });
         assert!(
             laid.height > usable_height,
@@ -1747,7 +1880,7 @@ mod tests {
     #[test]
     fn per_model_rows_use_the_dedicated_two_line_renderer() {
         // The signature the expanded branch depends on.
-        let _: fn(&mut egui::Ui, &QuotaWindow) = render_per_model_row;
+        let _: fn(&mut egui::Ui, &QuotaWindow, Theme) = render_per_model_row;
     }
 
     // --- M7a: untouched buckets are hidden ---
@@ -1779,7 +1912,13 @@ mod tests {
 
     fn lay_out_pane(snapshot: &ProviderSnapshot, expanded: bool) -> Laid {
         lay_out(|ui| {
-            render_windows(ui, snapshot, Some(Duration::from_secs(30)), expanded);
+            render_windows(
+                ui,
+                snapshot,
+                Some(Duration::from_secs(30)),
+                expanded,
+                Theme::CipherPine,
+            );
         })
     }
 
@@ -2169,7 +2308,7 @@ mod tests {
         // Every text style must be mono: one proportional leftover would make
         // the harness's width arbitration meaningless for that style.
         let ctx = egui::Context::default();
-        install_theme(&ctx);
+        install_theme(&ctx, Theme::CipherPine);
         let style = ctx.style_of(egui::Theme::Dark);
         for (text_style, font_id) in &style.text_styles {
             assert_eq!(
@@ -2186,7 +2325,7 @@ mod tests {
     #[test]
     fn theme_type_scale_matches_the_spec() {
         let ctx = egui::Context::default();
-        install_theme(&ctx);
+        install_theme(&ctx, Theme::CipherPine);
         let style = ctx.style_of(egui::Theme::Dark);
         let size = |s: egui::TextStyle| style.text_styles.get(&s).unwrap().size;
         assert_eq!(size(egui::TextStyle::Heading), 16.0);
@@ -2302,7 +2441,7 @@ mod tests {
         let lay = |visible: bool| {
             lay_out(|ui| {
                 ui.horizontal(|ui| {
-                    render_prompt(ui);
+                    render_prompt(ui, Theme::CipherPine);
                     render_cursor(ui, visible);
                 });
             })
@@ -2322,6 +2461,61 @@ mod tests {
             "prompt row wanted {}px inside the {TITLEBAR_HEIGHT}px titlebar",
             on.height
         );
+    }
+
+    #[test]
+    fn plain_is_never_wider_than_cipher_pine() {
+        // Justifies measuring only Cipher Pine everywhere else: if the wider
+        // mono fits, the proportional default fits.
+        let row = |theme: Theme| {
+            lay_out_themed(theme, move |ui| {
+                render_window_row(
+                    ui,
+                    &QuotaWindow {
+                        label: "5h".to_string(),
+                        used_fraction: Some(0.33),
+                        resets_in_secs: Some(446_400),
+                    },
+                    theme,
+                )
+            })
+        };
+        let themed = row(Theme::CipherPine);
+        let plain = row(Theme::Plain);
+        assert!(
+            plain.width <= themed.width,
+            "Plain wanted {}px vs Cipher Pine's {}px — the harness measures the wrong theme",
+            plain.width,
+            themed.width
+        );
+        assert!(themed.width <= themed.available_width);
+        assert!(plain.width <= plain.available_width);
+    }
+
+    #[test]
+    fn plain_theme_installs_egui_defaults() {
+        // Plain is the pre-M7b look: egui's own dark visuals and proportional
+        // type, not a second hand-tuned palette that could drift.
+        let ctx = egui::Context::default();
+        install_theme(&ctx, Theme::Plain);
+        let style = ctx.style_of(egui::Theme::Dark);
+        assert_eq!(style.visuals.override_text_color, None);
+        assert_eq!(
+            style
+                .text_styles
+                .get(&egui::TextStyle::Body)
+                .unwrap()
+                .family,
+            egui::FontFamily::Proportional
+        );
+    }
+
+    #[test]
+    fn severity_mapping_is_shared_by_both_themes() {
+        // Bar colour is data truth, not decoration: `fraction_color` takes no
+        // theme, so there is exactly one mapping and neither theme can drift.
+        let _: fn(Option<f64>) -> egui::Color32 = fraction_color;
+        assert_eq!(fraction_color(Some(0.9)), CARDINAL);
     }
 
     #[test]
