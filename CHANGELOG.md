@@ -5,6 +5,35 @@ All notable changes to QuotaPane are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-29
+
+The Cipher Pine visual pass.
+
+### Added
+
+- **Cipher Pine theme (the default).** Near-black ground, a faint blueprint
+  grid, monospace type, "//" section headers, and a "> quotapane" titlebar with
+  a block status cursor — solid when idle and fresh, blinking only while the
+  first poll is in flight or any provider's data is stale.
+- **A theme toggle.** A tray-menu item switches live between Cipher Pine and a
+  plain look and remembers the choice as a single word (`plain` or `cipherpine`)
+  in `theme.cfg` under the platform config directory. `--plain` / `--themed`
+  choose per run without writing the file. The file stores nothing but that
+  word.
+- **Window and tray icons, painted in code.** The window icon is the QuotaPane
+  mark; the tray icon is a live miniature of it whose two bars track your Claude
+  and Codex headline usage.
+- README: brand banner and window screenshots.
+
+### Changed
+
+- **Bar colors are semantic in both themes**: pine below 50%, amber from 50%,
+  cardinal from 80% (previously green until 80%, red at 95%). Bars read amber
+  earlier by design.
+- **Staleness threshold 15 min → 10 min.** The window flags stale data sooner.
+- `quotapane-cli --json` output is unchanged in this release: no key was added,
+  removed, or renamed.
+
 ## [1.1.0] - 2026-07-29
 
 Per-model quota truth, and Codex reset credits.
@@ -148,5 +177,6 @@ R2 in `THREAT_MODEL.md`. For maximum assurance, build from source.
   `prompts/m6-sha-map-2.txt`; `prompts/m6-sha-map.txt` is retained only as the
   record of the intermediate state.
 
+[1.2.0]: https://github.com/cipherpine/quotapane/releases/tag/v1.2.0
 [1.1.0]: https://github.com/cipherpine/quotapane/releases/tag/v1.1.0
 [1.0.0]: https://github.com/cipherpine/quotapane/releases/tag/v1.0.0
