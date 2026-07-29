@@ -19,6 +19,13 @@
 //! is swallowed: a theme preference is never worth an error dialog, a log line,
 //! or a panic.
 
+// The only way to *change* the theme at runtime is the tray menu, so on a
+// platform without a tray (Linux) `save` and the label/toggle helpers are
+// unreachable — `load` and the flags still work, which is the whole surface
+// there. This is not dead code; it is code for a platform this build does not
+// have, and deleting it to satisfy the lint would break Windows and macOS.
+#![cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+
 use std::path::PathBuf;
 
 /// Which look the window wears.

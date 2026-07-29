@@ -795,6 +795,11 @@ struct QuotaPaneApp {
     theme: Theme,
     /// True when `--plain`/`--themed` picked the theme for this run, so the
     /// flag is not written back to disk.
+    ///
+    /// Read only by the tray toggle, which is the sole runtime way to change
+    /// the theme — so on a platform without a tray it is written and never
+    /// read, which is correct rather than dead.
+    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
     theme_overridden: bool,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     tray: Option<tray::Tray>,
