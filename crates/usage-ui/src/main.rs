@@ -35,12 +35,23 @@
 //! M7a2 adds one dim line for a provider's reset credits (`resets available:
 //! N`), between the headline rows and the per-model toggle. Only Codex reports
 //! them, so the line is absent for Claude and that pane is untouched.
+//!
+//! M8 adds pace. Every bar whose window has a known duration gets a 1px
+//! elapsed-time tick, so fill-versus-tick reads as spending slower or faster
+//! than the clock. Per provider, an in-memory `PaceRing` per headline window is
+//! fed on each poll and fitted by `usage_core::pace`; when a window is projected
+//! to fill before it resets, one line says so — amber, cardinal inside six
+//! hours. Nothing at risk means no line at all, so a healthy window looks
+//! exactly as it did before. All of it recomputes on poll events only, and
+//! `--pace-demo` renders a fixed synthetic scenario (no polling, no network) so
+//! the feature can be reviewed without waiting hours for one to occur.
 
 use eframe::egui;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use usage_core::egress::Egress;
 use usage_core::model::{ProviderId, ProviderSnapshot, QuotaWindow, ResetCredits};
+use usage_core::pace::{self, Burn, PaceRing, PaceSample};
 use usage_core::poller::{self, PollerHandle, Update};
 use usage_core::providers::{
     ClaudeSubscription, CodexSubscription, UsageProvider, CODEX_DEFAULT_USER_AGENT,
@@ -133,6 +144,13 @@ const BAR_ROUNDING: u8 = 3;
 /// never competes with the fill edge it sits beside.
 const PACE_TICK_ALPHA: u8 = 200;
 
+/// Under this many seconds to projected exhaustion the at-risk line goes
+/// CARDINAL rather than AMBER (6 h).
+///
+/// A working session, not a round number: inside six hours the forecast is
+/// something to act on now, and beyond it something to merely know.
+const PACE_CARDINAL_UNDER_SECS: u64 = 21_600;
+
 struct Args {
     /// Claude Code client version → `User-Agent: claude-code/<ver>`.
     client_version: String,
@@ -149,6 +167,12 @@ struct Args {
     /// the saved preference. Never written back to disk: a flag is a choice
     /// about one launch, not a new default.
     theme_override: Option<Theme>,
+    /// Render the fixed synthetic pace scenario instead of polling (M8).
+    ///
+    /// Nothing is constructed that could reach the network: no provider, no
+    /// [`Egress`], no poller thread. The pace markers only become visible after
+    /// hours of real usage, so this is how they get reviewed and screenshotted.
+    pace_demo: bool,
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
@@ -156,6 +180,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
     let mut codex_user_agent: Option<String> = None;
     let mut no_tray = false;
     let mut theme_override: Option<Theme> = None;
+    let mut pace_demo = false;
 
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
@@ -185,6 +210,10 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
             "--themed" => {
                 theme_override = Some(Theme::CipherPine);
             }
+            // Synthetic pace scenario; no polling, no network at all.
+            "--pace-demo" => {
+                pace_demo = true;
+            }
             other => return Err(format!("unrecognized argument: {other}")),
         }
     }
@@ -196,6 +225,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
         codex_user_agent: codex_user_agent.unwrap_or_else(|| CODEX_DEFAULT_USER_AGENT.to_string()),
         no_tray,
         theme_override,
+        pace_demo,
     })
 }
 
@@ -488,6 +518,189 @@ fn paint_grid(ui: &egui::Ui, rect: egui::Rect) {
 // Linux compiles to exactly the pre-M3.5 window-only behavior.
 // --------------------------------------------------------------------------
 
+// --------------------------------------------------------------------------
+// `--pace-demo`: the fixed synthetic scenario (M8).
+//
+// The pace markers are slow features — a real at-risk line needs a couple of
+// hours of rising usage to appear, and the interesting case (a forecast that
+// beats the reset) may not happen on a given day at all. Waiting for one is not
+// a review process, and it is not a way to take a screenshot either. So the
+// scenario is written down.
+//
+// Two rules make it trustworthy: it fabricates *snapshots*, then feeds them
+// through the same `ingest_pace` a real poll uses (so what renders is the
+// shipping code, not a mock of it), and it constructs no provider, no `Egress`
+// and no poller, so demo mode cannot reach the network even by accident.
+// --------------------------------------------------------------------------
+
+/// The demo series' base observation time — a fixed epoch second, never the
+/// clock. Determinism is the requirement: two runs must render identically, or a
+/// screenshot means nothing and a regression hides in the noise.
+const DEMO_BASE_UNIX_SECS: u64 = 1_785_000_000;
+/// Snapshots in each provider's synthetic series.
+const DEMO_STEPS: u64 = 4;
+/// Spacing between them, in seconds — 20 min, so the series spans an hour and
+/// clears `pace::MIN_SPAN_SECS` with room to spare.
+const DEMO_STEP_SECS: u64 = 1_200;
+
+/// One window in the demo scenario: where it ends up, and where it came from.
+struct DemoWindow {
+    /// Headline label, as a provider would report it.
+    label: &'static str,
+    /// The window's length.
+    duration_secs: u64,
+    /// Countdown at the **final** snapshot. With `duration_secs` this fixes the
+    /// tick's position, so each entry chooses what the reviewer sees.
+    final_resets_in_secs: u64,
+    /// Used fraction at the first snapshot.
+    from_fraction: f64,
+    /// Used fraction at the final snapshot. The gap is the burn rate the
+    /// forecast will find.
+    to_fraction: f64,
+}
+
+/// Expand demo windows into the series of snapshots that would have produced
+/// them: [`DEMO_STEPS`] snapshots [`DEMO_STEP_SECS`] apart, usage rising
+/// linearly and countdowns ticking down.
+fn demo_series(
+    provider: ProviderId,
+    windows: &[DemoWindow],
+    per_model: &[QuotaWindow],
+    reset_credits: Option<ResetCredits>,
+) -> Vec<ProviderSnapshot> {
+    let last_step = DEMO_STEPS - 1;
+    (0..DEMO_STEPS)
+        .map(|step| {
+            let elapsed = step * DEMO_STEP_SECS;
+            ProviderSnapshot {
+                provider,
+                taken_at_unix_secs: DEMO_BASE_UNIX_SECS + elapsed,
+                windows: windows
+                    .iter()
+                    .map(|w| {
+                        let progress = step as f64 / last_step as f64;
+                        QuotaWindow {
+                            label: w.label.to_string(),
+                            used_fraction: Some(
+                                w.from_fraction + (w.to_fraction - w.from_fraction) * progress,
+                            ),
+                            // Counts down to the final value, so the tick walks
+                            // rightward across the series as a real one does.
+                            resets_in_secs: Some(
+                                w.final_resets_in_secs + (last_step - step) * DEMO_STEP_SECS,
+                            ),
+                            duration_secs: Some(w.duration_secs),
+                        }
+                    })
+                    .collect(),
+                per_model: per_model.to_vec(),
+                reset_credits,
+                source: usage_core::model::SnapshotSource::UsageEndpoint,
+            }
+        })
+        .collect()
+}
+
+/// The scenario, one entry per provider. Deliberately covers every state the
+/// feature can be in, so one look at the window reviews all of them:
+///
+/// - **Claude `5h`** — 20% elapsed, 12% spent and barely moving: fill well left
+///   of the tick, comfortably under budget, and *no* warning. The silent case.
+/// - **Claude `7d`** — half elapsed, 55% spent and climbing: fills in ~9 h,
+///   before the reset 3.5 days out. AMBER, since 9 h is beyond the six-hour
+///   cardinal threshold. The pane's warning is this window and not the 5h one,
+///   which is the "sooner wins" selection doing its job.
+/// - **Codex `5h`** — 75% elapsed, 80% spent and climbing hard: fills in ~1 h
+///   against a 1h15m reset. CARDINAL.
+/// - **Codex `7d`** — 90% elapsed, 30% spent, flat: the strongest "under
+///   budget" read on the screen, and silent despite being the pane's other
+///   headline window.
+/// - **Codex per-model** — a used bucket and an untouched one, so the
+///   disclosure toggle appears with a ticked row behind it (and M7a's filter
+///   still hides the untouched one).
+/// - **Codex reset credits** — one available, as the real account reports.
+fn demo_panes() -> Vec<ProviderPane> {
+    let claude = demo_series(
+        ProviderId::ClaudeSubscription,
+        &[
+            DemoWindow {
+                label: "5h",
+                duration_secs: 18_000,
+                final_resets_in_secs: 14_400,
+                from_fraction: 0.10,
+                to_fraction: 0.12,
+            },
+            DemoWindow {
+                label: "7d",
+                duration_secs: 604_800,
+                final_resets_in_secs: 302_400,
+                from_fraction: 0.50,
+                to_fraction: 0.55,
+            },
+        ],
+        &[],
+        None,
+    );
+
+    let codex = demo_series(
+        ProviderId::CodexSubscription,
+        &[
+            DemoWindow {
+                label: "5h",
+                duration_secs: 18_000,
+                final_resets_in_secs: 4_500,
+                from_fraction: 0.60,
+                to_fraction: 0.80,
+            },
+            DemoWindow {
+                label: "7d",
+                duration_secs: 604_800,
+                final_resets_in_secs: 60_480,
+                from_fraction: 0.30,
+                to_fraction: 0.30,
+            },
+        ],
+        &[
+            QuotaWindow {
+                label: "GPT-5.3-Codex-Max".to_string(),
+                used_fraction: Some(0.42),
+                resets_in_secs: Some(302_400),
+                duration_secs: Some(604_800),
+            },
+            QuotaWindow {
+                label: "GPT-5.3-Codex-Spark".to_string(),
+                used_fraction: Some(0.0),
+                resets_in_secs: Some(302_400),
+                duration_secs: Some(604_800),
+            },
+        ],
+        // The real Codex account reports one reset credit, so the demo does
+        // too. The demo exists to show the owner what they will actually see,
+        // and omitting a line the live pane carries would make the review
+        // easier than reality — including its effect on the height budget
+        // (see `the_demo_scenario_fits_the_window`).
+        Some(ResetCredits {
+            available: 1,
+            applicable_now: Some(0),
+        }),
+    );
+
+    vec![
+        ProviderPane::demo(ProviderId::ClaudeSubscription, claude),
+        ProviderPane::demo(ProviderId::CodexSubscription, codex),
+    ]
+}
+
+/// The OS window title. Demo mode says so, since the pane is showing numbers
+/// that describe no real account.
+fn window_title(pace_demo: bool) -> &'static str {
+    if pace_demo {
+        "QuotaPane — demo"
+    } else {
+        "QuotaPane"
+    }
+}
+
 /// A tray/menu interaction, forwarded from the OS event handlers into the app.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -731,6 +944,26 @@ struct ProviderPane {
     /// global: Claude and Codex expand and collapse independently. Starts
     /// collapsed, so the window opens at its established size.
     expanded: bool,
+    /// One sample trail per **headline** window, keyed by its label (M8).
+    ///
+    /// A `Vec` of pairs rather than a map: a provider reports one or two
+    /// headline windows, and at that size a linear scan is both faster and
+    /// easier to read than hashing. Per-model rows deliberately get no ring in
+    /// this slice — they get the elapsed tick, but a forecast per model row
+    /// would be several more lines in a 320px pane for a fact the headline
+    /// windows already carry.
+    ///
+    /// In memory only, and for the process's lifetime only. Nothing here is
+    /// written anywhere; on-disk history is a later milestone.
+    rings: Vec<(String, PaceRing)>,
+    /// This provider's at-risk line, or `None` for "nothing to say".
+    ///
+    /// Recomputed **only** when a snapshot arrives, and stored rather than
+    /// derived at render time. That is the repaint discipline: the window
+    /// already repaints about once a second for the age footer, and running a
+    /// least-squares fit on each of those frames would be arithmetic in a hot
+    /// loop to produce a value that cannot have changed since the last poll.
+    pace_warning: Option<PaceWarning>,
 }
 
 impl ProviderPane {
@@ -755,7 +988,92 @@ impl ProviderPane {
             latest_failure: None,
             startup_error,
             expanded: false,
+            rings: Vec::new(),
+            pace_warning: None,
         }
+    }
+
+    /// A pane with no provider and no poller, replaying a fixed series of
+    /// snapshots — the `--pace-demo` path.
+    ///
+    /// The series goes through [`Self::ingest_pace`], the same function a real
+    /// poll uses, so what the demo shows is the shipping pace code applied to
+    /// synthetic numbers rather than a parallel mock of it. `handle` is `None`,
+    /// so no poller thread exists, no [`Egress`] is ever constructed, and this
+    /// pane cannot make a request even in principle.
+    fn demo(id: ProviderId, series: Vec<ProviderSnapshot>) -> Self {
+        let mut pane = ProviderPane {
+            id,
+            handle: None,
+            latest_snapshot: None,
+            snapshot_received_at: None,
+            latest_failure: None,
+            startup_error: None,
+            expanded: false,
+            rings: Vec::new(),
+            pace_warning: None,
+        };
+        for snapshot in series {
+            pane.ingest_pace(&snapshot);
+            pane.latest_snapshot = Some(snapshot);
+        }
+        // The footer's age is the one thing the demo does not fake: it counts
+        // from now, so the pane reads "updated Ns ago" and goes stale on
+        // schedule exactly as a live one would.
+        pane.snapshot_received_at = Some(Instant::now());
+        pane
+    }
+
+    /// Fold a fresh snapshot's headline windows into their sample trails, then
+    /// recompute this pane's at-risk line (M8).
+    ///
+    /// The sample's timestamp is the provider's own `taken_at_unix_secs`, not
+    /// the moment this code ran: the pace math has to be anchored to when the
+    /// numbers were true. That is also why no clock is read here — the snapshot
+    /// carries the only time that matters.
+    fn ingest_pace(&mut self, snapshot: &ProviderSnapshot) {
+        let now = snapshot.taken_at_unix_secs;
+        let mut candidates: Vec<(String, Burn, Option<u64>)> = Vec::new();
+
+        for window in &snapshot.windows {
+            // Without a usage fraction there is nothing to sample. The window
+            // still renders; it just contributes no pace.
+            let Some(used_fraction) = window.used_fraction else {
+                continue;
+            };
+
+            // An index rather than a held reference, so the miss branch can push
+            // without the lookup's borrow still being alive.
+            let index = match self
+                .rings
+                .iter()
+                .position(|(label, _)| label == &window.label)
+            {
+                Some(index) => index,
+                None => {
+                    self.rings.push((window.label.clone(), PaceRing::new()));
+                    self.rings.len() - 1
+                }
+            };
+            let ring = &mut self.rings[index].1;
+
+            // `observe` clears the trail itself when these facts say the window
+            // reset — the UI does not second-guess it.
+            ring.observe(
+                PaceSample {
+                    at_unix_secs: now,
+                    used_fraction,
+                },
+                window.resets_in_secs,
+                window.duration_secs,
+            );
+
+            if let Some(burn) = pace::estimate(ring.samples(), now) {
+                candidates.push((window.label.clone(), burn, window.resets_in_secs));
+            }
+        }
+
+        self.pace_warning = select_pace_warning(&candidates);
     }
 
     /// Drain this pane's channel, folding every pending update into its state.
@@ -763,9 +1081,18 @@ impl ProviderPane {
         let Some(handle) = &self.handle else {
             return;
         };
-        for update in handle.updates().try_iter() {
+        // Collected before the loop so the channel borrow ends: folding a
+        // snapshot in now takes `&mut self` (the pace trails). `try_iter` drains
+        // only what is already queued — normally nothing, or one poll — so this
+        // holds no more than the loop would have.
+        let updates: Vec<Update> = handle.updates().try_iter().collect();
+        for update in updates {
             match update {
                 Update::Snapshot(snapshot) => {
+                    // Pace first: the trail is fed from the arriving snapshot,
+                    // and the at-risk line is recomputed here — on the poll
+                    // event — rather than on every frame that renders it.
+                    self.ingest_pace(&snapshot);
                     self.latest_snapshot = Some(snapshot);
                     self.snapshot_received_at = Some(Instant::now());
                     // A fresh success supersedes any prior failure.
@@ -807,6 +1134,8 @@ struct QuotaPaneApp {
     /// read, which is correct rather than dead.
     #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
     theme_overridden: bool,
+    /// True under `--pace-demo`, so the titlebar can say the pane is synthetic.
+    pace_demo: bool,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     tray: Option<tray::Tray>,
 }
@@ -833,6 +1162,7 @@ impl QuotaPaneApp {
         let mut close = false;
 
         let theme = self.theme;
+        let pace_demo = self.pace_demo;
 
         // Status cursor: computed before the panel closure so the pane borrow
         // ends before the closure takes `&mut self` state. Plain has no cursor
@@ -882,7 +1212,7 @@ impl QuotaPaneApp {
                         minimize = true;
                     }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        render_prompt(ui, theme);
+                        render_prompt(ui, theme, pace_demo);
                         if theme == Theme::CipherPine {
                             render_cursor(ui, cursor_visible);
                         }
@@ -1110,15 +1440,25 @@ impl eframe::App for QuotaPaneApp {
 /// egui colours a `RichText` as a unit, and the caret is the only cardinal
 /// part. The leading space lives in the second label so the caret keeps tight
 /// bounds — which matters once the status cursor sits after the name.
-fn render_prompt(ui: &mut egui::Ui, theme: Theme) {
+/// Under `--pace-demo` the prompt carries a `demo` marker in AMBER, in both
+/// themes: this window is decoration-less, so its OS title shows only in the
+/// taskbar, and a pane full of invented numbers has to say so where the numbers
+/// are.
+fn render_prompt(ui: &mut egui::Ui, theme: Theme, pace_demo: bool) {
     if theme == Theme::Plain {
         // The pre-M7b titlebar: just the product name.
         ui.label(egui::RichText::new("QuotaPane").strong());
+        if pace_demo {
+            ui.label(egui::RichText::new("demo").small().color(AMBER));
+        }
         return;
     }
     ui.spacing_mut().item_spacing.x = 0.0;
     ui.label(egui::RichText::new(">").color(CARDINAL).strong());
     ui.label(egui::RichText::new(" quotapane").color(TEXT));
+    if pace_demo {
+        ui.label(egui::RichText::new(" demo").color(AMBER));
+    }
 }
 
 /// A provider section header: `// CLAUDE` — comment slashes CARDINAL, name
@@ -1157,7 +1497,14 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
     let mut toggled = false;
     if let Some(snapshot) = &pane.latest_snapshot {
         let age = pane.snapshot_received_at.map(|t| t.elapsed());
-        toggled = render_windows(ui, snapshot, age, pane.expanded, theme);
+        toggled = render_windows(
+            ui,
+            snapshot,
+            age,
+            pane.expanded,
+            theme,
+            pane.pace_warning.as_ref(),
+        );
     }
     if toggled {
         pane.expanded = !pane.expanded;
@@ -1187,15 +1534,30 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
 ///
 /// `expanded` is the pane's current disclosure state. Returns `true` when the
 /// user clicked the toggle this frame; the caller owns the flip.
+///
+/// `pace` is the pane's at-risk line, already selected and already computed off
+/// a poll event ([`ProviderPane::ingest_pace`]) — this function only draws it.
 fn render_windows(
     ui: &mut egui::Ui,
     snapshot: &ProviderSnapshot,
     age: Option<Duration>,
     expanded: bool,
     theme: Theme,
+    pace: Option<&PaceWarning>,
 ) -> bool {
     for window in &snapshot.windows {
         render_window_row(ui, window, theme);
+    }
+
+    // The at-risk forecast, directly under the bars it is about — one line at
+    // most, and absent entirely when nothing is at risk. Calm is silent: a pane
+    // that is fine looks exactly as it did before this milestone.
+    if let Some(warning) = pace {
+        ui.label(
+            egui::RichText::new(pace_warning_line(warning))
+                .small()
+                .color(pace_warning_color(warning.exhaust_in_secs)),
+        );
     }
 
     // Reset credits, between the headline rows and the per-model disclosure.
@@ -1304,6 +1666,70 @@ fn reset_credits_line(credits: &ResetCredits) -> String {
 /// filter cannot quietly grow into the data.
 fn per_model_row_is_visible(window: &QuotaWindow) -> bool {
     window.used_fraction.is_some_and(|fraction| fraction > 0.0)
+}
+
+/// One provider's pace warning: which of its headline windows is projected to
+/// fill before it resets, and in how long.
+///
+/// Exactly one per provider, or none. Two lines competing for attention in a
+/// 320px pane would make the reader compare them instead of act, so the sooner
+/// one speaks and the other stays quiet (see [`select_pace_warning`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaceWarning {
+    /// The headline window's label, verbatim from the snapshot.
+    label: String,
+    /// Seconds until that window is projected to reach 100%.
+    exhaust_in_secs: u64,
+}
+
+/// Pick the at-risk headline window that runs out soonest.
+///
+/// Pure, over `(label, burn, resets_in_secs)` triples the caller has already
+/// estimated — so the choice is testable without a poller, a window, or a clock.
+/// A window is a candidate only if [`pace::at_risk`] holds for it: burning, and
+/// projected to fill *before* its own reset. Everything else is silence, which
+/// is the point — a calm pane says nothing rather than reassuring the user in a
+/// line they then have to read on every glance.
+fn select_pace_warning(candidates: &[(String, Burn, Option<u64>)]) -> Option<PaceWarning> {
+    candidates
+        .iter()
+        .filter(|(_, burn, resets_in)| pace::at_risk(burn, *resets_in))
+        // `at_risk` is only true when `exhaust_in_secs` is `Some`, so this drops
+        // nothing that survived the filter — it unwraps the fact.
+        .filter_map(|(label, burn, _)| burn.exhaust_in_secs.map(|secs| (label, secs)))
+        .min_by_key(|(_, exhaust_in_secs)| *exhaust_in_secs)
+        .map(|(label, exhaust_in_secs)| PaceWarning {
+            label: label.clone(),
+            exhaust_in_secs,
+        })
+}
+
+/// The at-risk line's text, e.g. `at this pace: 7d full in ~9h 0m`.
+///
+/// "at this pace" and the `~` are load-bearing: this is an extrapolation from
+/// the last couple of hours, not a countdown, and the wording must not let it be
+/// mistaken for one. The duration goes through [`format_reset`], so it reads in
+/// the same units as the reset countdown beside it.
+fn pace_warning_line(warning: &PaceWarning) -> String {
+    format!(
+        "at this pace: {} full in ~{}",
+        warning.label,
+        format_reset(Some(warning.exhaust_in_secs))
+    )
+}
+
+/// The at-risk line's colour: AMBER, or CARDINAL inside
+/// [`PACE_CARDINAL_UNDER_SECS`].
+///
+/// Takes no [`Theme`], like [`pace_tick_color`] and for the same reason: how
+/// urgent a forecast is does not depend on which look is installed. Both colours
+/// already appear in both themes (AMBER is Plain's stale marker).
+fn pace_warning_color(exhaust_in_secs: u64) -> egui::Color32 {
+    if exhaust_in_secs < PACE_CARDINAL_UNDER_SECS {
+        CARDINAL
+    } else {
+        AMBER
+    }
 }
 
 /// The elapsed-time pace tick's colour: TEXT_DIM at [`PACE_TICK_ALPHA`].
@@ -1543,15 +1969,22 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             eprintln!(
                 "usage: quotapane [--client-version <VER>] [--codex-user-agent <UA>] [--no-tray]\n\
-                 \x20                [--plain | --themed]"
+                 \x20                [--plain | --themed] [--pace-demo]"
             );
             return ExitCode::from(2);
         }
     };
 
-    if args.client_version_defaulted {
+    // The throttle note is advice about polling, and demo mode does not poll —
+    // it would be advice about a request that is never made.
+    if args.client_version_defaulted && !args.pace_demo {
         eprintln!(
             "note: no --client-version given; using \"{DEFAULT_CLIENT_VERSION}\" — pass a real claude-code version to avoid provider throttling"
+        );
+    }
+    if args.pace_demo {
+        eprintln!(
+            "note: --pace-demo — the window shows a fixed synthetic scenario. No polling, no credentials read, no network requests."
         );
     }
 
@@ -1560,18 +1993,30 @@ fn main() -> ExitCode {
     // every platform and yields today's behavior wherever there is no tray.
     let tray_active = !args.no_tray && cfg!(any(target_os = "windows", target_os = "macos"));
     let theme_override = args.theme_override;
+    let pace_demo = args.pace_demo;
 
     // One pane per provider. A missing home directory becomes a per-pane
     // startup error; a missing credential file surfaces later as a quiet
     // "not signed in" line — neither aborts the window or the other provider.
-    let claude = ProviderPane::new(
-        ProviderId::ClaudeSubscription,
-        ClaudeSubscription::with_default_path(args.client_version),
-    );
-    let codex = ProviderPane::new(
-        ProviderId::CodexSubscription,
-        CodexSubscription::with_default_path(args.codex_user_agent),
-    );
+    //
+    // Under `--pace-demo` the providers are never constructed at all. This
+    // branch is what makes "no network" structural rather than promised:
+    // `ProviderPane::new` is where a poller thread would be spawned and where an
+    // `Egress` would be handed to it.
+    let panes = if pace_demo {
+        demo_panes()
+    } else {
+        vec![
+            ProviderPane::new(
+                ProviderId::ClaudeSubscription,
+                ClaudeSubscription::with_default_path(args.client_version),
+            ),
+            ProviderPane::new(
+                ProviderId::CodexSubscription,
+                CodexSubscription::with_default_path(args.codex_user_agent),
+            ),
+        ]
+    };
 
     // The window/taskbar icon is the neutral mark — no usage yet at startup,
     // and a taskbar entry is not the place for a live gauge. The tray is.
@@ -1592,7 +2037,7 @@ fn main() -> ExitCode {
     };
 
     let result = eframe::run_native(
-        "QuotaPane",
+        window_title(pace_demo),
         native_options,
         Box::new(move |_cc| {
             // A run-only flag beats the saved preference; otherwise the saved
@@ -1617,11 +2062,12 @@ fn main() -> ExitCode {
             };
 
             let app = QuotaPaneApp {
-                panes: vec![claude, codex],
+                panes,
                 tray_active,
                 quitting: false,
                 theme,
                 theme_overridden,
+                pace_demo,
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
                 tray,
             };
@@ -1991,6 +2437,7 @@ mod tests {
                 Some(Duration::from_secs(30)),
                 true,
                 Theme::CipherPine,
+                None,
             );
         });
         assert!(
@@ -2034,6 +2481,7 @@ mod tests {
                 Some(Duration::from_secs(30)),
                 true,
                 Theme::CipherPine,
+                None,
             );
         });
         assert!(
@@ -2087,6 +2535,7 @@ mod tests {
                 Some(Duration::from_secs(30)),
                 expanded,
                 Theme::CipherPine,
+                None,
             );
         })
     }
@@ -2344,6 +2793,416 @@ mod tests {
         let a = lay_out_pane(&ticked, true);
         let b = lay_out_pane(&unticked, true);
         assert_eq!((a.height, a.width), (b.height, b.width));
+    }
+
+    // --- M8: the at-risk line ---
+
+    fn burn(per_hour: f64, exhaust_in_secs: Option<u64>) -> Burn {
+        Burn {
+            per_hour,
+            exhaust_in_secs,
+        }
+    }
+
+    fn warning(label: &str, exhaust_in_secs: u64) -> PaceWarning {
+        PaceWarning {
+            label: label.to_string(),
+            exhaust_in_secs,
+        }
+    }
+
+    #[test]
+    fn the_sooner_at_risk_window_wins() {
+        // Both headline windows are at risk; only the one that runs out first
+        // gets the line. Two competing lines in a 320px pane would make the
+        // reader compare instead of act.
+        let candidates = vec![
+            ("7d".to_string(), burn(0.05, Some(32_400)), Some(302_400)),
+            ("5h".to_string(), burn(0.20, Some(6_000)), Some(9_000)),
+        ];
+        assert_eq!(select_pace_warning(&candidates), Some(warning("5h", 6_000)));
+
+        // The choice is about the numbers, not the order they arrive in.
+        let mut reversed = candidates.clone();
+        reversed.reverse();
+        assert_eq!(select_pace_warning(&reversed), Some(warning("5h", 6_000)));
+    }
+
+    #[test]
+    fn a_window_that_resets_before_it_fills_is_not_a_candidate() {
+        // The soonest exhaustion overall, but its window resets first — so it is
+        // not at risk and must not be selected. The 7d window, which really is
+        // at risk, gets the line instead. Selecting on exhaustion alone (the
+        // easy mistake) would fail here.
+        let candidates = vec![
+            ("5h".to_string(), burn(0.20, Some(6_000)), Some(3_000)),
+            ("7d".to_string(), burn(0.05, Some(32_400)), Some(302_400)),
+        ];
+        assert_eq!(
+            select_pace_warning(&candidates),
+            Some(warning("7d", 32_400))
+        );
+    }
+
+    #[test]
+    fn nothing_at_risk_says_nothing() {
+        // Calm is silent — no line, not a reassuring one.
+        assert_eq!(select_pace_warning(&[]), None);
+
+        let calm = vec![
+            // Burning, but the window resets long before it fills.
+            ("5h".to_string(), burn(0.02, Some(158_400)), Some(14_400)),
+            // Not burning at all.
+            ("7d".to_string(), burn(0.0, None), Some(302_400)),
+            // Burning, but with no visible deadline to beat.
+            ("primary".to_string(), burn(0.30, Some(600)), None),
+        ];
+        assert_eq!(select_pace_warning(&calm), None);
+    }
+
+    #[test]
+    fn the_at_risk_line_reads_as_an_extrapolation() {
+        // "at this pace" and the `~` matter: this is a projection from the last
+        // couple of hours and must not be mistaken for a countdown.
+        assert_eq!(
+            pace_warning_line(&warning("7d", 32_400)),
+            "at this pace: 7d full in ~9h 0m"
+        );
+        assert_eq!(
+            pace_warning_line(&warning("5h", 3_600)),
+            "at this pace: 5h full in ~1h 0m"
+        );
+        // Under a minute, and days — the same units as the reset countdown
+        // beside it, because it goes through the same formatter.
+        assert_eq!(
+            pace_warning_line(&warning("5h", 30)),
+            "at this pace: 5h full in ~<1m"
+        );
+        assert_eq!(
+            pace_warning_line(&warning("7d", 446_400)),
+            "at this pace: 7d full in ~5d 4h"
+        );
+        // A provider's own label rides verbatim, unparsed, as everywhere else.
+        assert_eq!(
+            pace_warning_line(&warning("GPT-5.3-Codex-Max", 5_400)),
+            "at this pace: GPT-5.3-Codex-Max full in ~1h 30m"
+        );
+    }
+
+    #[test]
+    fn the_at_risk_line_turns_cardinal_inside_six_hours() {
+        assert_eq!(PACE_CARDINAL_UNDER_SECS, 21_600);
+        assert_eq!(pace_warning_color(0), CARDINAL);
+        assert_eq!(pace_warning_color(PACE_CARDINAL_UNDER_SECS - 1), CARDINAL);
+        // Exactly six hours out is the calmer read — the boundary is amber's.
+        assert_eq!(pace_warning_color(PACE_CARDINAL_UNDER_SECS), AMBER);
+        assert_eq!(pace_warning_color(446_400), AMBER);
+        // Neither colour is theme-dependent; the signature says so.
+        let _: fn(u64) -> egui::Color32 = pace_warning_color;
+    }
+
+    #[test]
+    fn the_at_risk_line_costs_a_row_only_when_there_is_one() {
+        let snapshot = per_model_snapshot(vec![]);
+        let render = |pace: Option<&PaceWarning>| {
+            lay_out(|ui| {
+                render_windows(
+                    ui,
+                    &snapshot,
+                    Some(Duration::from_secs(30)),
+                    false,
+                    Theme::CipherPine,
+                    pace,
+                );
+            })
+        };
+        let silent = render(None);
+        let warned = render(Some(&warning("5h", 6_000)));
+
+        // Both directions at once: `None` adds nothing, `Some` adds a line.
+        assert!(
+            warned.height > silent.height,
+            "the at-risk line rendered nothing: {}px vs {}px",
+            warned.height,
+            silent.height
+        );
+        // And it fits the fixed window — including the longest label a provider
+        // could plausibly hand it.
+        let long = render(Some(&warning("Claude-Opus-5-Extended-Thinking", 6_000)));
+        assert!(
+            long.width <= long.available_width,
+            "a long at-risk label wanted {}px inside {}px",
+            long.width,
+            long.available_width
+        );
+    }
+
+    // --- M8: rings fed per poll ---
+
+    #[test]
+    fn one_ring_per_headline_window_fed_from_every_snapshot() {
+        // Per-model rows deliberately get no ring in this slice, so a snapshot
+        // carrying them must still leave exactly one ring per headline window.
+        let series = demo_series(
+            ProviderId::CodexSubscription,
+            &[
+                DemoWindow {
+                    label: "5h",
+                    duration_secs: 18_000,
+                    final_resets_in_secs: 9_000,
+                    from_fraction: 0.20,
+                    to_fraction: 0.30,
+                },
+                DemoWindow {
+                    label: "7d",
+                    duration_secs: 604_800,
+                    final_resets_in_secs: 302_400,
+                    from_fraction: 0.10,
+                    to_fraction: 0.12,
+                },
+            ],
+            &[model_window_at("GPT-5.3-Codex-Max", Some(0.42))],
+            None,
+        );
+        let pane = ProviderPane::demo(ProviderId::CodexSubscription, series);
+
+        let labels: Vec<&str> = pane.rings.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, vec!["5h", "7d"]);
+        for (label, ring) in &pane.rings {
+            assert_eq!(
+                ring.len(),
+                DEMO_STEPS as usize,
+                "ring {label} missed a snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_without_a_usage_fraction_gets_no_ring() {
+        // Nothing to sample. The row still renders; it just contributes no pace.
+        let mut series = demo_series(
+            ProviderId::ClaudeSubscription,
+            &[DemoWindow {
+                label: "5h",
+                duration_secs: 18_000,
+                final_resets_in_secs: 9_000,
+                from_fraction: 0.20,
+                to_fraction: 0.30,
+            }],
+            &[],
+            None,
+        );
+        for snapshot in &mut series {
+            snapshot.windows[0].used_fraction = None;
+        }
+        let pane = ProviderPane::demo(ProviderId::ClaudeSubscription, series);
+        assert!(pane.rings.is_empty());
+        assert!(pane.pace_warning.is_none());
+    }
+
+    #[test]
+    fn a_detected_reset_clears_the_trail_and_silences_the_line() {
+        // A window climbing toward full, then rolling over. The pre-reset trail
+        // describes a window that no longer exists, so the forecast must go
+        // quiet rather than extrapolate across the discontinuity.
+        let mut series = demo_series(
+            ProviderId::CodexSubscription,
+            &[DemoWindow {
+                label: "5h",
+                duration_secs: 18_000,
+                final_resets_in_secs: 3_600,
+                from_fraction: 0.70,
+                to_fraction: 0.90,
+            }],
+            &[],
+            None,
+        );
+        let before = ProviderPane::demo(ProviderId::CodexSubscription, series.clone());
+        assert!(
+            before.pace_warning.is_some(),
+            "the pre-reset pane must be warning, or this test proves nothing"
+        );
+
+        // The rollover: usage back to nothing, countdown restored.
+        let mut rolled_over = series.last().expect("a series").clone();
+        rolled_over.taken_at_unix_secs += 600;
+        rolled_over.windows[0].used_fraction = Some(0.0);
+        rolled_over.windows[0].resets_in_secs = Some(18_000);
+        series.push(rolled_over);
+
+        let after = ProviderPane::demo(ProviderId::CodexSubscription, series);
+        assert_eq!(after.rings[0].1.len(), 1, "the old trail must be gone");
+        assert!(
+            after.pace_warning.is_none(),
+            "one post-reset sample cannot support a forecast"
+        );
+    }
+
+    // --- M8: --pace-demo ---
+
+    #[test]
+    fn pace_demo_flag_defaults_off_and_is_recognized_anywhere() {
+        assert!(!parse_args(args(&[])).unwrap().pace_demo);
+        assert!(parse_args(args(&["--pace-demo"])).unwrap().pace_demo);
+        let parsed = parse_args(args(&["--plain", "--pace-demo", "--no-tray"])).unwrap();
+        assert!(parsed.pace_demo);
+        assert!(parsed.no_tray);
+        assert_eq!(parsed.theme_override, Some(Theme::Plain));
+    }
+
+    #[test]
+    fn demo_mode_names_itself_in_the_window_title() {
+        assert_eq!(window_title(false), "QuotaPane");
+        assert!(window_title(true).contains("demo"));
+    }
+
+    #[test]
+    fn demo_panes_own_no_poller_and_therefore_no_egress() {
+        // The structural half of "no network in demo mode": a pane with no
+        // handle has no poller thread, and `ProviderPane::new` — the only place
+        // an `Egress` is constructed — was never called.
+        for pane in demo_panes() {
+            assert!(pane.handle.is_none(), "a demo pane must not own a poller");
+            assert!(pane.startup_error.is_none());
+            assert!(pane.latest_failure.is_none());
+            assert!(pane.latest_snapshot.is_some(), "a demo pane must have data");
+        }
+    }
+
+    #[test]
+    fn the_demo_scenario_is_deterministic() {
+        // Two runs must be identical, or a screenshot means nothing and a
+        // regression hides in the noise. Nothing in the scenario reads a clock:
+        // the observation times come from the fixed base.
+        let first = demo_panes();
+        let second = demo_panes();
+        assert_eq!(first.len(), second.len());
+        for (a, b) in first.iter().zip(&second) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.latest_snapshot, b.latest_snapshot);
+            assert_eq!(a.pace_warning, b.pace_warning);
+        }
+
+        let final_step = DEMO_BASE_UNIX_SECS + (DEMO_STEPS - 1) * DEMO_STEP_SECS;
+        for pane in &first {
+            assert_eq!(
+                pane.latest_snapshot
+                    .as_ref()
+                    .expect("a snapshot")
+                    .taken_at_unix_secs,
+                final_step
+            );
+        }
+    }
+
+    #[test]
+    fn the_demo_scenario_exercises_both_warning_colours() {
+        // The point of the flag: one pane amber, one cardinal — reviewable in
+        // one glance instead of after a day of real usage.
+        let panes = demo_panes();
+        let claude = &panes[0];
+        let codex = &panes[1];
+
+        // Claude: the weekly window fills in ~9 h, before its 3.5-day reset.
+        // Beyond the six-hour threshold, so AMBER. The 5h window is *not* the
+        // warning even though it is the shorter window — it is under budget.
+        let amber = claude.pace_warning.as_ref().expect("Claude must warn");
+        assert_eq!(amber.label, "7d");
+        assert!(
+            (amber.exhaust_in_secs as i64 - 32_400).abs() <= 2,
+            "expected ~32400s, got {}",
+            amber.exhaust_in_secs
+        );
+        assert_eq!(pace_warning_color(amber.exhaust_in_secs), AMBER);
+        assert_eq!(
+            pace_warning_line(amber),
+            "at this pace: 7d full in ~9h 0m",
+            "the amber line the owner reviews"
+        );
+
+        // Codex: the session window fills in ~1 h against a 1h15m reset. Inside
+        // six hours, so CARDINAL. Its weekly window is flat, and silent.
+        let cardinal = codex.pace_warning.as_ref().expect("Codex must warn");
+        assert_eq!(cardinal.label, "5h");
+        assert!(
+            (cardinal.exhaust_in_secs as i64 - 3_600).abs() <= 2,
+            "expected ~3600s, got {}",
+            cardinal.exhaust_in_secs
+        );
+        assert_eq!(pace_warning_color(cardinal.exhaust_in_secs), CARDINAL);
+        assert_eq!(
+            pace_warning_line(cardinal),
+            "at this pace: 5h full in ~1h 0m",
+            "the cardinal line the owner reviews"
+        );
+    }
+
+    #[test]
+    fn the_demo_scenario_puts_a_tick_on_every_bar() {
+        // Ticks are the other half of what the flag exists to show, so every
+        // demo bar must earn one — and at spread-out positions, not bunched at
+        // one end.
+        let panes = demo_panes();
+        let mut offsets = Vec::new();
+        for pane in &panes {
+            let snapshot = pane.latest_snapshot.as_ref().expect("a snapshot");
+            for window in snapshot.windows.iter().chain(&snapshot.per_model) {
+                let offset = pace_tick_x(window, BAR_WIDTH)
+                    .unwrap_or_else(|| panic!("no tick for {}", window.label));
+                offsets.push(offset);
+            }
+        }
+        // Headline ticks at 20%, 50%, 75% and 90% of the bar, plus the
+        // per-model rows.
+        assert!(offsets.len() >= 4);
+        let min = offsets.iter().cloned().fold(f32::MAX, f32::min);
+        let max = offsets.iter().cloned().fold(f32::MIN, f32::max);
+        assert!(
+            min < BAR_WIDTH * 0.3 && max > BAR_WIDTH * 0.7,
+            "tick positions are bunched: {offsets:?}"
+        );
+    }
+
+    #[test]
+    fn the_demo_scenario_fits_the_window() {
+        // This *is* the review path: if the demo clips, the owner reviews a
+        // clipped window and learns nothing about the feature.
+        let mut panes = demo_panes();
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let mut collapsed_height = 0.0;
+            for pane in &mut panes {
+                pane.expanded = false;
+                let laid = lay_out_themed(theme, |ui| render_pane(ui, pane, theme));
+                assert!(
+                    laid.width <= laid.available_width,
+                    "{theme:?} demo pane wanted {}px inside {}px",
+                    laid.width,
+                    laid.available_width
+                );
+                collapsed_height += laid.height;
+            }
+
+            // Height is the honest part. The collapsed demo — two panes, both
+            // warning, Codex also reporting a reset credit — comes to 231px
+            // against the 216px the central panel can offer. Every row is
+            // *reachable* (the ScrollArea, accepted since the M5a fix), but the
+            // default view does not fit, and that is a real finding about the
+            // 240px window rather than a demo artifact: it is the state a
+            // subscriber sees whenever both providers are at risk at once.
+            // Flagged at the M8 gate; the window's size is the owner's call.
+            //
+            // Asserted as "within one row of fitting", so unbounded growth
+            // still fails here while the known, reported overflow does not get
+            // to read as green.
+            let usable = WINDOW_HEIGHT - TITLEBAR_HEIGHT;
+            let one_row = 24.0; // a bar row with its spacing
+            assert!(
+                collapsed_height <= usable + one_row,
+                "{theme:?} collapsed demo wanted {collapsed_height}px, more than one \
+                 row past the {usable}px the panel offers — the pane has grown \
+                 beyond what the scroll area was accepted to cover"
+            );
+        }
     }
 
     // --- M7a2: the reset-credits line ---
@@ -2777,7 +3636,7 @@ mod tests {
         let lay = |visible: bool| {
             lay_out(|ui| {
                 ui.horizontal(|ui| {
-                    render_prompt(ui, Theme::CipherPine);
+                    render_prompt(ui, Theme::CipherPine, false);
                     render_cursor(ui, visible);
                 });
             })

@@ -37,6 +37,10 @@ Linux). No tray on your platform? Launch with `--plain` or
 `--themed` to pick per run. The file stores nothing but that word;
 deleting it restores the default.
 
+`--pace-demo` renders a fixed made-up scenario so the pace markers can
+be seen without waiting hours for real usage to produce one: it shows
+fake data, polls nothing, reads no credentials, and talks to no host.
+
 <p align="center">
   <img src="assets/quotapane-window-plain.png" width="313" alt="The plain theme">
   <img src="assets/quotapane-window-plain-expanded.png" width="311" alt="The plain theme with per-model rows expanded">
