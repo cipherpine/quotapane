@@ -18,8 +18,19 @@
 //!   [`Cadence`] hint (fast ≈5 min, normal ≈7 min, slow ≈20 min).
 //! - **Backoff:** failures back off exponentially from the cadence interval,
 //!   capped at [`MAX_BACKOFF`]. A 429's `retry-after` is honored when it is
-//!   longer than the computed backoff. Impact of failure is stale display,
-//!   never a crash.
+//!   longer than the computed backoff, **but never beyond [`MAX_BACKOFF`]**:
+//!   a read-only usage poll never owes a provider more than 30 minutes of
+//!   silence, so a hostile or malformed hint (`retry-after: 99999999`) buys a
+//!   half hour, not an unbounded stall of the pane. Impact of failure is stale
+//!   display, never a crash.
+//! - **Auth errors do not escalate:** [`ProviderError::TokenExpired`] — and
+//!   only that variant — retries at [`MIN_INTERVAL`] no matter how many times
+//!   it has repeated. An expired token clears when the user refreshes it via
+//!   the official `claude`/`codex` CLI (invariant 6), never by our waiting
+//!   longer; escalating would postpone *noticing* that refresh by up to 30
+//!   minutes while the pane's own error text says "then retry". A provider's
+//!   `retry-after` hint still outranks this floor (politeness wins), capped as
+//!   above.
 //! - Tokens are **not** held between cycles: the provider loads the
 //!   credential lazily inside `poll` and drops (zeroizes) it before the
 //!   thread sleeps.
@@ -64,18 +75,36 @@ fn cadence_interval(cadence: Cadence) -> Duration {
     }
 }
 
+/// Is this failure one that only the *user* can clear?
+///
+/// True for [`ProviderError::TokenExpired`] and nothing else: that is the one
+/// failure whose remedy is a human running `claude` / `codex login`, so backing
+/// off merely delays noticing the fix. Every other variant (transport blips,
+/// rate limits, schema drift, credential-file problems) may resolve on its own
+/// and keeps the normal exponential backoff.
+fn is_auth_error(err: &ProviderError) -> bool {
+    matches!(err, ProviderError::TokenExpired)
+}
+
 /// Compute the delay before the next poll. Pure — the scheduling policy in
 /// one auditable place.
 ///
 /// `consecutive_failures` counts failures since the last success (0 after a
-/// success). `retry_after` is the provider's 429 hint, if any.
+/// success). `retry_after` is the provider's 429 hint, if any. `auth_error` is
+/// [`is_auth_error`] applied to the failure that produced this call.
 fn next_delay(
     cadence: Cadence,
     consecutive_failures: u32,
     retry_after: Option<Duration>,
+    auth_error: bool,
 ) -> Duration {
     let base = cadence_interval(cadence);
-    let mut delay = if consecutive_failures == 0 {
+    let mut delay = if auth_error {
+        // Carve-out: an expired token clears only when the user refreshes via
+        // the official CLI. Escalating would just delay noticing that, so this
+        // sits at the floor regardless of how many attempts have failed.
+        MIN_INTERVAL
+    } else if consecutive_failures == 0 {
         base
     } else {
         // Exponential backoff: base * 2^failures, capped. The shift is
@@ -84,8 +113,10 @@ fn next_delay(
         base.saturating_mul(1u32 << shift).min(MAX_BACKOFF)
     };
     if let Some(ra) = retry_after {
-        // Honor the provider's explicit hint when it is more conservative.
-        delay = delay.max(ra);
+        // Honor the provider's explicit hint when it is more conservative —
+        // but cap it at MAX_BACKOFF first. An uncapped hint is an unbounded
+        // stall handed to us by whoever controls the response headers.
+        delay = delay.max(ra.min(MAX_BACKOFF));
     }
     // The floor is applied last: nothing above can undercut it.
     delay.max(MIN_INTERVAL)
@@ -157,10 +188,10 @@ fn run_loop<P: UsageProvider>(
 
         // Poll. The provider loads and drops (zeroizes) its credential
         // entirely within this call; no secret survives into the sleep.
-        let (update, retry_after) = match provider.poll(&egress) {
+        let (update, retry_after, auth_error) = match provider.poll(&egress) {
             Ok(snapshot) => {
                 consecutive_failures = 0;
-                (Update::Snapshot(snapshot), None)
+                (Update::Snapshot(snapshot), None, false)
             }
             Err(err) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
@@ -170,12 +201,14 @@ fn run_loop<P: UsageProvider>(
                     } => Some(Duration::from_secs(*s)),
                     _ => None,
                 };
+                let auth_error = is_auth_error(&err);
                 (
                     Update::Failure {
                         provider: provider.id(),
                         message: err.to_string(),
                     },
                     retry_after,
+                    auth_error,
                 )
             }
         };
@@ -186,7 +219,12 @@ fn run_loop<P: UsageProvider>(
         }
 
         // Sleep in short slices so stop() is honored promptly.
-        let delay = next_delay(provider.cadence(), consecutive_failures, retry_after);
+        let delay = next_delay(
+            provider.cadence(),
+            consecutive_failures,
+            retry_after,
+            auth_error,
+        );
         let mut slept = Duration::ZERO;
         while slept < delay {
             if stop.load(Ordering::Relaxed) {
@@ -208,17 +246,17 @@ mod tests {
 
     // --- next_delay: the scheduling policy, exhaustively ---
 
+    /// The ordinary (non-auth-error) call, so the scheduling assertions below
+    /// stay readable now that `next_delay` also takes the auth-error carve-out.
+    fn delay(cadence: Cadence, failures: u32, retry_after: Option<Duration>) -> Duration {
+        next_delay(cadence, failures, retry_after, false)
+    }
+
     #[test]
     fn success_uses_cadence_interval() {
-        assert_eq!(next_delay(Cadence::Fast, 0, None), Duration::from_secs(300));
-        assert_eq!(
-            next_delay(Cadence::Normal, 0, None),
-            Duration::from_secs(420)
-        );
-        assert_eq!(
-            next_delay(Cadence::Slow, 0, None),
-            Duration::from_secs(1200)
-        );
+        assert_eq!(delay(Cadence::Fast, 0, None), Duration::from_secs(300));
+        assert_eq!(delay(Cadence::Normal, 0, None), Duration::from_secs(420));
+        assert_eq!(delay(Cadence::Slow, 0, None), Duration::from_secs(1200));
     }
 
     #[test]
@@ -228,10 +266,12 @@ mod tests {
         for cadence in [Cadence::Fast, Cadence::Normal, Cadence::Slow] {
             for failures in 0..10 {
                 for ra in [None, Some(Duration::from_secs(1))] {
-                    assert!(
-                        next_delay(cadence, failures, ra) >= MIN_INTERVAL,
-                        "floor violated: {cadence:?} failures={failures} ra={ra:?}"
-                    );
+                    for auth in [false, true] {
+                        assert!(
+                            next_delay(cadence, failures, ra, auth) >= MIN_INTERVAL,
+                            "floor violated: {cadence:?} failures={failures} ra={ra:?} auth={auth}"
+                        );
+                    }
                 }
             }
         }
@@ -240,26 +280,161 @@ mod tests {
     #[test]
     fn failures_back_off_exponentially_and_cap() {
         let base = Duration::from_secs(300);
-        assert_eq!(next_delay(Cadence::Fast, 1, None), base * 2);
-        assert_eq!(next_delay(Cadence::Fast, 2, None), base * 4);
+        assert_eq!(delay(Cadence::Fast, 1, None), base * 2);
+        assert_eq!(delay(Cadence::Fast, 2, None), base * 4);
         // Caps at MAX_BACKOFF regardless of failure count (incl. huge counts).
-        assert_eq!(next_delay(Cadence::Fast, 3, None), MAX_BACKOFF);
-        assert_eq!(next_delay(Cadence::Fast, 30, None), MAX_BACKOFF);
-        assert_eq!(next_delay(Cadence::Fast, u32::MAX, None), MAX_BACKOFF);
+        assert_eq!(delay(Cadence::Fast, 3, None), MAX_BACKOFF);
+        assert_eq!(delay(Cadence::Fast, 30, None), MAX_BACKOFF);
+        assert_eq!(delay(Cadence::Fast, u32::MAX, None), MAX_BACKOFF);
     }
 
     #[test]
     fn retry_after_is_honored_when_longer() {
         // Longer than backoff → wins.
         assert_eq!(
-            next_delay(Cadence::Fast, 1, Some(Duration::from_secs(900))),
+            delay(Cadence::Fast, 1, Some(Duration::from_secs(900))),
             Duration::from_secs(900)
         );
         // Shorter than backoff → backoff wins (we stay conservative).
         assert_eq!(
-            next_delay(Cadence::Fast, 2, Some(Duration::from_secs(60))),
+            delay(Cadence::Fast, 2, Some(Duration::from_secs(60))),
             Duration::from_secs(1200)
         );
+    }
+
+    // --- M9b: the Retry-After hint is capped ---
+
+    #[test]
+    fn hostile_retry_after_cannot_stall_beyond_the_cap() {
+        // The hint comes from response headers — i.e. from whoever answers the
+        // request. Before M9b it was applied AFTER the cap, so `retry-after:
+        // 18446744073709551615` silenced the pane effectively forever. Now the
+        // hint buys at most MAX_BACKOFF.
+        let hostile = Duration::from_secs(u64::MAX);
+        assert_eq!(delay(Cadence::Fast, 1, Some(hostile)), MAX_BACKOFF);
+        // ...from any starting point: fresh failure, deep backoff, any cadence.
+        for cadence in [Cadence::Fast, Cadence::Normal, Cadence::Slow] {
+            for failures in [0, 1, 6, 30, u32::MAX] {
+                assert_eq!(
+                    next_delay(cadence, failures, Some(hostile), false),
+                    MAX_BACKOFF,
+                    "uncapped hint leaked through: {cadence:?} failures={failures}"
+                );
+            }
+        }
+        // A hint one second over the cap is still exactly the cap.
+        assert_eq!(
+            delay(Cadence::Fast, 1, Some(MAX_BACKOFF + Duration::from_secs(1))),
+            MAX_BACKOFF
+        );
+    }
+
+    #[test]
+    fn retry_after_below_the_cap_is_honored_exactly() {
+        // Capping must not round or clamp hints that are already reasonable —
+        // the provider's number is used verbatim.
+        for secs in [200, 600, 900, 1799] {
+            let hint = Duration::from_secs(secs);
+            assert_eq!(
+                delay(Cadence::Fast, 1, Some(hint)),
+                hint.max(Duration::from_secs(600)),
+                "hint of {secs}s was not honored as-is"
+            );
+        }
+        // Exactly at the cap: honored, unchanged.
+        assert_eq!(delay(Cadence::Fast, 1, Some(MAX_BACKOFF)), MAX_BACKOFF);
+    }
+
+    // --- M9b: auth errors retry at the floor, without escalation ---
+
+    #[test]
+    fn auth_error_retries_at_the_floor_across_every_cadence_and_count() {
+        // An expired token clears only when the user runs `claude`/`codex
+        // login` (invariant 6). Backing off would postpone noticing that
+        // refresh by up to 30 minutes while the error text says "then retry".
+        for cadence in [Cadence::Fast, Cadence::Normal, Cadence::Slow] {
+            for failures in [0, 1, 2, 3, 6, 7, 30, 1000, u32::MAX] {
+                assert_eq!(
+                    next_delay(cadence, failures, None, true),
+                    MIN_INTERVAL,
+                    "auth error escalated: {cadence:?} failures={failures}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auth_error_still_yields_to_a_retry_after_hint_capped() {
+        // Politeness outranks the carve-out: if the provider asked us to wait,
+        // we wait — but no longer than the cap.
+        assert_eq!(
+            next_delay(Cadence::Fast, 3, Some(Duration::from_secs(900)), true),
+            Duration::from_secs(900)
+        );
+        assert_eq!(
+            next_delay(Cadence::Fast, 3, Some(Duration::from_secs(u64::MAX)), true),
+            MAX_BACKOFF
+        );
+        // A hint below the floor cannot undercut it.
+        assert_eq!(
+            next_delay(Cadence::Fast, 3, Some(Duration::from_secs(1)), true),
+            MIN_INTERVAL
+        );
+    }
+
+    #[test]
+    fn only_token_expired_counts_as_an_auth_error() {
+        // Enumerated deliberately rather than tested by negation: adding a
+        // variant to `ProviderError` should force a decision here, and the
+        // exhaustive `match` below is what makes the compiler ask.
+        assert!(is_auth_error(&ProviderError::TokenExpired));
+
+        let every_variant = [
+            ProviderError::TokenExpired,
+            ProviderError::Egress(crate::egress::EgressError::HostNotAllowlisted(
+                "evil.example".to_string(),
+            )),
+            ProviderError::Egress(crate::egress::EgressError::InvalidPath("nope".to_string())),
+            ProviderError::Egress(crate::egress::EgressError::ProxyNotOptedIn {
+                variable: "HTTPS_PROXY".to_string(),
+            }),
+            ProviderError::Egress(crate::egress::EgressError::Transport("timeout".to_string())),
+            ProviderError::Credential("malformed auth.json".to_string()),
+            ProviderError::RateLimited {
+                retry_after_secs: None,
+            },
+            ProviderError::RateLimited {
+                retry_after_secs: Some(60),
+            },
+            ProviderError::UnexpectedPayload,
+        ];
+        // Completeness guard: this `match` is exhaustive by hand, so adding a
+        // variant to `ProviderError` breaks compilation here and forces an
+        // explicit decision rather than silently defaulting to "not auth".
+        fn expected(e: &ProviderError) -> bool {
+            match e {
+                ProviderError::TokenExpired => true,
+                ProviderError::Egress(_)
+                | ProviderError::Credential(_)
+                | ProviderError::RateLimited { .. }
+                | ProviderError::UnexpectedPayload => false,
+            }
+        }
+
+        for err in &every_variant {
+            assert_eq!(
+                is_auth_error(err),
+                expected(err),
+                "auth-error classification disagrees for {err:?}"
+            );
+            // ...and the classification is what actually drives scheduling.
+            let scheduled = next_delay(Cadence::Slow, 5, None, is_auth_error(err));
+            if expected(err) {
+                assert_eq!(scheduled, MIN_INTERVAL, "{err:?} should hold at the floor");
+            } else {
+                assert_eq!(scheduled, MAX_BACKOFF, "{err:?} should back off normally");
+            }
+        }
     }
 
     // --- thread mechanics with a fake provider (no network, no real waits) ---
