@@ -75,6 +75,7 @@ Each invariant below is enforced in code. Where an invariant asserts a behavior,
 
 - Sources are read-only: `~/.claude/.credentials.json`, and `$CODEX_HOME/auth.json` (or `~/.codex/auth.json`). Nothing else is read — WSL credential sources are **not** implemented (a possible post-1.0 addition, which would be called out here).
 - Tokens live only in memory, wrapped in `Secret<T>`, zeroized after use (best-effort — invariant 2 states the exact scope).
+- Diagnostic output is redacted by default: `quotapane-cli --debug-raw` replaces identifier fields (`email`, `user_id`, `account_id`, `id`) with `«redacted»` at any depth before printing, and withholds bodies that are not valid JSON. The byte-exact escape hatch (`--debug-raw-unsafe`) prints one warning first.
 - QuotaPane **never** ingests an organization Admin/org API key. An official-billing mode was evaluated and **rejected** (see `ARCHITECTURE.md`, ADR-002): holding that higher-privilege key would enlarge this trust boundary — the opposite of the project's purpose. The only credentials read are your own local subscription tokens, above.
 - The app treats these tokens as bearer credentials that can act as you against the provider. Anything reading them is inside your trust boundary; the project's job is to keep that boundary small and honest.
 

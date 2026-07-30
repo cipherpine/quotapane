@@ -1,5 +1,14 @@
 # Goal prompt spec: M9b — hardening (v1.4.0 scope)
 
+> **CORRECTION (top tier, 2026-07-30):** Phase 4 as written below was
+> amended before execution — its §4a invariant-7 replacement wrongly
+> described the no-flag path as "ignored" when the shipped egress gate
+> fails closed (the floor caught this as a §4.7 stop; the spec author's
+> error). The corrected patch — fail-closed, either casing,
+> `--allow-proxy` as the CLI-only opt-in with a hint line on the error
+> path — is what landed in 2e5586c. The original text is preserved
+> below for the record.
+
 Authored at the standing top tier 2026-07-30, reconciling the
 owner-commissioned adversarial review (all findings independently
 re-verified; see DECISIONS.md M9 entry). M9a (2672ace) landed the

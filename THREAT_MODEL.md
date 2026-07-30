@@ -137,7 +137,7 @@ grep, re-checked at every review touching the trust boundary (§11).
 | 4. No first-party telemetry | (absence) | CI `no-telemetry` job: greps deps and sources for analytics |
 | 5. No self-update | absence of any updater code path | enforced by absence; the two-host allowlist test above doubles as the check that a covert updater has nowhere to call |
 | 6. Read-only credentials | `credentials` | `loads_credential_readonly_and_redacted`: file bytes identical after load; no write handle exists |
-| 7. Proxy opt-in | `egress` | `proxy_env_without_opt_in_fails_closed` + opt-in and empty-var tests |
+| 7. Proxy opt-in (CLI-only, fail-closed) | `egress` proxy gate; `quotapane-cli --allow-proxy` is the only opt-in surface — the window has none | `proxy_env_without_opt_in_fails_closed` (either casing) + opt-in and empty-var tests; CLI tests pin the hint line, the per-run warning, and the absence of a window opt-in |
 
 ---
 

@@ -104,9 +104,13 @@ impl ClaudeSubscription {
     /// response as `"status: <code>\n<body>"`. Used by `quotapane-cli --debug-raw`
     /// to pin the endpoint's exact JSON shape without an ad-hoc token request
     /// outside the trust boundary — the same "verify, don't invent" tool that
-    /// pinned the Codex schema. The body is provider usage data (utilization
-    /// percentages, reset timestamps) — non-secret; the bearer token rides in
-    /// a request header and never appears in the body.
+    /// pinned the Codex schema. The body carries no credential — the bearer
+    /// token rides in a request header and never appears in it — but "carries
+    /// no credential" is not "safe to paste anywhere": treat raw dumps with
+    /// care. The CLI redacts identifier fields by default and offers
+    /// `--debug-raw-unsafe` for byte-exact output; Anthropic's response
+    /// documents no account PII today, and the redaction applies to both
+    /// providers' dumps anyway, by design.
     pub fn debug_raw_body(&self, http: &Egress) -> Result<String, ProviderError> {
         let resp = self.fetch(http)?;
         Ok(format!(
