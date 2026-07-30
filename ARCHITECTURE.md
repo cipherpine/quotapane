@@ -92,7 +92,7 @@ quotapane/
 - `api.anthropic.com` — the Claude subscription usage endpoint (`GET /api/oauth/usage`). This is the only call made on this host; the Messages-API rate-limit-header fallback below is deferred, not shipped.
 - `chatgpt.com` — Codex (ChatGPT-plan) subscription usage (`/backend-api/wham/usage`; verified in M3 against the open-source Codex CLI — the subscription endpoint is **not** on `api.openai.com`)
 
-That is the whole list — exactly two hosts. Any attempt to dial a host not on it is a hard error. Proxy support is **off by default**; if `HTTPS_PROXY`/`ALL_PROXY` is set, the app surfaces a visible warning that a TLS-inspecting proxy (e.g. a corporate Zscaler-style gateway) can observe the bearer token at its decryption point, and requires explicit opt-in to proceed. TLS validation uses the platform root store via `rustls`; **certificate pinning is not implemented** (considered, not built — see `THREAT_MODEL.md` R1).
+That is the whole list — exactly two hosts. Any attempt to dial a host not on it is a hard error. Proxy support is **off by default**; if `HTTPS_PROXY`/`ALL_PROXY` is set, the app surfaces a visible warning that a TLS-inspecting proxy (e.g. a corporate Zscaler-style gateway) can observe the bearer token at its decryption point, and requires explicit opt-in to proceed. TLS validation uses the WebPKI root set bundled into the binary (`webpki-roots`) — the OS trust store is not consulted; **certificate pinning is not implemented** (considered, not built — see `THREAT_MODEL.md` R1).
 
 **`providers`** — A single trait, one implementation per source:
 
@@ -147,7 +147,7 @@ A reviewer validates the security posture by reading essentially two files. Ever
 
 `SECURITY.md` carries the authoritative wording. Invariants that assert a **behavior** are backed by named tests; the two that assert an **absence** are enforced by there being no code path at all — `THREAT_MODEL.md` §9 records which is which, row by row.
 
-- Tokens are **never persisted**. The app writes **no files at all**: there is no config layer (see §6), so the only settings are CLI flags held in memory.
+- Tokens are **never persisted** — no code path serializes one. The only file the app writes is `theme.cfg` (one word: the theme preference, see §6); every other setting is a CLI flag held in memory.
 - Tokens **never** appear in logs, telemetry, crash reports, or `Debug` output (redaction + `zeroize`).
 - Egress is **deny-by-default**; a unit test asserts that no host outside the two-host allowlist is reachable.
 - **No first-party telemetry/analytics.** The app phones home to nobody.
@@ -174,11 +174,11 @@ Independent, community project; **not affiliated with, endorsed, or supported by
 
 ## 6. Configuration & storage
 
-**As shipped: there is none.** QuotaPane writes **no files at all** — no config file, no state file, no cache. The only settings are command-line flags (documented in `README.md`), held in memory for the life of the process. Nothing persists across runs, including window position. This is why invariant 1 is stronger than "no secrets on disk": there is no write path of any kind.
+**As shipped: one file, one word.** Since v1.2.0 QuotaPane writes exactly one file: `theme.cfg` — a single word (`plain` or `cipherpine`) recording the theme choice, in the platform config dir (`%APPDATA%\quotapane\` on Windows, `$XDG_CONFIG_HOME`/`~/.config/quotapane/` on Linux, `~/Library/Application Support/quotapane/` on macOS). Absent, unreadable, or garbage content falls back to the default theme; write failures are silently ignored. No secrets, no state, no cache — every other setting is a command-line flag held in memory, and nothing else persists across runs (including window position). Invariant 1's core is unchanged: there is no credential write path of any kind.
 
 ### Future (not implemented)
 
-If a preferences layer is ever added it would be preferences only — **no secrets** — as JSON in the platform config dir (`%APPDATA%\QuotaPane\` / `~/.config/quotapane/` / `~/Library/Application Support/QuotaPane/`), plausibly covering:
+If the preferences layer ever grows beyond that single word it stays preferences-only — **no secrets** — as JSON in the platform config dir (`%APPDATA%\QuotaPane\` / `~/.config/quotapane/` / `~/Library/Application Support/QuotaPane/`), plausibly covering:
 
 - Window: position, size/zoom, always-on-top, monitor.
 - Providers: which are enabled; per-provider poll cadence overrides.
@@ -210,7 +210,7 @@ Always-on-top, frameless, draggable floating window.
 - **Per-provider row:** provider name/icon, one or more quota bars (e.g. Claude 5h + weekly; Codex session + weekly), each color-coded by threshold, with a reset countdown. (An optional cost readout is possible only via a future token-free `OtelSource` (M5); the official Admin/billing APIs are out of scope — ADR-002.)
 - **Interactions (as shipped):** a slim custom titlebar carries the app name plus minimize and close buttons, and the strip itself is the window-drag handle. Scrolling **scrolls** the content (a `ScrollArea`); it does not resize or zoom. Each provider pane has an inline disclosure toggle that expands its per-model rows in place — not a popover. On Windows and macOS the tray icon's menu offers Show/Hide and Quit.
   *Future (not implemented):* a right-click settings menu, theme switching, sparkline history, forecast-to-limit, and per-project breakdown.
-- **Modes:** one fixed, non-resizable size (`WINDOW_WIDTH` × `WINDOW_HEIGHT`, `.with_resizable(false)`), always-on-top. *Future (not implemented):* a compact thin-strip mode, multi-monitor awareness, and position persistence — position cannot persist while there is no config layer (§6).
+- **Modes:** one fixed, non-resizable size (`WINDOW_WIDTH` × `WINDOW_HEIGHT`, `.with_resizable(false)`), always-on-top. *Future (not implemented):* a compact thin-strip mode, multi-monitor awareness, and position persistence — position persistence would ride the same minimal config mechanism as the theme choice (§6) — not yet implemented.
 - **Liveness:** a staleness indicator when data is older than expected; polling never blocks input. *Future (not implemented):* a refresh pulse animation.
 - **Headless parity:** `quotapane-cli --once --json` emits the same normalized snapshot for scripting and for verifying behavior without the GUI.
 

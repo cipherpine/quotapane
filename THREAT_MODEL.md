@@ -115,7 +115,7 @@ Stating these plainly is part of being trustworthy:
 
 | # | Risk | Why it remains | User mitigation |
 |---|---|---|---|
-| **R1** | On-path attacker holding a certificate your OS trusts could MITM the provider connection | **Certificate pinning is not implemented**; TLS trusts the platform root store | Keep your OS trust store clean; avoid untrusted networks; for maximum assurance build from source and verify egress with a packet capture (`SECURITY.md`, hardening §3). |
+| **R1** | On-path attacker who can mint a certificate chaining to a WebPKI (Mozilla) root could MITM the provider connection | **Certificate pinning is not implemented**; TLS trusts the WebPKI root set bundled into the binary (`webpki-roots`) — the OS trust store is **not** consulted, so an OS-installed interception CA is rejected rather than trusted | Note this is stricter than OS-store validation: enterprise TLS gateways and captive portals hard-fail by design, and cleaning your OS trust store changes nothing here. For maximum assurance build from source and verify egress with a packet capture (`SECURITY.md`, hardening §3). |
 | **R2** | A compromised maintainer account could publish a malicious release — signed, because the signing identity is the CI workflow itself | Keyless signing + provenance prove an artifact came from this repo's CI at a given commit; they cannot prove the commit was benign | Build from source; pin to a reviewed commit; diff releases; check the provenance's commit SHA against the audited source. |
 | **R3** | TLS-inspecting corporate proxy can see the bearer token | Inherent to TLS interception; can't be prevented once opted in | Keep proxy off; understand your managed-device posture. |
 | **R4** | Undocumented endpoint change could alter behavior unexpectedly | We don't control the provider | Graceful degradation; the app fails closed (shows stale/error, never leaks). |
@@ -131,7 +131,7 @@ grep, re-checked at every review touching the trust boundary (§11).
 
 | Invariant (`SECURITY.md`) | Enforcing control | Test / check |
 |---|---|---|
-| 1. No credential persistence | absence of any credential write path in the workspace | enforced by absence; the read path's invariant-6 test (`loads_credential_readonly_and_redacted`) pins the only file access as read-only |
+| 1. No credential persistence | absence of any credential write path in the workspace | enforced by absence; the read path's invariant-6 test (`loads_credential_readonly_and_redacted`) pins credential file access as read-only |
 | 2. No credential leakage | `credentials::Secret<T>` | redaction + zeroize tests (`secret.rs`); `Debug` scrub test (`credentials/mod.rs`); end-to-end failure-path redaction test (`poller::tests::failures_are_forwarded_as_non_secret_messages` — a provider that formats its `Secret` into an error provably cannot leak it to the UI channel) |
 | 3. Deny-by-default egress | `egress` (`ALLOWED_HOSTS`, exactly two hosts) | `non_allowlisted_host_is_rejected` (incl. removed hosts `api.openai.com`, `api.github.com`), `get_refuses_non_allowlisted_host`, `authority_smuggling_paths_are_rejected` |
 | 4. No first-party telemetry | (absence) | CI `no-telemetry` job: greps deps and sources for analytics |

@@ -9,7 +9,7 @@
 
 A small, always-on-top desktop window that shows how much of your **Claude** and **Codex** subscription quota you have left — read locally, from your own credentials, with no account to create and nothing phoned home.
 
-The entire value proposition is a **small, auditable trust boundary**. Only two modules ever touch a credential or the network — `crates/usage-core/src/credentials/` and `crates/usage-core/src/egress/` — and they are deliberately small enough to read end to end in one sitting. Everything else is scheduling and rendering.
+The entire value proposition is a **small, auditable trust boundary**. Credentials and the network are owned by two modules — `crates/usage-core/src/credentials/` and `crates/usage-core/src/egress/` — deliberately small enough to read end to end in one sitting; the two provider parsers consume what they return. Everything else is scheduling and rendering.
 
 <p align="center">
   <img src="assets/quotapane-window-cipherpine.png" width="319" alt="The QuotaPane window in the Cipher Pine theme: Claude 5h and 7d windows with percent bars and reset countdowns, a per-model toggle, and the Codex 7d window with reset credits">
@@ -22,7 +22,7 @@ The entire value proposition is a **small, auditable trust boundary**. Only two 
 - **Per-model breakdown** — where a provider reports per-model limits, each provider pane has a collapsible toggle that expands them into their own rows.
 - **Staleness** — the window tells you when the data is older than it should be, rather than quietly showing you a stale number.
 - **System tray** — an icon rendering current usage, with a tooltip and a Show/Hide/Quit menu (Windows and macOS; see [Platform support](#platform-support)).
-- **Headless mode** — `quotapane-cli` prints the same normalized snapshot as text or JSON, for scripts, for cron, and for proving to yourself what the app talks to.
+- **Headless mode** — `quotapane-cli` prints the same normalized snapshot as text or JSON, for scripts, for cron, and for proving to yourself what the app talks to. (Text output is a compact summary; per-model rows and reset credits appear in `--json` and the window.)
 
 Two binaries are produced: `quotapane` (the window) and `quotapane-cli` (headless).
 
@@ -67,7 +67,7 @@ Download the archive for your platform from [GitHub Releases](https://github.com
 | Linux (x86-64, glibc) | `quotapane-v<version>-x86_64-unknown-linux-gnu.tar.gz` |
 | macOS | Build from source — see below. |
 
-Each archive contains both binaries, both licenses, this README, and a `TOOLCHAIN.txt` recording the exact `rustc` / `cargo` that built it. There is no installer and nothing to uninstall: the binaries are self-contained, and QuotaPane writes no files.
+Each archive contains both binaries, both licenses, this README, and a `TOOLCHAIN.txt` recording the exact `rustc` / `cargo` that built it. There is no installer and nothing to uninstall: the binaries are self-contained. The only file QuotaPane ever writes is `theme.cfg` — one word recording your theme choice (see Theming); credentials are never written.
 
 QuotaPane reads credentials your provider CLI already wrote, so sign in with `claude` and/or `codex` first.
 

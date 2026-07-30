@@ -53,16 +53,16 @@ The **entire** security-sensitive surface of this application is two operations,
 1. **Read** local credential files (`usage-core::credentials`).
 2. **Send** a token to an allowlisted provider host (`usage-core::egress`).
 
-Everything else — scheduling, normalization, rendering — never sees a raw secret. You can validate the project's security posture by auditing essentially these two modules. That is the design.
+Everything else — scheduling, normalization, rendering — never sees a raw secret. Validating the security posture means reading those two modules plus the thin layer that consumes their output — the two provider parsers and the CLI's raw-debug path handle provider responses (never tokens). That is the design, and `DECISIONS.md` §4.1 records the full protected-path list.
 
 ---
 
 ## Security invariants
 
-Each invariant below is enforced in code. Where an invariant asserts a behavior, a test backs it; where it asserts an **absence** (1 and 5), it is enforced by there being no code path at all — the traceability table in `THREAT_MODEL.md` §9 records which is which, honestly. A change that weakens any invariant is a breaking security change and must be called out in review.
+Each invariant below is enforced in code. Where an invariant asserts a behavior, a test backs it; where it asserts an **absence** (1's no-token-write and 5), it is enforced by there being no such code path at all — the traceability table in `THREAT_MODEL.md` §9 records which is which, honestly. A change that weakens any invariant is a breaking security change and must be called out in review.
 
-1. **No credential persistence.** The app never writes tokens to disk. Today the app writes **no files at all** — there is no config layer; the only settings are CLI flags, held in memory.
-2. **No credential leakage.** Tokens are held in a `Secret<T>` wrapper that zeroizes on drop and redacts in all `Debug`/`Display`/serialization paths. Secrets never appear in logs, telemetry, or crash reports.
+1. **No credential persistence.** The app never writes tokens to disk — no code path serializes a token. Since v1.2.0 the app writes exactly one non-credential file: `theme.cfg`, a single word (`plain` or `cipherpine`) recording the theme choice under the platform config directory (see the README's Theming section). Preferences only, never secrets; every other setting is a CLI flag held in memory.
+2. **No credential leakage.** Tokens are held in a `Secret<T>` wrapper that zeroizes on drop and redacts in `Debug`/`Display`/serialization. Zeroization is best-effort and covers buffers QuotaPane owns — a transient copy necessarily exists inside the HTTP/TLS stack while a request is in flight (the egress module documents this boundary). QuotaPane itself never writes a secret to logs, telemetry, or crash reports.
 3. **Deny-by-default egress.** All outbound requests pass through a single client with a host **allowlist**. A request to any other host is a hard error. A test asserts a non-listed host is rejected.
 4. **No first-party telemetry.** The app collects and transmits **no** analytics of any kind, to anyone.
 5. **No self-update — no update mechanism exists at all.** The app never downloads or executes code, and contains no updater and no update check of any kind. Updating is always a manual act: your package manager, or a verified download (see below). If an update *check* is ever added it will be notify-only and off by default, and this document changes in the same PR.
@@ -74,7 +74,7 @@ Each invariant below is enforced in code. Where an invariant asserts a behavior,
 ## Credential handling
 
 - Sources are read-only: `~/.claude/.credentials.json`, and `$CODEX_HOME/auth.json` (or `~/.codex/auth.json`). Nothing else is read — WSL credential sources are **not** implemented (a possible post-1.0 addition, which would be called out here).
-- Tokens live only in memory, wrapped in `Secret<T>`, zeroized after use.
+- Tokens live only in memory, wrapped in `Secret<T>`, zeroized after use (best-effort — invariant 2 states the exact scope).
 - QuotaPane **never** ingests an organization Admin/org API key. An official-billing mode was evaluated and **rejected** (see `ARCHITECTURE.md`, ADR-002): holding that higher-privilege key would enlarge this trust boundary — the opposite of the project's purpose. The only credentials read are your own local subscription tokens, above.
 - The app treats these tokens as bearer credentials that can act as you against the provider. Anything reading them is inside your trust boundary; the project's job is to keep that boundary small and honest.
 
@@ -92,7 +92,7 @@ The same applies to the Codex provider: its requests to `chatgpt.com` send the C
   - `api.anthropic.com` — the Claude subscription usage endpoint (`GET /api/oauth/usage`). Nothing else is called on this host today; a Messages-API rate-limit-header fallback is a deferred idea, not shipped code.
   - `chatgpt.com` — Codex (ChatGPT-plan) subscription usage (verified against the open-source Codex CLI; **not** `api.openai.com`).
 - `api.github.com` was removed from the allowlist 2026-07-27: it existed for an optional update check that was never implemented, and an allowlist should be exactly as wide as the code behind it.
-- TLS is required — the chokepoint cannot construct a non-HTTPS URL, and redirects are never followed. **Certificate pinning is not implemented**; TLS validation trusts the platform root store (`rustls`). See `THREAT_MODEL.md` R1 for what that leaves open and what you can do about it.
+- TLS is required — the chokepoint cannot construct a non-HTTPS URL, and redirects are never followed. **Certificate pinning is not implemented**; TLS validation uses the WebPKI root set bundled into the binary (`webpki-roots`, the Mozilla CA program) — the operating system's trust store is **not** consulted. A CA added to your OS, including a corporate interception CA, is therefore rejected rather than silently trusted; the flip side is that enterprise-TLS gateways and captive portals hard-fail. See `THREAT_MODEL.md` R1.
 - Proxy off by default (see invariant 7).
 
 ---
