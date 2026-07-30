@@ -53,7 +53,7 @@ fake data, polls nothing, reads no credentials, and talks to no host.
 - No first-party telemetry, of any kind, to anyone. CI enforces its absence on every push.
 - **No auto-update and no update check** — there is no updater in the codebase at all. Updating is always something you do deliberately.
 - Credential files are opened read-only. Token refresh is delegated to the official `claude` / `codex` CLIs; QuotaPane never writes them.
-- Proxy support is opt-in, behind an explicit warning that a TLS-inspecting proxy can observe your bearer token.
+- Proxy support is opt-in and fails closed: with a proxy variable set and no opt-in, nothing is sent. Opting in is a per-run CLI flag behind an explicit warning that a TLS-inspecting proxy can observe your bearer token; the window has no opt-in at all.
 
 Full detail: [`SECURITY.md`](SECURITY.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -150,6 +150,7 @@ quotapane-cli --once [--json] [--provider claude|codex|all]
 | `--client-version <VER>` | As above. |
 | `--debug-raw` | Print the provider's wire response instead of a snapshot, for pinning an undocumented endpoint's schema. Takes precedence over `--json`. **Redacted by default:** the value of every `email`, `user_id`, `account_id`, and `id` key is replaced with `«redacted»` at any nesting depth, and a body that is not valid JSON is withheld rather than dumped. |
 | `--debug-raw-unsafe` | The same dump, byte-exact — no redaction, no withholding — after a stderr warning. The output can contain your email address and account identifiers, so treat it as private. Implies `--debug-raw`. |
+| `--allow-proxy` | Send this run through the proxy in your environment. Off by default, and the default **fails closed**: while `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` (either casing) is set and this flag is absent, QuotaPane sends nothing and exits with an error naming the variable — it does not connect directly instead. A TLS-inspecting proxy can read your bearer token, so opting in is explicit and lasts one run. The window has no equivalent flag. |
 | `-h`, `--help` / `--version` | Print help or version and exit. |
 
 If a token has expired, QuotaPane says so and tells you to run `claude` or `codex` — it never refreshes tokens itself.

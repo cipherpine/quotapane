@@ -67,7 +67,7 @@ Each invariant below is enforced in code. Where an invariant asserts a behavior,
 4. **No first-party telemetry.** The app collects and transmits **no** analytics of any kind, to anyone.
 5. **No self-update — no update mechanism exists at all.** The app never downloads or executes code, and contains no updater and no update check of any kind. Updating is always a manual act: your package manager, or a verified download (see below). If an update *check* is ever added it will be notify-only and off by default, and this document changes in the same PR.
 6. **Read-only credentials.** Credential files are opened read-only. Token refresh is delegated to the official `claude` / `codex` CLIs; the app never writes `auth.json`.
-7. **Proxy is opt-in.** If `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` is set, the app warns that a TLS-inspecting proxy can observe the bearer token, and requires explicit opt-in before sending anything through it.
+7. **Proxy is opt-in, CLI-only, and fail-closed.** If a proxy environment variable is set (`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`, upper- or lowercase), egress sends nothing and fails with an error naming the variable. `quotapane-cli --allow-proxy` opts in for that single run, after a printed warning that a TLS-inspecting proxy can observe the bearer token; the CLI's error output points at the flag. The window has no opt-in surface at all — its egress is constructed proxy-off unconditionally, so under a proxy environment it fails closed and shows the error rather than sending anything anywhere.
 
 ---
 

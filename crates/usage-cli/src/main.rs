@@ -25,13 +25,21 @@
 //! dumped unexamined (fail closed). `--debug-raw-unsafe` restores the
 //! byte-exact dump behind an explicit stderr warning — for the schema-pinning
 //! case where the exact bytes are the point.
+//!
+//! `--allow-proxy` (M9b) is the **only** proxy opt-in surface in the product.
+//! Egress refuses to send anything while a proxy environment variable is set
+//! and the user has not opted in — it fails closed, it does not quietly
+//! connect directly. This flag is how a user says "yes, I know a
+//! TLS-inspecting proxy can read my bearer token, do it anyway", for one run.
+//! The window has no equivalent: it constructs its egress proxy-off
+//! unconditionally (SECURITY.md invariant 7).
 
 use std::process::ExitCode;
 
-use usage_core::egress::Egress;
+use usage_core::egress::{Egress, EgressError};
 use usage_core::model::{ProviderId, ProviderSnapshot};
 use usage_core::providers::{
-    ClaudeSubscription, CodexSubscription, UsageProvider, CODEX_DEFAULT_USER_AGENT,
+    ClaudeSubscription, CodexSubscription, ProviderError, UsageProvider, CODEX_DEFAULT_USER_AGENT,
 };
 
 /// Sent when `--client-version` is omitted. Real Claude Code versions avoid
@@ -47,7 +55,7 @@ QuotaPane CLI — read your own Claude and Codex subscription usage locally.
 
 usage: quotapane-cli --once [--json] [--provider claude|codex|all]
                      [--client-version <VER>] [--debug-raw]
-                     [--debug-raw-unsafe]
+                     [--debug-raw-unsafe] [--allow-proxy]
 
 Options:
   --once                  Poll once and exit. Required — the only mode today.
@@ -67,6 +75,11 @@ Options:
   --debug-raw-unsafe      Like --debug-raw but byte-exact: no redaction, no
                           withholding. The output may contain your email and
                           account identifiers — do not paste it anywhere.
+  --allow-proxy           Send this run through the proxy in your environment.
+                          Off by default: while a proxy variable is set and
+                          this flag is absent, egress sends nothing and fails
+                          with an error. A TLS-inspecting proxy can read the
+                          bearer token, so opting in is explicit, per run.
   -h, --help              Print this help and exit.
   --version               Print the version and exit.
 
@@ -140,6 +153,20 @@ const UNSAFE_WARNING: &str = "warning: --debug-raw-unsafe prints the response bo
      with no redaction; it may contain your email address and account identifiers. Do not paste \
      the output into an issue, a chat, or a screenshot.";
 
+/// Stderr warning printed once before any request when `--allow-proxy` is on.
+const PROXY_OPT_IN_WARNING: &str =
+    "warning: --allow-proxy routes this run through the proxy in your environment. A \
+     TLS-inspecting proxy terminates TLS, so at its decryption point it can observe the bearer \
+     token QuotaPane sends. Opt in only on a network you trust with that token.";
+
+/// Appended once after a run that egress refused because of the proxy gate.
+///
+/// The error itself already names the offending variable (whatever its
+/// casing), so this line does not re-enumerate variable names — it only points
+/// at the two ways forward.
+const PROXY_GATE_HINT: &str =
+    "hint: re-run with --allow-proxy to opt in, or unset the proxy variable.";
+
 /// Holds no credential material — `client_version` is a public version
 /// string — so deriving `Debug` here cannot leak a token.
 #[derive(Debug)]
@@ -151,6 +178,33 @@ struct Args {
     debug_raw: bool,
     /// Byte-exact dump. Implies `debug_raw`; never set on its own.
     debug_raw_unsafe: bool,
+    /// Opt in to the proxy environment for this run (SECURITY.md invariant 7).
+    allow_proxy: bool,
+}
+
+/// The `proxy_opt_in` argument this run hands to [`Egress::new`].
+///
+/// Deliberately trivial, and deliberately a named function: it is the single
+/// seam where the CLI decides whether a proxy-enabled chokepoint can exist.
+/// A test pins both halves — that `--allow-proxy` is the only input that can
+/// make it true, and that `main` has exactly one `Egress::new` call site fed
+/// by this function — without reaching into the egress module, which this
+/// change does not touch.
+fn egress_proxy_opt_in(args: &Args) -> bool {
+    args.allow_proxy
+}
+
+/// Did egress refuse this request because a proxy variable is set and the user
+/// has not opted in (SECURITY.md invariant 7)?
+///
+/// Matched on the typed variant rather than on message text, so the CLI reacts
+/// to the chokepoint's own refusal and a reworded error cannot silently drop
+/// the hint.
+fn is_proxy_gate_error(err: &ProviderError) -> bool {
+    matches!(
+        err,
+        ProviderError::Egress(EgressError::ProxyNotOptedIn { .. })
+    )
 }
 
 /// Replace the value of every [`PII_KEYS`] entry with [`REDACTED`], recursing
@@ -219,6 +273,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
     let mut client_version: Option<String> = None;
     let mut debug_raw = false;
     let mut debug_raw_unsafe = false;
+    let mut allow_proxy = false;
 
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
@@ -239,6 +294,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
                 debug_raw = true;
                 debug_raw_unsafe = true;
             }
+            "--allow-proxy" => allow_proxy = true,
             "--provider" => {
                 let value = iter
                     .next()
@@ -267,6 +323,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
         client_version_defaulted,
         debug_raw,
         debug_raw_unsafe,
+        allow_proxy,
     }))
 }
 
@@ -299,7 +356,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
-                "usage: quotapane-cli --once [--json] [--provider claude|codex|all] [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe]"
+                "usage: quotapane-cli --once [--json] [--provider claude|codex|all] [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe] [--allow-proxy]"
             );
             eprintln!("try `quotapane-cli --help` for the full list of options");
             return ExitCode::from(2);
@@ -332,10 +389,23 @@ fn main() -> ExitCode {
         eprintln!("{UNSAFE_WARNING}");
     }
 
-    let egress = Egress::new(false);
+    // Same rule for the proxy opt-in: warn once, before anything is sent.
+    if args.allow_proxy {
+        eprintln!("{PROXY_OPT_IN_WARNING}");
+    }
+
+    // The one and only `Egress::new` in this binary. Without `--allow-proxy`
+    // this is `false` and the chokepoint's gate refuses to send while a proxy
+    // variable is set — the CLI does not decide that, and does not route
+    // around it; it only surfaces the way out (see `report_provider_error`).
+    let egress = Egress::new(egress_proxy_opt_in(&args));
     let multi = matches!(args.provider, ProviderSel::All);
     let mut snapshots: Vec<ProviderSnapshot> = Vec::new();
     let mut had_error = false;
+    // The proxy hint is a once-per-run line, for the same reason the warnings
+    // above are: `--provider all` failing twice on one gate does not need to
+    // say it twice.
+    let mut proxy_hint_shown = false;
 
     // Poll each selected provider independently: one signed-out or erroring
     // provider records a clean diagnostic and flips the exit code, but never
@@ -371,7 +441,7 @@ fn main() -> ExitCode {
                 }
                 Some(Ok(raw)) => println!("{}", render_debug_raw(&raw, args.debug_raw_unsafe)),
                 Some(Err(e)) => {
-                    eprintln!("error: {}: {e}", provider_cli_name(id));
+                    report_provider_error(id, &e, &mut proxy_hint_shown);
                     had_error = true;
                 }
             }
@@ -389,7 +459,7 @@ fn main() -> ExitCode {
             Some(provider) => match provider.poll(&egress) {
                 Ok(snapshot) => snapshots.push(snapshot),
                 Err(e) => {
-                    eprintln!("error: {}: {e}", provider_cli_name(id));
+                    report_provider_error(id, &e, &mut proxy_hint_shown);
                     had_error = true;
                 }
             },
@@ -425,6 +495,20 @@ fn main() -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Print one provider failure, plus — the first time a run is refused by the
+/// proxy gate — the hint naming the way out.
+///
+/// The gate lives in the egress chokepoint and is not weakened here: a refused
+/// run stays refused and still exits non-zero. All this adds is the sentence
+/// that turns "egress denied" into something actionable.
+fn report_provider_error(id: ProviderId, err: &ProviderError, proxy_hint_shown: &mut bool) {
+    eprintln!("error: {}: {err}", provider_cli_name(id));
+    if is_proxy_gate_error(err) && !*proxy_hint_shown {
+        eprintln!("{PROXY_GATE_HINT}");
+        *proxy_hint_shown = true;
     }
 }
 
@@ -1027,6 +1111,122 @@ mod tests {
         // A response with no newline at all degrades cleanly rather than
         // treating the status line itself as a body.
         assert!(render_debug_raw("status: 200", false).contains(WITHHELD_NOTICE));
+    }
+
+    // --- M9b: --allow-proxy is the only proxy opt-in surface ---
+
+    #[test]
+    fn allow_proxy_defaults_off_and_is_the_only_input_that_turns_it_on() {
+        // The default must be off: the whole point of invariant 7 is that
+        // routing a bearer token past a TLS terminator is a deliberate act.
+        assert!(!parse_run(&["--once"]).allow_proxy);
+        assert!(!egress_proxy_opt_in(&parse_run(&["--once"])));
+
+        // No other flag can flip it — not the debug ones, not --json.
+        let loaded = parse_run(&[
+            "--once",
+            "--json",
+            "--debug-raw",
+            "--debug-raw-unsafe",
+            "--provider",
+            "all",
+            "--client-version",
+            "1.2.3",
+        ]);
+        assert!(!egress_proxy_opt_in(&loaded));
+
+        // And the flag itself does, in any position.
+        assert!(egress_proxy_opt_in(&parse_run(&[
+            "--once",
+            "--allow-proxy"
+        ])));
+        assert!(egress_proxy_opt_in(&parse_run(&[
+            "--allow-proxy",
+            "--provider",
+            "codex",
+            "--once"
+        ])));
+    }
+
+    #[test]
+    fn the_only_egress_constructor_call_is_fed_by_the_seam() {
+        // `egress_proxy_opt_in` being correct is worth nothing if `main`
+        // constructs its `Egress` some other way. Pin the wiring by scanning
+        // this file's own source: exactly one `Egress::new(` call site, and it
+        // takes the seam — so `Egress::new(true)` is reachable only via
+        // --allow-proxy, and a future edit that hardcodes `true` fails here.
+        const SRC: &str = include_str!("main.rs");
+
+        // Real code only: slice the test module off, then drop comment lines —
+        // the call site's own comment necessarily discusses the constructor.
+        let code: String = SRC[..SRC
+            .find("#[cfg(test)]")
+            .expect("test module marker not found")]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            code.matches("Egress::new(").count(),
+            1,
+            "the CLI must construct exactly one Egress"
+        );
+        assert!(
+            code.contains("Egress::new(egress_proxy_opt_in(&args))"),
+            "the sole Egress must be constructed from the --allow-proxy seam"
+        );
+        // A hardcoded opt-in would bypass the flag entirely.
+        assert!(
+            !code.contains("Egress::new(true)"),
+            "proxy-enabled egress must be reachable only through --allow-proxy"
+        );
+    }
+
+    #[test]
+    fn proxy_gate_refusal_is_matched_on_the_variant_not_the_message() {
+        use usage_core::egress::EgressError;
+
+        assert!(is_proxy_gate_error(&ProviderError::Egress(
+            EgressError::ProxyNotOptedIn {
+                variable: "HTTPS_PROXY".to_string()
+            }
+        )));
+        // Casing is the egress module's business — any variable name qualifies.
+        assert!(is_proxy_gate_error(&ProviderError::Egress(
+            EgressError::ProxyNotOptedIn {
+                variable: "all_proxy".to_string()
+            }
+        )));
+
+        // Nothing else earns the hint — an unrelated failure must not tell the
+        // user to go turn a proxy flag on.
+        for other in [
+            ProviderError::Egress(EgressError::HostNotAllowlisted("evil.example".to_string())),
+            ProviderError::Egress(EgressError::Transport("connection reset".to_string())),
+            ProviderError::Credential("malformed auth.json".to_string()),
+            ProviderError::TokenExpired,
+            ProviderError::RateLimited {
+                retry_after_secs: Some(60),
+            },
+            ProviderError::UnexpectedPayload,
+        ] {
+            assert!(
+                !is_proxy_gate_error(&other),
+                "{other:?} must not earn the hint"
+            );
+        }
+    }
+
+    #[test]
+    fn help_documents_the_proxy_flag_and_its_fail_closed_default() {
+        assert!(HELP.contains("--allow-proxy"), "{HELP}");
+        // The consequence, not just the flag name: that the default refuses.
+        assert!(HELP.contains("fails"), "{HELP}");
+        assert!(HELP.contains("bearer token"), "{HELP}");
+        // The warning and hint the user will actually see are honest about it.
+        assert!(PROXY_OPT_IN_WARNING.contains("bearer token"));
+        assert!(PROXY_GATE_HINT.contains("--allow-proxy"));
     }
 
     #[test]

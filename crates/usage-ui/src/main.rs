@@ -973,7 +973,18 @@ impl ProviderPane {
     fn new<P: UsageProvider + Send + 'static>(id: ProviderId, provider: Option<P>) -> Self {
         let (handle, startup_error) = match provider {
             // Each provider gets its own egress instance; it moves into the
-            // poller thread. Proxy opt-in stays false (SECURITY.md invariant 7).
+            // poller thread.
+            //
+            // `false` is unconditional and deliberate (SECURITY.md invariant
+            // 7): the window has no proxy opt-in surface at all, and must not
+            // grow one — there is no flag, no setting, and no code path that
+            // can reach `Egress::new(true)` from here. Under a proxy
+            // environment the chokepoint therefore refuses to send and the
+            // pane shows the error, which is the intended outcome: a
+            // TLS-inspecting proxy can read the bearer token, and consenting
+            // to that is a per-run decision made deliberately at a command
+            // line (`quotapane-cli --allow-proxy`), not a checkbox in an
+            // always-on window that a user ticks once and forgets.
             Some(p) => (Some(poller::spawn(p, Egress::new(false))), None),
             None => (
                 None,
@@ -2090,6 +2101,50 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- M9b: the window has no proxy opt-in surface (SECURITY.md inv. 7) ---
+
+    /// The window's egress is constructed proxy-off unconditionally, and that
+    /// is an invariant, not a default: there must be no flag, no setting, and
+    /// no code path by which the GUI can build a proxy-enabled chokepoint.
+    ///
+    /// Scans this binary's own source, because the claim is about what the
+    /// source does *not* contain — a runtime test cannot observe an absent
+    /// feature. If someone adds a GUI proxy toggle, this fails and sends the
+    /// change back to the top tier, where a SECURITY.md invariant belongs.
+    ///
+    /// Comment lines are stripped first: the assertion is about code paths,
+    /// and the call site's own comment necessarily *discusses* the thing that
+    /// must not exist.
+    #[test]
+    fn the_window_exposes_no_proxy_opt_in() {
+        const SRC: &str = include_str!("main.rs");
+        let code: String = SRC[..SRC
+            .find("#[cfg(test)]")
+            .expect("test module marker not found")]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            !code.contains("--allow-proxy"),
+            "the window must not grow a proxy opt-in flag (SECURITY.md invariant 7)"
+        );
+        assert!(
+            !code.contains("Egress::new(true)"),
+            "the window must never construct a proxy-enabled egress"
+        );
+        assert_eq!(
+            code.matches("Egress::new(").count(),
+            1,
+            "exactly one egress construction in the window"
+        );
+        assert!(
+            code.contains("Egress::new(false)"),
+            "the window's egress must be constructed proxy-off, literally and unconditionally"
+        );
     }
 
     // --- parse_args: Claude flag (unchanged behavior) ---
