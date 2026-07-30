@@ -45,6 +45,30 @@ fn help_exits_zero_and_prints_real_usage() {
     }
 }
 
+/// M9b: both debug-raw flags reach the user's screen, and the help text says
+/// which one is the safe default rather than leaving them to guess from the
+/// names. A new test rather than an edit to the one above, which pins the
+/// pre-M9b surface.
+#[test]
+fn help_lists_both_debug_raw_flags_and_states_the_default() {
+    let out = Command::new(BIN)
+        .arg("--help")
+        .output()
+        .expect("failed to run quotapane-cli");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(stdout.contains("--debug-raw-unsafe"), "{stdout}");
+    // The redaction default is described, with the keys it covers named.
+    assert!(stdout.contains("«redacted»"), "{stdout}");
+    for key in ["email", "user_id", "account_id"] {
+        assert!(
+            stdout.contains(key),
+            "help omits the redacted key {key}: {stdout}"
+        );
+    }
+    assert!(stdout.contains("withheld"), "{stdout}");
+}
+
 #[test]
 fn version_exits_zero_and_prints_the_workspace_version() {
     let out = Command::new(BIN)

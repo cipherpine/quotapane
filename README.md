@@ -139,7 +139,7 @@ The headless CLI requires `--once`; one-shot polling is its only mode today.
 
 ```
 quotapane-cli --once [--json] [--provider claude|codex|all]
-              [--client-version <VER>] [--debug-raw]
+              [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe]
 ```
 
 | Flag | Meaning |
@@ -148,7 +148,8 @@ quotapane-cli --once [--json] [--provider claude|codex|all]
 | `--json` | Emit the normalized snapshot as JSON instead of a text summary. With `--provider all`, emits an array. |
 | `--provider <WHICH>` | `claude`, `codex`, or `all`. Default: `claude`. |
 | `--client-version <VER>` | As above. |
-| `--debug-raw` | Print the provider's exact wire response instead of a snapshot, for pinning an undocumented endpoint's schema. Takes precedence over `--json`. |
+| `--debug-raw` | Print the provider's wire response instead of a snapshot, for pinning an undocumented endpoint's schema. Takes precedence over `--json`. **Redacted by default:** the value of every `email`, `user_id`, `account_id`, and `id` key is replaced with `«redacted»` at any nesting depth, and a body that is not valid JSON is withheld rather than dumped. |
+| `--debug-raw-unsafe` | The same dump, byte-exact — no redaction, no withholding — after a stderr warning. The output can contain your email address and account identifiers, so treat it as private. Implies `--debug-raw`. |
 | `-h`, `--help` / `--version` | Print help or version and exit. |
 
 If a token has expired, QuotaPane says so and tells you to run `claude` or `codex` — it never refreshes tokens itself.

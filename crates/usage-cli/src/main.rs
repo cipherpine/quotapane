@@ -11,10 +11,20 @@
 //! is signed out (absent credential file) produces a clean stderr diagnostic and
 //! a non-zero exit — never a panic — without stopping the other provider.
 //!
-//! `--debug-raw` prints a provider's exact wire response instead of a snapshot,
-//! for pinning an undocumented endpoint's schema without making an ad-hoc token
+//! `--debug-raw` prints a provider's wire response instead of a snapshot, for
+//! pinning an undocumented endpoint's schema without making an ad-hoc token
 //! request outside the trust boundary. It is supported by **both** providers;
 //! it used to apply to Codex only and be silently ignored for Claude.
+//!
+//! Since M9b that dump is **redacted by default**. The Codex usage response
+//! carries account PII (`email`, `user_id`, `account_id`) that never enters a
+//! snapshot but is right there in the bytes, and a debug dump is precisely the
+//! output people paste into an issue. So the default path parses the body as
+//! JSON and replaces the value of every PII-named key at any depth before
+//! printing; a body that is not valid JSON is withheld entirely rather than
+//! dumped unexamined (fail closed). `--debug-raw-unsafe` restores the
+//! byte-exact dump behind an explicit stderr warning — for the schema-pinning
+//! case where the exact bytes are the point.
 
 use std::process::ExitCode;
 
@@ -37,6 +47,7 @@ QuotaPane CLI — read your own Claude and Codex subscription usage locally.
 
 usage: quotapane-cli --once [--json] [--provider claude|codex|all]
                      [--client-version <VER>] [--debug-raw]
+                     [--debug-raw-unsafe]
 
 Options:
   --once                  Poll once and exit. Required — the only mode today.
@@ -47,9 +58,15 @@ Options:
   --client-version <VER>  claude-code version string to send. Default: 0.0.0,
                           which the provider throttles aggressively — pass a
                           real version for normal use.
-  --debug-raw             Print the provider's exact wire response instead of
-                          a snapshot, for pinning an undocumented endpoint's
-                          schema. Takes precedence over --json.
+  --debug-raw             Print the provider's wire response instead of a
+                          snapshot, for pinning an undocumented endpoint's
+                          schema. Takes precedence over --json. Account
+                          identifiers (email, user_id, account_id, id) are
+                          replaced with «redacted» at any depth; a body that
+                          is not valid JSON is withheld rather than dumped.
+  --debug-raw-unsafe      Like --debug-raw but byte-exact: no redaction, no
+                          withholding. The output may contain your email and
+                          account identifiers — do not paste it anywhere.
   -h, --help              Print this help and exit.
   --version               Print the version and exit.
 
@@ -99,6 +116,30 @@ fn provider_cli_name(id: ProviderId) -> &'static str {
     }
 }
 
+/// Object keys whose **values** are account identifiers or contact details.
+///
+/// Matched by name at any depth, in objects and through arrays — the shape of
+/// an undocumented endpoint's response is not something to hard-code a path
+/// into. `id` is included deliberately even though it is the broadest: a
+/// debug dump is a diagnostic, and over-redacting a harmless `id` costs a
+/// re-run with `--debug-raw-unsafe`, while under-redacting costs the user an
+/// identifier they pasted into a public issue.
+const PII_KEYS: &[&str] = &["email", "user_id", "account_id", "id"];
+
+/// What a redacted value is replaced with. Distinctive on purpose: seeing it
+/// in a dump should read as "the tool removed this", not as endpoint data.
+const REDACTED: &str = "«redacted»";
+
+/// Printed in place of a body that could not be parsed as JSON, so nothing
+/// unexamined reaches stdout.
+const WITHHELD_NOTICE: &str =
+    "(body withheld: not valid JSON — use --debug-raw-unsafe for exact bytes)";
+
+/// Stderr warning printed once before a `--debug-raw-unsafe` dump.
+const UNSAFE_WARNING: &str = "warning: --debug-raw-unsafe prints the response body byte-for-byte, \
+     with no redaction; it may contain your email address and account identifiers. Do not paste \
+     the output into an issue, a chat, or a screenshot.";
+
 /// Holds no credential material — `client_version` is a public version
 /// string — so deriving `Debug` here cannot leak a token.
 #[derive(Debug)]
@@ -108,6 +149,57 @@ struct Args {
     client_version: String,
     client_version_defaulted: bool,
     debug_raw: bool,
+    /// Byte-exact dump. Implies `debug_raw`; never set on its own.
+    debug_raw_unsafe: bool,
+}
+
+/// Replace the value of every [`PII_KEYS`] entry with [`REDACTED`], recursing
+/// through objects and arrays.
+///
+/// Replaces the value **whatever its type** — a `user_id` that arrives as a
+/// number or an object is redacted just as a string one is, so a schema change
+/// cannot quietly reopen the hole.
+fn redact_pii(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if PII_KEYS.contains(&key.as_str()) {
+                    *child = serde_json::Value::String(REDACTED.to_string());
+                } else {
+                    redact_pii(child);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                redact_pii(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Render a provider's `debug_raw_body` output for printing.
+///
+/// The provider hands back `"status: <code>\n<body>"`. With `byte_exact` the
+/// whole thing is passed through unchanged (`--debug-raw-unsafe`). Otherwise
+/// the status line is kept, the body is parsed as JSON, PII-named values are
+/// replaced, and the result is pretty-printed. A body that does not parse is
+/// **withheld**: the point of the default path is that nothing unexamined
+/// reaches stdout, and "not JSON" means we cannot examine it.
+fn render_debug_raw(raw: &str, byte_exact: bool) -> String {
+    if byte_exact {
+        return raw.to_string();
+    }
+    let (status_line, body) = raw.split_once('\n').unwrap_or((raw, ""));
+    let rendered = match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(mut value) => {
+            redact_pii(&mut value);
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| WITHHELD_NOTICE.to_string())
+        }
+        Err(_) => WITHHELD_NOTICE.to_string(),
+    };
+    format!("{status_line}\n{rendered}")
 }
 
 /// What the command line asked for. `--help`/`--version` are answered and
@@ -126,6 +218,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
     let mut provider: Option<ProviderSel> = None;
     let mut client_version: Option<String> = None;
     let mut debug_raw = false;
+    let mut debug_raw_unsafe = false;
 
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
@@ -138,6 +231,14 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
             "--once" => once = true,
             "--json" => json = true,
             "--debug-raw" => debug_raw = true,
+            // Implies --debug-raw: it is the same mode, minus the redaction,
+            // so `--debug-raw-unsafe` alone works and combining them is not an
+            // error. Not a rename — existing --debug-raw scripts keep working,
+            // just safer.
+            "--debug-raw-unsafe" => {
+                debug_raw = true;
+                debug_raw_unsafe = true;
+            }
             "--provider" => {
                 let value = iter
                     .next()
@@ -165,6 +266,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
         client_version: client_version.unwrap_or_else(|| DEFAULT_CLIENT_VERSION.to_string()),
         client_version_defaulted,
         debug_raw,
+        debug_raw_unsafe,
     }))
 }
 
@@ -197,7 +299,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
-                "usage: quotapane-cli --once [--json] [--provider claude|codex|all] [--client-version <VER>] [--debug-raw]"
+                "usage: quotapane-cli --once [--json] [--provider claude|codex|all] [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe]"
             );
             eprintln!("try `quotapane-cli --help` for the full list of options");
             return ExitCode::from(2);
@@ -224,6 +326,12 @@ fn main() -> ExitCode {
         );
     }
 
+    // One warning per run, before any body reaches stdout — not one per
+    // provider, so `--provider all` does not train the reader to skip it.
+    if args.debug_raw_unsafe {
+        eprintln!("{UNSAFE_WARNING}");
+    }
+
     let egress = Egress::new(false);
     let multi = matches!(args.provider, ProviderSel::All);
     let mut snapshots: Vec<ProviderSnapshot> = Vec::new();
@@ -233,10 +341,12 @@ fn main() -> ExitCode {
     // provider records a clean diagnostic and flips the exit code, but never
     // aborts the others (`all` still emits whatever succeeded).
     for id in ids {
-        // `--debug-raw` bypasses the normal snapshot path, printing the exact
-        // wire response through the same `fetch` the normal poll uses
+        // `--debug-raw` bypasses the normal snapshot path, reading the wire
+        // response through the same `fetch` the normal poll uses
         // (`debug_raw_body`), so the dump is guaranteed to reflect the real
-        // request. Supported by **both** providers: the flag used to be
+        // request. What reaches stdout is redacted unless the user asked for
+        // byte-exact output — see `render_debug_raw`. Supported by **both**
+        // providers: the flag used to be
         // silently ignored for Claude, which made it look like the endpoint
         // returned nothing rather than that the flag did not apply.
         if args.debug_raw {
@@ -259,7 +369,7 @@ fn main() -> ExitCode {
                     );
                     had_error = true;
                 }
-                Some(Ok(raw)) => println!("{raw}"),
+                Some(Ok(raw)) => println!("{}", render_debug_raw(&raw, args.debug_raw_unsafe)),
                 Some(Err(e)) => {
                     eprintln!("error: {}: {e}", provider_cli_name(id));
                     had_error = true;
@@ -740,6 +850,200 @@ mod tests {
     fn debug_raw_flag_can_appear_in_any_order() {
         let parsed = parse_run(&["--provider", "codex", "--once", "--debug-raw"]);
         assert!(parsed.debug_raw);
+    }
+
+    // --- M9b: --debug-raw redacts by default, --debug-raw-unsafe does not ---
+
+    /// Synthetic PII markers. Deliberately shaped as obvious placeholders (not
+    /// as plausible credentials) so secret scanners have nothing to flag, and
+    /// distinctive enough that a substring search for them is meaningful.
+    const SENTINEL_EMAIL: &str = "sentinel-person-DO-NOT-PRINT@example.invalid";
+    const SENTINEL_USER_ID: &str = "sentinel-user-id-DO-NOT-PRINT";
+    const SENTINEL_ACCOUNT_ID: &str = "sentinel-account-id-DO-NOT-PRINT";
+    const SENTINEL_ID: &str = "sentinel-bare-id-DO-NOT-PRINT";
+
+    /// A response body shaped like the real Codex one: PII at the top level,
+    /// nested inside an object, and inside array elements.
+    fn body_with_pii() -> String {
+        format!(
+            r#"{{
+  "email": "{SENTINEL_EMAIL}",
+  "rate_limit": {{
+    "primary_window": {{ "used_percent": 42.5, "reset_after_seconds": 900 }},
+    "owner": {{ "user_id": "{SENTINEL_USER_ID}", "account_id": "{SENTINEL_ACCOUNT_ID}" }}
+  }},
+  "additional_rate_limits": [
+    {{ "name": "GPT-5.3-Codex-Max", "used_percent": 10, "id": "{SENTINEL_ID}" }},
+    {{ "name": "GPT-5.3-Codex-Mini", "used_percent": 0,
+       "meta": {{ "deeply": {{ "nested": {{ "email": "{SENTINEL_EMAIL}" }} }} }} }}
+  ]
+}}"#
+        )
+    }
+
+    fn raw_with_pii() -> String {
+        format!("status: 200\n{}", body_with_pii())
+    }
+
+    #[test]
+    fn debug_raw_unsafe_flag_is_recognized_and_implies_debug_raw() {
+        let parsed = parse_run(&["--once", "--debug-raw-unsafe"]);
+        assert!(parsed.debug_raw_unsafe);
+        assert!(
+            parsed.debug_raw,
+            "--debug-raw-unsafe must imply --debug-raw"
+        );
+
+        // Order-independent, and combining the two flags is not an error.
+        let parsed = parse_run(&["--debug-raw-unsafe", "--provider", "codex", "--once"]);
+        assert!(parsed.debug_raw_unsafe && parsed.debug_raw);
+        let parsed = parse_run(&["--once", "--debug-raw", "--debug-raw-unsafe"]);
+        assert!(parsed.debug_raw_unsafe && parsed.debug_raw);
+    }
+
+    #[test]
+    fn debug_raw_unsafe_defaults_off_so_plain_debug_raw_is_the_safe_path() {
+        assert!(!parse_run(&["--once"]).debug_raw_unsafe);
+        assert!(!parse_run(&["--once", "--debug-raw"]).debug_raw_unsafe);
+    }
+
+    #[test]
+    fn default_debug_raw_redacts_pii_at_every_depth() {
+        let out = render_debug_raw(&raw_with_pii(), false);
+
+        // Not one sentinel survives — top level, nested object, array element,
+        // or three levels down inside an array element.
+        for sentinel in [
+            SENTINEL_EMAIL,
+            SENTINEL_USER_ID,
+            SENTINEL_ACCOUNT_ID,
+            SENTINEL_ID,
+        ] {
+            assert!(
+                !out.contains(sentinel),
+                "PII survived redaction ({sentinel}):\n{out}"
+            );
+        }
+
+        // ...and it was removed by redaction, not by dropping the body: the
+        // marker appears once per redacted key (5 of them).
+        assert_eq!(
+            out.matches(REDACTED).count(),
+            5,
+            "expected one marker per PII key:\n{out}"
+        );
+
+        // The usage data — the reason to run --debug-raw at all — is intact,
+        // and so is the status line.
+        assert!(out.starts_with("status: 200\n"), "{out}");
+        for kept in [
+            "primary_window",
+            "used_percent",
+            "42.5",
+            "reset_after_seconds",
+            "GPT-5.3-Codex-Max",
+            "additional_rate_limits",
+        ] {
+            assert!(
+                out.contains(kept),
+                "redaction ate usage data ({kept}):\n{out}"
+            );
+        }
+
+        // The output is still parseable JSON below the status line, so the
+        // dump stays useful for pinning a schema.
+        let body = out.split_once('\n').unwrap().1;
+        let parsed: serde_json::Value =
+            serde_json::from_str(body).expect("redacted body must still be JSON");
+        assert_eq!(parsed["email"].as_str(), Some(REDACTED));
+        assert_eq!(
+            parsed["rate_limit"]["owner"]["user_id"].as_str(),
+            Some(REDACTED)
+        );
+        assert_eq!(
+            parsed["rate_limit"]["owner"]["account_id"].as_str(),
+            Some(REDACTED)
+        );
+        assert_eq!(
+            parsed["additional_rate_limits"][0]["id"].as_str(),
+            Some(REDACTED)
+        );
+        assert_eq!(
+            parsed["additional_rate_limits"][1]["meta"]["deeply"]["nested"]["email"].as_str(),
+            Some(REDACTED)
+        );
+    }
+
+    #[test]
+    fn redaction_replaces_non_string_pii_values_too() {
+        // A schema change that turns `user_id` into a number or an object must
+        // not reopen the hole: the VALUE is replaced whatever its type.
+        let raw = r#"status: 200
+{"user_id": 1234567890, "account_id": {"kind": "org", "id": "nested-sentinel"}, "ids": [1, 2]}"#;
+        let out = render_debug_raw(raw, false);
+        assert!(!out.contains("1234567890"), "{out}");
+        assert!(!out.contains("nested-sentinel"), "{out}");
+        // `ids` is not in the key list and carries no identifier — untouched.
+        assert!(out.contains("\"ids\""), "{out}");
+        assert_eq!(out.matches(REDACTED).count(), 2, "{out}");
+    }
+
+    #[test]
+    fn unsafe_debug_raw_is_byte_exact() {
+        let raw = raw_with_pii();
+        assert_eq!(
+            render_debug_raw(&raw, true),
+            raw,
+            "--debug-raw-unsafe must pass the bytes through unchanged"
+        );
+        // Including a body the default path would have withheld.
+        let not_json = "status: 502\n<html><body>Gateway Timeout</body></html>";
+        assert_eq!(render_debug_raw(not_json, true), not_json);
+    }
+
+    #[test]
+    fn non_json_body_is_withheld_not_dumped() {
+        // Fail closed: if we cannot parse it, we cannot claim it is PII-free.
+        let raw =
+            "status: 502\n<html><body>Gateway Timeout — user=someone@example.invalid</body></html>";
+        let out = render_debug_raw(raw, false);
+
+        assert!(out.contains(WITHHELD_NOTICE), "{out}");
+        assert!(
+            out.contains("--debug-raw-unsafe"),
+            "the notice must name the escape hatch: {out}"
+        );
+        assert!(!out.contains("Gateway Timeout"), "the body leaked: {out}");
+        assert!(
+            !out.contains("someone@example.invalid"),
+            "the body leaked: {out}"
+        );
+        // The status line still comes through — it is ours, not the body.
+        assert!(out.starts_with("status: 502\n"), "{out}");
+
+        // An empty body, and a truncated/partial JSON body, are withheld too.
+        assert!(render_debug_raw("status: 204\n", false).contains(WITHHELD_NOTICE));
+        assert!(render_debug_raw("status: 200\n{\"email\": \"x", false).contains(WITHHELD_NOTICE));
+        // A response with no newline at all degrades cleanly rather than
+        // treating the status line itself as a body.
+        assert!(render_debug_raw("status: 200", false).contains(WITHHELD_NOTICE));
+    }
+
+    #[test]
+    fn help_documents_both_debug_raw_flags_and_the_default() {
+        assert!(HELP.contains("--debug-raw "), "{HELP}");
+        assert!(HELP.contains("--debug-raw-unsafe"), "{HELP}");
+        // The default behavior is stated, not just the flag name.
+        assert!(
+            HELP.contains(REDACTED),
+            "help must show the redaction marker"
+        );
+        for key in PII_KEYS {
+            assert!(
+                HELP.contains(key),
+                "help must name the redacted key `{key}`"
+            );
+        }
     }
 
     // --- --help / --version (M6-NAME) ---

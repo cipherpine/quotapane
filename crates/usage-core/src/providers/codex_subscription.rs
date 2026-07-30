@@ -116,9 +116,20 @@ impl CodexSubscription {
     /// Debug/diagnostic: perform the usage request and return the **raw**
     /// response as `"status: <code>\n<body>"`. Used by `quotapane-cli
     /// --debug-raw` to pin the endpoint's exact JSON shape without an ad-hoc
-    /// token request outside the trust boundary. The body is provider usage
-    /// data (percentages, timestamps) — non-secret; the bearer token and
-    /// account id ride in request headers and never appear in the body.
+    /// token request outside the trust boundary.
+    ///
+    /// These bytes carry no *credential* — the bearer token and the
+    /// `ChatGPT-Account-Id` header are request-side and are never echoed back
+    /// — but they are **not PII-free**, and this method does nothing about
+    /// that. As the module header records, the response body contains `email`,
+    /// `user_id`, and `account_id`. Those fields never enter a snapshot (no
+    /// struct in this file declares a field for them), yet they are present
+    /// here, verbatim. Redaction is the caller's job and belongs to the
+    /// caller's output policy: `quotapane-cli --debug-raw` replaces those
+    /// values by default, and `--debug-raw-unsafe` is the explicit,
+    /// warning-gated escape hatch for when the exact bytes are the point.
+    /// (Until M9b this comment called the body "non-secret", which read as
+    /// "safe to paste" and contradicted the module header directly above it.)
     pub fn debug_raw_body(&self, http: &Egress) -> Result<String, ProviderError> {
         let resp = self.fetch(http)?;
         Ok(format!(
