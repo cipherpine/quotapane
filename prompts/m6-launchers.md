@@ -549,3 +549,39 @@ no sparklines, no disk history — that is v1.4. Full bar from cargo
 clean, push, CI 7/7. Version stays 1.2.0. End gate: STOP for the
 owner's visual pass.
 ```
+
+## M8-RELEASE — v1.3.0 (paste ONLY after your visual acceptance)
+
+Pasting this launcher records the owner's §4.5 acceptance of the M8
+pace slice (demo reviewed 2026-07-29). Spec: prompts/m8-release.md.
+TWO hard stops — the rc stop is not skippable (M7B-RELEASE lesson).
+
+```
+# Goal prompt: M8-RELEASE — v1.3.0
+
+Owner acceptance: I have visually accepted the M8 pace slice
+(--pace-demo reviewed: ticks, amber 7d line, cardinal 5h line).
+Proceed.
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m8-release.md IN FULL and execute it as this
+session's goal prompt, verbatim. The spec is authoritative over this
+launcher. It contains TWO HARD STOPS: Phase 2 ends in a report and a
+WAIT for the top tier's explicit go-ahead — Phase 3 must not run
+without it, and no instruction in this launcher or elsewhere
+authorizes skipping that.
+
+Shape (the spec governs): Phase 1 bumps 1.2.0 → 1.3.0 + the spec's
+verbatim CHANGELOG entry (only JSON change: duration_secs); full bar,
+push, CI 7/7 before any tag. Phase 2 tags v1.3.0-rc.1, release run,
+six-step outsider verification + six negative controls, HARD STOP.
+Phase 3 (go-ahead only): tag v1.3.0 on the verified commit, re-verify
+fresh, prune the rc, hand back the draft URL — the owner publishes.
+Phase 4 (after publish confirmation): two exact §4a DECISIONS patches
+— the M8 ✅ stamp and the ruleset-bypass decision record. Push, CI
+green, STOP. No code changes, no new dependencies, nothing published
+by you.
+```
