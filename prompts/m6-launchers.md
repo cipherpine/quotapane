@@ -585,3 +585,39 @@ Phase 4 (after publish confirmation): two exact §4a DECISIONS patches
 green, STOP. No code changes, no new dependencies, nothing published
 by you.
 ```
+
+## M9B — hardening (after M9a pushed; v1.4.0 scope)
+
+Behavior fixes from the reconciled security review, each with its doc
+line in the same commit. One pre-authored §4a SECURITY.md patch rides
+Phase 4.
+
+```
+# Goal prompt: M9B — hardening
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m9b-hardening.md IN FULL and execute it as this
+session's goal prompt, verbatim. The spec is authoritative over this
+launcher.
+
+Shape (the spec governs): four one-commit phases, each pairing a
+behavior change with the claim it affects. Phase 1 (poller):
+Retry-After capped at MAX_BACKOFF; TokenExpired retries at the
+MIN_INTERVAL floor with no escalation (hint still wins, capped).
+Phase 2 (time.rs): calendar-true day validation with leap years;
+missing UTC offset rejected, fail closed. Phase 3 (CLI): --debug-raw
+redacts email/user_id/account_id/id at any depth by default;
+--debug-raw-unsafe for byte-exact with a warning; non-JSON bodies
+withheld; the contradictory "non-secret" doc comment fixed in the
+same commit. Phase 4 (CLI): --allow-proxy constructs
+Egress::new(true) after a token-visibility warning; GUI proxy-off
+unconditionally; the spec's verbatim §4a SECURITY.md invariant-7
+patch lands in the SAME commit. Egress/credentials modules and
+existing invariant tests are READ-ONLY; zero new dependencies;
+version stays 1.3.0. Full bar from cargo clean, push, CI 7/7. End
+gate: STOP with per-phase SHAs and the CLI surface list for the
+v1.4.0 CHANGELOG.
+```
