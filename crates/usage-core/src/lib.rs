@@ -10,10 +10,12 @@
 //!    chokepoint. A secret leaves the process only through it, and only to
 //!    a host on the compile-time allowlist.
 //!
-//! Everything else — [`providers`], [`poller`], [`model`] — schedules and
-//! normalizes **non-secret** data. Secrets never cross the channel to the
-//! UI or CLI; the message type ([`model::ProviderSnapshot`]) contains no
-//! secret fields by construction.
+//! Everything else — [`providers`], [`poller`], [`model`], [`pace`] —
+//! schedules, normalizes, or does arithmetic over **non-secret** data. Secrets
+//! never cross the channel to the UI or CLI; the message type
+//! ([`model::ProviderSnapshot`]) contains no secret fields by construction.
+//! [`pace`] is the furthest thing from the boundary in the crate: pure
+//! functions over numbers, with no clock, no I/O, and no credentials in reach.
 //!
 //! ## Enforced invariants (each backed by a test — THREAT_MODEL.md §9)
 //!
@@ -34,5 +36,6 @@
 pub mod credentials;
 pub mod egress;
 pub mod model;
+pub mod pace;
 pub mod poller;
 pub mod providers;
