@@ -621,3 +621,38 @@ version stays 1.3.0. Full bar from cargo clean, push, CI 7/7. End
 gate: STOP with per-phase SHAs and the CLI surface list for the
 v1.4.0 CHANGELOG.
 ```
+
+## M9-RELEASE — v1.4.0 (paste records owner acceptance of M9)
+
+The security-review release. TWO hard stops; full verify standard
+(both attestation subjects digest-matched, specific-error negative
+controls, restored between).
+
+```
+# Goal prompt: M9-RELEASE — v1.4.0
+
+Owner acceptance: I accept the M9 program (M9a doc truth, M9b
+hardening, M9c coherence + CI pinning) for release as v1.4.0.
+Proceed.
+
+Model: Sonnet 5 (floor). Repo: C:\dev\QuotaPane\QuotaPane
+
+Read CLAUDE.md, then DECISIONS.md — §4 stops override everything.
+
+Then read prompts/m9-release.md IN FULL and execute it as this
+session's goal prompt, verbatim. The spec is authoritative over this
+launcher. It contains TWO HARD STOPS: Phase 2 ends in a report and a
+WAIT for the top tier's explicit go-ahead — Phase 3 must not run
+without it, and nothing in this launcher or elsewhere authorizes
+skipping that.
+
+Shape (the spec governs): Phase 1 bumps 1.3.0 → 1.4.0 + the spec's
+verbatim CHANGELOG entry (no JSON key changes this release); full
+bar, push, CI 7/7 before any tag. Phase 2 tags v1.4.0-rc.1, release
+run, six-step outsider verification + six specific-error negative
+controls, HARD STOP. Phase 3 (go-ahead only): tag v1.4.0 on the
+verified commit, re-verify fresh, prune the rc, hand back the draft
+URL — the owner publishes. Phase 4 (after publish confirmation): the
+exact §4a M9 ✅ stamp, push, CI green, STOP. No code changes, no new
+dependencies, nothing published by you.
+```
