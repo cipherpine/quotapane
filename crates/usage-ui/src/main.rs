@@ -127,6 +127,12 @@ const BAR_WIDTH: f32 = 120.0;
 /// Corner rounding on a quota bar and its border.
 const BAR_ROUNDING: u8 = 3;
 
+/// Alpha of the elapsed-time pace tick, out of 255 (M8).
+///
+/// Present enough to read against a filled bar, short of full opacity so it
+/// never competes with the fill edge it sits beside.
+const PACE_TICK_ALPHA: u8 = 200;
+
 struct Args {
     /// Claude Code client version → `User-Agent: claude-code/<ver>`.
     client_version: String,
@@ -1300,13 +1306,68 @@ fn per_model_row_is_visible(window: &QuotaWindow) -> bool {
     window.used_fraction.is_some_and(|fraction| fraction > 0.0)
 }
 
-/// Add a quota bar and outline its trough with a HAIRLINE border.
+/// The elapsed-time pace tick's colour: TEXT_DIM at [`PACE_TICK_ALPHA`].
+///
+/// Takes no [`Theme`] on purpose, and is the one mark in the window that does
+/// not: the tick is **information**, not styling. Where a bar's fill sits
+/// relative to how much of the window has elapsed is the same fact in both
+/// looks, so it is drawn the same way in both. Themed marks branch on the
+/// theme; facts do not.
+///
+/// A function rather than a `const` because the premultiplied conversion
+/// `from_rgba_unmultiplied` performs is not available in a const context.
+fn pace_tick_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(TEXT_DIM.r(), TEXT_DIM.g(), TEXT_DIM.b(), PACE_TICK_ALPHA)
+}
+
+/// Where the elapsed-time tick belongs inside a bar `bar_width` px wide: the
+/// offset, in px, from the bar's left edge. `None` when the bar earns no tick.
+///
+/// `elapsed_fraction = 1 - resets_in / duration`, clamped to `0..=1`, times the
+/// width. Reading the result: fill to the **left** of the tick means the quota
+/// is being spent slower than the window is passing; fill **past** it means
+/// faster.
+///
+/// All three inputs are required, and each absence is a real case rather than a
+/// defensive check:
+/// - no `used_fraction` — there is no fill to compare the tick against, so the
+///   mark would be a line on an empty trough saying nothing;
+/// - no `duration_secs` — the provider never said how long this window is (an
+///   unverified Claude limit kind, a Codex row without `limit_window_seconds`),
+///   so "how far through it" has no answer;
+/// - no `resets_in_secs` — same, from the other end.
+///
+/// A zero duration is `None` too: it is the one value that would divide, and a
+/// window of no length has no elapsed fraction to show. Guarding here rather
+/// than laundering it in the provider keeps the snapshot honest about what the
+/// endpoint said (see `codex_subscription::to_quota_window`).
+fn pace_tick_x(window: &QuotaWindow, bar_width: f32) -> Option<f32> {
+    window.used_fraction?;
+    let duration = window.duration_secs?;
+    let resets_in = window.resets_in_secs?;
+    if duration == 0 {
+        return None;
+    }
+    // Clamped because a countdown longer than the window (clock skew, a
+    // provider's own rounding) must not push the tick off the left edge.
+    let remaining = (resets_in as f64 / duration as f64).clamp(0.0, 1.0);
+    Some(bar_width * (1.0 - remaining) as f32)
+}
+
+/// Add a quota bar, outline its trough with a HAIRLINE border, and mark how far
+/// through the window the account is (M8).
 ///
 /// `ProgressBar` paints its trough from `visuals.extreme_bg_color` (PANEL) but
 /// exposes no stroke, so the border is painted over the returned rect. One
 /// helper for both row renderers, so the headline and per-model bars cannot
-/// drift apart.
-fn add_quota_bar(ui: &mut egui::Ui, fraction: Option<f64>) {
+/// drift apart — and so every bar in the window gets the pace tick from one
+/// place, headline and per-model alike.
+///
+/// The tick is **painted**, not allocated: it consumes no layout space, so no
+/// row changes height or width by having one. Pinned by
+/// `the_pace_tick_changes_no_row_geometry`.
+fn add_quota_bar(ui: &mut egui::Ui, window: &QuotaWindow) {
+    let fraction = window.used_fraction;
     let response = ui.add(
         egui::ProgressBar::new(fraction.unwrap_or(0.0) as f32)
             .desired_width(BAR_WIDTH)
@@ -1320,6 +1381,17 @@ fn add_quota_bar(ui: &mut egui::Ui, fraction: Option<f64>) {
         egui::Stroke::new(1.0, HAIRLINE),
         egui::StrokeKind::Inside,
     );
+
+    // Measured off the rect the bar actually got, not off BAR_WIDTH, so the
+    // tick stays aligned if a row ever gives the bar less room than it asked
+    // for. Painted last so it sits over both the fill and the border.
+    if let Some(offset) = pace_tick_x(window, response.rect.width()) {
+        ui.painter().vline(
+            response.rect.left() + offset,
+            response.rect.y_range(),
+            egui::Stroke::new(1.0, pace_tick_color()),
+        );
+    }
 }
 
 fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow, theme: Theme) {
@@ -1327,7 +1399,7 @@ fn render_window_row(ui: &mut egui::Ui, window: &QuotaWindow, theme: Theme) {
         ui.label(egui::RichText::new(&window.label).color(text_color(ui, theme)));
         // The numeric percent rides on the bar itself; `--` when unknown (an
         // unknown fraction also draws an empty gray bar).
-        add_quota_bar(ui, window.used_fraction);
+        add_quota_bar(ui, window);
         // Compact reset countdown, e.g. "resets in 3h 12m"; `--` when unknown.
         ui.label(
             egui::RichText::new(format!("resets in {}", format_reset(window.resets_in_secs)))
@@ -1364,7 +1436,7 @@ fn render_per_model_row(ui: &mut egui::Ui, window: &QuotaWindow, theme: Theme) {
     );
     ui.horizontal(|ui| {
         ui.add_space(PER_MODEL_ROW_INDENT);
-        add_quota_bar(ui, window.used_fraction);
+        add_quota_bar(ui, window);
         ui.label(
             egui::RichText::new(format!("resets in {}", format_reset(window.resets_in_secs)))
                 .small()
@@ -2105,6 +2177,173 @@ mod tests {
         assert_eq!(snapshot.per_model.len(), 2);
         assert_eq!(snapshot.per_model[0].label, "GPT-5.3-Codex-Spark");
         assert_eq!(snapshot.per_model[0].used_fraction, Some(0.0));
+    }
+
+    // --- M8: the elapsed-time pace tick ---
+
+    /// A headline window with an explicit countdown and duration.
+    fn paced_window(resets_in_secs: Option<u64>, duration_secs: Option<u64>) -> QuotaWindow {
+        QuotaWindow {
+            label: "5h".to_string(),
+            used_fraction: Some(0.40),
+            resets_in_secs,
+            duration_secs,
+        }
+    }
+
+    #[test]
+    fn pace_tick_sits_at_the_elapsed_fraction() {
+        let width = 120.0;
+        // Nothing elapsed: the whole window still to run → hard left.
+        assert_eq!(
+            pace_tick_x(&paced_window(Some(18_000), Some(18_000)), width),
+            Some(0.0)
+        );
+        // Half elapsed → half way across.
+        assert_eq!(
+            pace_tick_x(&paced_window(Some(9_000), Some(18_000)), width),
+            Some(60.0)
+        );
+        // Fully elapsed (resetting now) → hard right.
+        assert_eq!(
+            pace_tick_x(&paced_window(Some(0), Some(18_000)), width),
+            Some(120.0)
+        );
+        // A quarter left → three quarters across, and the arithmetic scales
+        // with whatever width the bar actually got.
+        assert_eq!(
+            pace_tick_x(&paced_window(Some(151_200), Some(604_800)), 80.0),
+            Some(60.0)
+        );
+    }
+
+    #[test]
+    fn pace_tick_needs_all_three_facts() {
+        // Each absence is a real provider case, not a defensive check.
+        assert_eq!(pace_tick_x(&paced_window(None, Some(18_000)), 120.0), None);
+        assert_eq!(pace_tick_x(&paced_window(Some(9_000), None), 120.0), None);
+        assert_eq!(pace_tick_x(&paced_window(None, None), 120.0), None);
+
+        // No fill to compare the tick against → no tick, even with both times.
+        let no_fraction = QuotaWindow {
+            used_fraction: None,
+            ..paced_window(Some(9_000), Some(18_000))
+        };
+        assert_eq!(pace_tick_x(&no_fraction, 120.0), None);
+
+        // A zero-length window is the one value that would divide.
+        assert_eq!(pace_tick_x(&paced_window(Some(0), Some(0)), 120.0), None);
+    }
+
+    #[test]
+    fn pace_tick_clamps_a_countdown_longer_than_its_window() {
+        // Clock skew or a provider's own rounding can report more time left
+        // than the window is long. Clamped to "nothing elapsed" rather than
+        // pushed off the left edge.
+        assert_eq!(
+            pace_tick_x(&paced_window(Some(20_000), Some(18_000)), 120.0),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn pace_tick_is_the_same_colour_in_both_themes() {
+        // The tick is information, not theming: `pace_tick_color` takes no
+        // Theme at all, which this asserts by type. It is TEXT_DIM at alpha
+        // 200 — dimmed, never invisible and never opaque.
+        let _: fn() -> egui::Color32 = pace_tick_color;
+        assert_eq!(pace_tick_color().a(), PACE_TICK_ALPHA);
+        assert_eq!(PACE_TICK_ALPHA, 200);
+        assert_ne!(pace_tick_color(), egui::Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn the_pace_tick_changes_no_row_geometry() {
+        // The tick is painted, not allocated. A row that carries one must lay
+        // out to exactly the size of the same row without one — in both themes
+        // and for both row renderers, at the real 320px window width.
+        let with = paced_window(Some(9_000), Some(18_000));
+        let without = QuotaWindow {
+            duration_secs: None,
+            ..with.clone()
+        };
+        // Guard against a vacuous comparison: the first really does earn a
+        // tick and the second really does not.
+        assert!(pace_tick_x(&with, BAR_WIDTH).is_some());
+        assert!(pace_tick_x(&without, BAR_WIDTH).is_none());
+
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let headline_with = lay_out_themed(theme, |ui| render_window_row(ui, &with, theme));
+            let headline_without =
+                lay_out_themed(theme, |ui| render_window_row(ui, &without, theme));
+            assert_eq!(
+                (headline_with.height, headline_with.width),
+                (headline_without.height, headline_without.width),
+                "{theme:?} headline row changed geometry: {}x{} vs {}x{}",
+                headline_with.width,
+                headline_with.height,
+                headline_without.width,
+                headline_without.height
+            );
+
+            let model_with = lay_out_themed(theme, |ui| {
+                ui.indent("t", |ui| render_per_model_row(ui, &with, theme));
+            });
+            let model_without = lay_out_themed(theme, |ui| {
+                ui.indent("t", |ui| render_per_model_row(ui, &without, theme));
+            });
+            assert_eq!(
+                (model_with.height, model_with.width),
+                (model_without.height, model_without.width),
+                "{theme:?} per-model row changed geometry"
+            );
+
+            // And the ticked row still fits the window it has to live in.
+            assert!(
+                headline_with.width <= headline_with.available_width,
+                "{theme:?} ticked headline row wanted {}px inside {}px",
+                headline_with.width,
+                headline_with.available_width
+            );
+        }
+    }
+
+    #[test]
+    fn every_bar_gets_a_tick_through_the_one_shared_helper() {
+        // Headline and per-model rows both draw through `add_quota_bar`, so the
+        // tick cannot appear on one kind of bar and not the other. The shared
+        // signature is what guarantees it.
+        let _: fn(&mut egui::Ui, &QuotaWindow) = add_quota_bar;
+
+        // And a whole pane with ticked windows lays out unchanged from the same
+        // pane with the durations stripped — the integration form of
+        // `the_pace_tick_changes_no_row_geometry`.
+        let ticked = per_model_snapshot(vec![model_window_at("GPT-5.3-Codex-Max", Some(0.42))]);
+        let unticked = ProviderSnapshot {
+            windows: ticked
+                .windows
+                .iter()
+                .map(|w| QuotaWindow {
+                    duration_secs: None,
+                    ..w.clone()
+                })
+                .collect(),
+            per_model: ticked
+                .per_model
+                .iter()
+                .map(|w| QuotaWindow {
+                    duration_secs: None,
+                    ..w.clone()
+                })
+                .collect(),
+            ..ticked.clone()
+        };
+        assert!(ticked.windows[0].duration_secs.is_some());
+        assert!(ticked.per_model[0].duration_secs.is_some());
+
+        let a = lay_out_pane(&ticked, true);
+        let b = lay_out_pane(&unticked, true);
+        assert_eq!((a.height, a.width), (b.height, b.width));
     }
 
     // --- M7a2: the reset-credits line ---
