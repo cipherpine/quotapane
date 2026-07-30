@@ -5,6 +5,31 @@ All notable changes to QuotaPane are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-30
+
+Pace: know whether you will make it to reset, not just where you are.
+
+### Added
+
+- **Pace ticks.** Every quota bar carries a thin tick at the elapsed share of
+  its window. Fill short of the tick means you are under budget; fill past it
+  means you are consuming faster than time is passing. Shown in both themes — it
+  is information, not decoration.
+- **Forecast-to-limit.** QuotaPane estimates your burn rate from recent polls;
+  when a window's projected exhaustion lands before its reset, one line appears
+  under that provider: "at this pace: <window> full in ~…" — amber, turning
+  cardinal inside six hours. When you are safe it shows nothing at all.
+  Forecasts wait for roughly fifteen minutes of evidence before speaking, and a
+  window reset clears the history. Note that any 5h-window warning is
+  necessarily inside the six-hour band, so session-window warnings are always
+  cardinal.
+- **`--pace-demo`** renders a fixed synthetic scenario — no polling, no
+  credentials read, no network at all — to see the feature without waiting for a
+  bad week.
+- `quotapane-cli --json`: every window object (headline and per-model) gains
+  `duration_secs` — always present, null when the provider neither stated nor
+  implied a window length. This is the only JSON surface change in this release.
+
 ## [1.2.0] - 2026-07-29
 
 The Cipher Pine visual pass.
