@@ -1795,6 +1795,10 @@ mod tests {
             used_fraction: Some(0.42),
             // 5d 4h — the widest reset string the formatter produces.
             resets_in_secs: Some(446_400),
+            // A weekly window, so these rows also carry a pace tick (M8) —
+            // which is deliberate: every layout assertion below then measures
+            // the tick's presence too, and would catch it allocating space.
+            duration_secs: Some(604_800),
         }
     }
 
@@ -1864,6 +1868,7 @@ mod tests {
                         label: label.to_string(),
                         used_fraction: Some(0.33),
                         resets_in_secs: Some(446_400),
+                        duration_secs: Some(604_800),
                     },
                     Theme::CipherPine,
                 )
@@ -1891,11 +1896,13 @@ mod tests {
                     label: "5h".to_string(),
                     used_fraction: Some(0.25),
                     resets_in_secs: Some(3600),
+                    duration_secs: Some(18_000),
                 },
                 QuotaWindow {
                     label: "7d".to_string(),
                     used_fraction: Some(0.18),
                     resets_in_secs: Some(86_400),
+                    duration_secs: Some(604_800),
                 },
             ],
             per_model: vec![
@@ -1940,6 +1947,7 @@ mod tests {
                 label: "5h".to_string(),
                 used_fraction: Some(0.25),
                 resets_in_secs: Some(3600),
+                duration_secs: Some(18_000),
             }],
             per_model: (0..6)
                 .map(|i| model_window(&format!("GPT-5.3-Codex-Variant-{i}")))
@@ -1991,6 +1999,7 @@ mod tests {
                 label: "5h".to_string(),
                 used_fraction: Some(0.25),
                 resets_in_secs: Some(3600),
+                duration_secs: Some(18_000),
             }],
             per_model,
             reset_credits: None,
@@ -2563,6 +2572,7 @@ mod tests {
                         label: "5h".to_string(),
                         used_fraction: Some(0.33),
                         resets_in_secs: Some(446_400),
+                        duration_secs: Some(18_000),
                     },
                     theme,
                 )
@@ -2638,6 +2648,7 @@ mod tray_tests {
             label: label.to_string(),
             used_fraction: fraction,
             resets_in_secs: None,
+            duration_secs: None,
         }
     }
 

@@ -492,11 +492,13 @@ mod tests {
                 label: "5h".to_string(),
                 used_fraction: Some(0.25),
                 resets_in_secs: Some(3600),
+                duration_secs: Some(18_000),
             }],
             per_model: vec![QuotaWindow {
                 label: "7d-opus".to_string(),
                 used_fraction: Some(0.5),
                 resets_in_secs: None,
+                duration_secs: Some(604_800),
             }],
             reset_credits: None,
             source: SnapshotSource::UsageEndpoint,
@@ -545,6 +547,7 @@ mod tests {
             label: label.to_string(),
             used_fraction,
             resets_in_secs: Some(604_800),
+            duration_secs: Some(604_800),
         };
 
         let snapshot = ProviderSnapshot {
@@ -607,6 +610,7 @@ mod tests {
                 label: "5h".to_string(),
                 used_fraction: Some(0.18),
                 resets_in_secs: Some(2805),
+                duration_secs: Some(18_000),
             }],
             per_model: vec![],
             reset_credits: None,
@@ -646,6 +650,75 @@ mod tests {
         );
         assert!(parsed[0]["reset_credits"].is_null());
         assert_eq!(parsed[1]["reset_credits"]["available"].as_u64(), Some(1));
+    }
+
+    #[test]
+    fn duration_secs_key_is_always_present_in_json() {
+        // M8: `duration_secs` gets no `skip_serializing_if`, so the key is on
+        // every window — a number when the provider stated or implied the
+        // window's length, an explicit `null` when it did not. Same contract as
+        // `reset_credits`: a consumer reads `.duration_secs` unconditionally,
+        // and "unknown" stays distinguishable from "absent field".
+        use usage_core::model::{QuotaWindow, SnapshotSource};
+
+        let snapshot = ProviderSnapshot {
+            provider: ProviderId::CodexSubscription,
+            taken_at_unix_secs: 1_784_000_000,
+            windows: vec![
+                QuotaWindow {
+                    label: "5h".to_string(),
+                    used_fraction: Some(0.25),
+                    resets_in_secs: Some(3600),
+                    duration_secs: Some(18_000),
+                },
+                QuotaWindow {
+                    // The endpoint gave no window length for this one.
+                    label: "primary".to_string(),
+                    used_fraction: Some(0.10),
+                    resets_in_secs: None,
+                    duration_secs: None,
+                },
+            ],
+            per_model: vec![QuotaWindow {
+                label: "GPT-5.3-Codex-Spark".to_string(),
+                used_fraction: Some(0.42),
+                resets_in_secs: Some(604_800),
+                duration_secs: None,
+            }],
+            reset_credits: None,
+            source: SnapshotSource::UsageEndpoint,
+        };
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(
+            json.contains("\"duration_secs\":null"),
+            "an unknown duration must emit an explicit null: {json}"
+        );
+
+        // Round-trip through `Value` so the assertions pin the data rather than
+        // the number formatting, and so "key exists" is checked as such.
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let windows = parsed["windows"].as_array().unwrap();
+        assert_eq!(windows[0]["duration_secs"].as_u64(), Some(18_000));
+        assert!(
+            windows[1].get("duration_secs").is_some(),
+            "key missing from the unknown-duration window: {json}"
+        );
+        assert!(windows[1]["duration_secs"].is_null());
+
+        // Per-model rows carry the key too — they are the same type.
+        let per_model = parsed["per_model"].as_array().unwrap();
+        assert!(per_model[0].get("duration_secs").is_some());
+        assert!(per_model[0]["duration_secs"].is_null());
+
+        // And the `--provider all` array form.
+        let array = serde_json::to_string(&vec![snapshot]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&array).unwrap();
+        assert_eq!(
+            parsed[0]["windows"][0]["duration_secs"].as_u64(),
+            Some(18_000)
+        );
+        assert!(parsed[0]["windows"][1]["duration_secs"].is_null());
     }
 
     // --- --debug-raw parsing (new) ---

@@ -32,6 +32,22 @@ pub struct QuotaWindow {
     pub used_fraction: Option<f64>,
     /// Seconds until the window resets, when known.
     pub resets_in_secs: Option<u64>,
+    /// The window's **total** length in seconds, when known — e.g. `18000` for
+    /// a five-hour window, `604800` for a weekly one (M8).
+    ///
+    /// Paired with [`Self::resets_in_secs`] this gives how far *through* the
+    /// window the account is, which is what makes a pace comparison possible:
+    /// `1 - resets_in / duration` is the elapsed fraction, and a
+    /// [`Self::used_fraction`] ahead of it means burning faster than time.
+    ///
+    /// `Option` because the two providers know it differently and neither
+    /// always does: Codex states it outright (`limit_window_seconds`), Claude
+    /// implies it in the *kind* of limit being reported, and a kind this crate
+    /// has not seen before yields `None` rather than a guess. Deliberately not
+    /// derived from [`Self::label`] — a label is a display string (a Codex
+    /// per-model row's label is a model name), and parsing one back into a
+    /// duration is exactly the label-parsing this crate refuses to do.
+    pub duration_secs: Option<u64>,
 }
 
 /// A snapshot of one provider's state at one poll. Contains no secrets,

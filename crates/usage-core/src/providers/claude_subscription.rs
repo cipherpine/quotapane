@@ -204,17 +204,52 @@ struct RawWindow {
 
 /// One entry of the generalized `limits` array.
 ///
-/// Only the three fields the snapshot actually uses are declared. Deliberately
-/// **not** parsed: `kind`, `group`, `severity`, `is_active`, `scope.surface`,
-/// and — most importantly — `scope.model.id`. The field-ignoring defense is
-/// structural: serde drops every key with no matching field, so a value that
-/// has nowhere to land cannot reach a snapshot, a log, or the CLI's JSON.
-/// Declaring a field "for completeness" would quietly undo that, so don't.
+/// Only the four fields the snapshot actually uses are declared. Deliberately
+/// **not** parsed: `group`, `severity`, `is_active`, `scope.surface`, and — most
+/// importantly — `scope.model.id`. The field-ignoring defense is structural:
+/// serde drops every key with no matching field, so a value that has nowhere to
+/// land cannot reach a snapshot, a log, or the CLI's JSON. Declaring a field
+/// "for completeness" would quietly undo that, so don't.
+///
+/// `kind` earns its field (M8): it is the only thing in the response that says
+/// how long a limit's window *is*, which the pace markers need. It is consumed
+/// by [`duration_from_kind`] into a plain number of seconds and is never itself
+/// stored — no provider vocabulary reaches a snapshot through it. That is the
+/// bar for declaring anything here: a field the snapshot genuinely needs, read
+/// for a derived value, not carried along.
 #[derive(Deserialize)]
 struct RawLimit {
+    kind: Option<String>,
     percent: Option<f64>,
     resets_at: Option<String>,
     scope: Option<RawScope>,
+}
+
+/// A five-hour window, in seconds — Claude's "session" limit.
+const FIVE_HOUR_SECS: u64 = 18_000;
+/// A weekly window, in seconds.
+const WEEKLY_SECS: u64 = 604_800;
+
+/// Window length in seconds for a `limits[].kind`, or `None` for a kind this
+/// crate has not verified.
+///
+/// The endpoint states a limit's *kind*, never its duration, so this mapping is
+/// the derivation — and it stays a closed list plus one family rather than a
+/// clever parse. Observed vocabulary (2026-07-29): `session` is the five-hour
+/// window; `weekly_all` and `weekly_scoped` are both weekly, which is why the
+/// weekly side matches the family prefix — the endpoint already ships two
+/// members of it, so a third would be weekly too, while a genuinely new kind
+/// (`monthly_…`, say) must fall through to `None`.
+///
+/// `None` is the honest answer for an unrecognized kind: it costs the pace tick
+/// on that row and nothing else. Guessing would put a marker on a bar at a
+/// position derived from a duration the provider never stated.
+fn duration_from_kind(kind: Option<&str>) -> Option<u64> {
+    match kind? {
+        "session" | "five_hour" => Some(FIVE_HOUR_SECS),
+        k if k == "weekly" || k.starts_with("weekly_") => Some(WEEKLY_SECS),
+        _ => None,
+    }
 }
 
 /// `limits[].scope` — an unscoped (subscription-wide) entry has `null` here.
@@ -247,11 +282,21 @@ fn resets_in_secs(resets_at: Option<&str>, now_unix_secs: u64) -> Option<u64> {
 }
 
 /// Normalize one raw window into a [`QuotaWindow`] under `label`.
-fn to_quota_window(label: &str, w: RawWindow, now_unix_secs: u64) -> QuotaWindow {
+///
+/// `duration_secs` is passed in rather than derived here: for the top-level
+/// windows the JSON *key* is the kind (`five_hour`, `seven_day`), so the caller
+/// is the only place that knows it.
+fn to_quota_window(
+    label: &str,
+    w: RawWindow,
+    now_unix_secs: u64,
+    duration_secs: Option<u64>,
+) -> QuotaWindow {
     QuotaWindow {
         label: label.to_string(),
         used_fraction: percent_to_fraction(w.utilization),
         resets_in_secs: resets_in_secs(w.resets_at.as_deref(), now_unix_secs),
+        duration_secs,
     }
 }
 
@@ -273,9 +318,17 @@ fn to_quota_window(label: &str, w: RawWindow, now_unix_secs: u64) -> QuotaWindow
 /// before, under their unchanged `"7d-opus"`/`"7d-sonnet"` labels.
 fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
     let mut windows = Vec::new();
-    for (label, win) in [("5h", usage.five_hour), ("7d", usage.seven_day)] {
+    // The key names *are* the kinds here, so the durations are known outright:
+    // `five_hour` is a five-hour window and `seven_day` a weekly one. Written
+    // as literals beside their keys rather than routed through
+    // `duration_from_kind`, because inventing the strings "session"/"weekly_all"
+    // to look them up would be pretending the endpoint said something it didn't.
+    for (label, win, duration) in [
+        ("5h", usage.five_hour, FIVE_HOUR_SECS),
+        ("7d", usage.seven_day, WEEKLY_SECS),
+    ] {
         if let Some(w) = win {
-            windows.push(to_quota_window(label, w, now_unix_secs));
+            windows.push(to_quota_window(label, w, now_unix_secs, Some(duration)));
         }
     }
 
@@ -284,6 +337,7 @@ fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|limit| {
+            let duration_secs = duration_from_kind(limit.kind.as_deref());
             // Unscoped entries (`scope: null`) duplicate the headline windows
             // and are dropped here; only a model-scoped one becomes a row.
             let label = limit.scope?.model?.display_name?;
@@ -291,17 +345,19 @@ fn build_snapshot(usage: RawUsage, now_unix_secs: u64) -> ProviderSnapshot {
                 label,
                 used_fraction: percent_to_fraction(limit.percent),
                 resets_in_secs: resets_in_secs(limit.resets_at.as_deref(), now_unix_secs),
+                duration_secs,
             })
         })
         .collect();
 
     if per_model.is_empty() {
+        // The legacy pair is weekly by construction — the keys say `seven_day`.
         for (label, win) in [
             ("7d-opus", usage.seven_day_opus),
             ("7d-sonnet", usage.seven_day_sonnet),
         ] {
             if let Some(w) = win {
-                per_model.push(to_quota_window(label, w, now_unix_secs));
+                per_model.push(to_quota_window(label, w, now_unix_secs, Some(WEEKLY_SECS)));
             }
         }
     }
@@ -670,6 +726,125 @@ mod tests {
         assert_eq!(snap.per_model.len(), 1);
         assert_eq!(snap.per_model[0].label, "TestModel");
         assert_eq!(snap.per_model[0].used_fraction, Some(0.55));
+    }
+
+    // --- window duration (M8) ---
+
+    #[test]
+    fn kind_to_duration_is_a_closed_list_plus_the_weekly_family() {
+        // The verified kinds.
+        assert_eq!(duration_from_kind(Some("session")), Some(18_000));
+        assert_eq!(duration_from_kind(Some("weekly_all")), Some(604_800));
+        assert_eq!(duration_from_kind(Some("weekly_scoped")), Some(604_800));
+        // The family, so a further weekly member needs no code change.
+        assert_eq!(duration_from_kind(Some("weekly")), Some(604_800));
+        assert_eq!(
+            duration_from_kind(Some("weekly_something_new")),
+            Some(604_800)
+        );
+        // Anything else is unknown, and unknown means None — not a guess. In
+        // particular a kind that merely *contains* "weekly" is not a match.
+        assert_eq!(duration_from_kind(Some("monthly_all")), None);
+        assert_eq!(duration_from_kind(Some("not_weekly_at_all")), None);
+        assert_eq!(duration_from_kind(Some("")), None);
+        assert_eq!(duration_from_kind(None), None);
+    }
+
+    #[test]
+    fn headline_windows_carry_their_durations() {
+        // The key name is the kind: `five_hour` is 5h, `seven_day` is weekly.
+        let json = r#"{
+            "five_hour": {"utilization": 33.0, "resets_at": null},
+            "seven_day": {"utilization": 80.0, "resets_at": null}
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert_eq!(snap.windows[0].label, "5h");
+        assert_eq!(snap.windows[0].duration_secs, Some(18_000));
+        assert_eq!(snap.windows[1].label, "7d");
+        assert_eq!(snap.windows[1].duration_secs, Some(604_800));
+    }
+
+    #[test]
+    fn per_model_duration_comes_from_the_limit_kind() {
+        // Three model-scoped entries: a weekly kind, a five-hour kind, and one
+        // whose kind this crate has never seen — which must degrade to None
+        // rather than inherit a neighbour's duration.
+        let json = r#"{
+            "limits":[
+              {"kind":"weekly_scoped","percent":40,
+               "scope":{"model":{"display_name":"WeeklyModel"}}},
+              {"kind":"session","percent":10,
+               "scope":{"model":{"display_name":"SessionModel"}}},
+              {"kind":"fortnightly_scoped","percent":5,
+               "scope":{"model":{"display_name":"StrangeModel"}}},
+              {"kind":"missing_kind_entirely","percent":5,
+               "scope":{"model":{"display_name":"NoKindModel"}}}
+            ]
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+
+        assert_eq!(snap.per_model.len(), 4);
+        assert_eq!(snap.per_model[0].label, "WeeklyModel");
+        assert_eq!(snap.per_model[0].duration_secs, Some(604_800));
+        assert_eq!(snap.per_model[1].label, "SessionModel");
+        assert_eq!(snap.per_model[1].duration_secs, Some(18_000));
+        assert_eq!(snap.per_model[2].label, "StrangeModel");
+        assert_eq!(snap.per_model[2].duration_secs, None);
+        assert_eq!(snap.per_model[3].label, "NoKindModel");
+        assert_eq!(snap.per_model[3].duration_secs, None);
+    }
+
+    #[test]
+    fn per_model_entry_without_a_kind_has_no_duration() {
+        // An entry that omits `kind` altogether: the row still renders, just
+        // without a pace marker.
+        let json = r#"{
+            "limits":[{"percent":40,"scope":{"model":{"display_name":"TestModel"}}}]
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert_eq!(snap.per_model[0].used_fraction, Some(0.40));
+        assert_eq!(snap.per_model[0].duration_secs, None);
+    }
+
+    #[test]
+    fn legacy_per_model_fallback_rows_are_weekly() {
+        // `seven_day_opus` / `seven_day_sonnet` say weekly in their key names.
+        let json = r#"{
+            "seven_day_opus": {"utilization": 30.0},
+            "seven_day_sonnet": {"utilization": 40.0}
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert_eq!(snap.per_model[0].label, "7d-opus");
+        assert_eq!(snap.per_model[0].duration_secs, Some(604_800));
+        assert_eq!(snap.per_model[1].label, "7d-sonnet");
+        assert_eq!(snap.per_model[1].duration_secs, Some(604_800));
+    }
+
+    #[test]
+    fn the_limit_kind_string_never_reaches_the_snapshot() {
+        // `kind` is read for a derived number and nothing else. A distinctive
+        // synthetic kind proves the string itself is not carried into `Debug`
+        // or the CLI's JSON — the same structural check the PII tests make.
+        let json = r#"{
+            "limits":[{"kind":"weekly_MARKER_KIND_5d1c","percent":40,
+                       "scope":{"model":{"display_name":"TestModel"}}}]
+        }"#;
+        assert!(json.contains("MARKER_KIND"), "fixture lost its marker");
+
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+
+        // Read, and read correctly — the weekly family matched.
+        assert_eq!(snap.per_model[0].duration_secs, Some(604_800));
+
+        let debug = format!("{snap:?}");
+        let json_out = serde_json::to_string(&snap).unwrap();
+        assert!(!debug.contains("MARKER_KIND"), "kind leaked into Debug");
+        assert!(!json_out.contains("MARKER_KIND"), "kind leaked into JSON");
     }
 
     #[test]

@@ -269,11 +269,19 @@ fn window_resets_in_secs(w: &RawWindow, now_unix_secs: u64) -> Option<u64> {
 /// The single place `used_percent` becomes a fraction and `reset_*` becomes a
 /// countdown, so the headline and per-model paths cannot drift into two
 /// conventions.
+///
+/// `duration_secs` is `limit_window_seconds` passed **straight through** (M8):
+/// this provider states the window's length outright, so there is nothing to
+/// derive and nothing to normalize. Passing it through rather than sanitizing a
+/// degenerate `0` keeps this function honest about what the endpoint said; the
+/// consumers guard against a zero-length window (dividing by it is their
+/// problem, not this snapshot's).
 fn to_quota_window(label: String, w: &RawWindow, now_unix_secs: u64) -> QuotaWindow {
     QuotaWindow {
         label,
         used_fraction: w.used_percent.map(|u| (u / 100.0).clamp(0.0, 1.0)),
         resets_in_secs: window_resets_in_secs(w, now_unix_secs),
+        duration_secs: w.limit_window_seconds,
     }
 }
 
@@ -638,6 +646,64 @@ mod tests {
         let credits = build_snapshot(usage, 0).reset_credits.unwrap();
         assert_eq!(credits.available, 3);
         assert_eq!(credits.applicable_now, None);
+    }
+
+    // --- window duration (M8) ---
+
+    #[test]
+    fn window_durations_pass_straight_through() {
+        // `limit_window_seconds` already *is* the window length, so it lands on
+        // both the headline and the per-model rows verbatim — no derivation.
+        let json = r#"{
+            "rate_limit":{
+                "primary_window":  {"used_percent":25,"limit_window_seconds":18000, "reset_after_seconds":3600},
+                "secondary_window":{"used_percent":18,"limit_window_seconds":604800,"reset_after_seconds":86400}
+            },
+            "additional_rate_limits":[
+                {"limit_name":"GPT-5.3-Codex-Spark","rate_limit":{"primary_window":{"used_percent":12.5,"limit_window_seconds":604800}}},
+                {"limit_name":"GPT-5.3-Codex-Sprint","rate_limit":{"primary_window":{"used_percent":4,"limit_window_seconds":3600}}}
+            ]
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+
+        assert_eq!(snap.windows[0].duration_secs, Some(18_000));
+        assert_eq!(snap.windows[1].duration_secs, Some(604_800));
+        assert_eq!(snap.per_model[0].duration_secs, Some(604_800));
+        // Not every window is 5h or 7d — an hourly one passes through as-is
+        // rather than being snapped to a known size.
+        assert_eq!(snap.per_model[1].duration_secs, Some(3_600));
+    }
+
+    #[test]
+    fn absent_window_duration_is_none_not_zero() {
+        // The label already falls back (`"primary"`); the duration has no
+        // fallback to make, so it degrades to None and the row loses only its
+        // pace marker.
+        let json = r#"{
+            "rate_limit":{"primary_window":{"used_percent":10.0}},
+            "additional_rate_limits":[
+                {"limit_name":"No-Duration","rate_limit":{"primary_window":{"used_percent":7}}}
+            ]
+        }"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert_eq!(snap.windows[0].duration_secs, None);
+        assert_eq!(snap.per_model[0].duration_secs, None);
+    }
+
+    #[test]
+    fn a_zero_duration_is_reported_as_the_provider_stated_it() {
+        // Passthrough means passthrough: a degenerate `0` is not laundered into
+        // `None` here. The label already treats 0 as "no usable duration", and
+        // the pace consumers reject it too — but the snapshot reports what the
+        // endpoint said.
+        let json =
+            r#"{"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":0}}}"#;
+        let usage: RawUsage = serde_json::from_str(json).unwrap();
+        let snap = build_snapshot(usage, 0);
+        assert_eq!(snap.windows[0].duration_secs, Some(0));
+        assert_eq!(snap.windows[0].label, "primary"); // 0 is not a usable label
     }
 
     #[test]
