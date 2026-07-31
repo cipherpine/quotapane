@@ -5,6 +5,53 @@ All notable changes to QuotaPane are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-07-31
+
+The security-review release: an owner-commissioned adversarial review of the
+codebase and its claims produced eleven findings — most of them places where the
+documentation said more than the code did. Every finding was independently
+re-verified and every fix ships here, each behavior change landing in the same
+commit as the claim it affects. The review process itself is committed under
+`prompts/`.
+
+### Security
+
+- **`--debug-raw` now redacts by default.** Identifier fields (`email`,
+  `user_id`, `account_id`, `id`) are replaced with `«redacted»` at any depth
+  before printing; bodies that are not valid JSON are withheld. New
+  `--debug-raw-unsafe` restores the byte-exact dump after one warning. Existing
+  invocations keep working — safer.
+- **Proxy support is now reachable, CLI-only, and fail-closed.** New
+  `quotapane-cli --allow-proxy` opts a single run into the proxy environment
+  after a printed warning that a TLS-inspecting proxy can observe the bearer
+  token. Without it, behavior is unchanged: a set proxy variable (either casing)
+  means nothing is sent and the run exits with an error naming the variable —
+  now followed by a hint pointing at the flag. The window has no opt-in surface
+  at all.
+- **A hostile `Retry-After` can no longer stall polling.** The provider's hint
+  is honored only up to the 30-minute backoff cap.
+- **Expired tokens recover fast.** An auth error retries at the polling floor
+  instead of escalating backoff, so a token refreshed via the official CLI is
+  noticed within minutes, not up to thirty.
+- **Provider timestamps are validated against the real calendar** (month
+  lengths, leap years) and must carry a UTC offset; anything else is rejected
+  and renders as unknown rather than as a wrong reset time.
+- **Every CI action is now pinned to a full commit SHA**, matching the release
+  workflow, and cargo-audit installs at a pinned version.
+
+### Documentation truth
+
+The review's larger half: claims aligned with shipped reality. The persistence
+invariant now names `theme.cfg` (one word, preferences only) instead of claiming
+"no files at all"; TLS validation is correctly described as the bundled WebPKI
+(Mozilla) root set — the OS trust store is not consulted, so an OS-installed
+interception CA is rejected rather than trusted, and the threat model's
+mitigation advice was rewritten to match; zeroization claims are scoped to
+buffers QuotaPane owns; the auditable surface honestly includes the provider
+parsers and the CLI raw-debug path; and text-mode CLI output is documented as a
+summary (per-model rows and reset credits appear in `--json` and the window). No
+JSON key changed in this release.
+
 ## [1.3.0] - 2026-07-30
 
 Pace: know whether you will make it to reset, not just where you are.
