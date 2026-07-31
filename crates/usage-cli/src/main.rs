@@ -207,6 +207,21 @@ fn is_proxy_gate_error(err: &ProviderError) -> bool {
     )
 }
 
+/// Appended after an expired-token failure: the exact command that refreshes
+/// this provider's token.
+///
+/// Per provider, because the two CLIs differ — `claude` refreshes as a side
+/// effect of starting work, `codex` has an explicit `login`. A pure function of
+/// the id so the text is unit-testable without a poll.
+fn token_expired_hint(id: ProviderId) -> &'static str {
+    match id {
+        ProviderId::ClaudeSubscription => {
+            "hint: start any claude session (even `claude -p hi`) to refresh the token, then rerun"
+        }
+        ProviderId::CodexSubscription => "hint: run `codex login` to refresh the token, then rerun",
+    }
+}
+
 /// Replace the value of every [`PII_KEYS`] entry with [`REDACTED`], recursing
 /// through objects and arrays.
 ///
@@ -504,11 +519,20 @@ fn main() -> ExitCode {
 /// The gate lives in the egress chokepoint and is not weakened here: a refused
 /// run stays refused and still exits non-zero. All this adds is the sentence
 /// that turns "egress denied" into something actionable.
+///
+/// An expired token earns the same treatment, per provider. Unlike the proxy
+/// hint it is not deduplicated across a `--provider all` run: the two providers
+/// need different commands, so each failing one says its own.
 fn report_provider_error(id: ProviderId, err: &ProviderError, proxy_hint_shown: &mut bool) {
     eprintln!("error: {}: {err}", provider_cli_name(id));
     if is_proxy_gate_error(err) && !*proxy_hint_shown {
         eprintln!("{PROXY_GATE_HINT}");
         *proxy_hint_shown = true;
+    }
+    // Matched on the typed variant, not on message text — same discipline as
+    // the proxy hint above.
+    if matches!(err, ProviderError::TokenExpired) {
+        eprintln!("{}", token_expired_hint(id));
     }
 }
 
@@ -642,6 +666,22 @@ mod tests {
     fn provider_cli_names_map_correctly() {
         assert_eq!(provider_cli_name(ProviderId::ClaudeSubscription), "claude");
         assert_eq!(provider_cli_name(ProviderId::CodexSubscription), "codex");
+    }
+
+    // --- token_expired_hint: the refresh instruction ---
+
+    #[test]
+    fn token_expired_hints_name_the_exact_command() {
+        // Full equality: the milestone is the exact words, and `contains` would
+        // pass on a hint that had lost the command or the "then rerun".
+        assert_eq!(
+            token_expired_hint(ProviderId::ClaudeSubscription),
+            "hint: start any claude session (even `claude -p hi`) to refresh the token, then rerun"
+        );
+        assert_eq!(
+            token_expired_hint(ProviderId::CodexSubscription),
+            "hint: run `codex login` to refresh the token, then rerun"
+        );
     }
 
     // --- --provider parsing through parse_args (new) ---

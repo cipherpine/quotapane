@@ -247,6 +247,20 @@ fn not_signed_in_line(id: ProviderId) -> &'static str {
     }
 }
 
+/// The line shown when the stored token has expired — the most-seen error state
+/// in the product, so it names the exact command rather than the architecture.
+///
+/// Same shape and placement as [`not_signed_in_line`], and the same division of
+/// labour: refreshing happens in the provider's own CLI (invariant 6), and the
+/// poller keeps retrying, so the user is told both halves — what to run, and
+/// that QuotaPane picks it up by itself.
+fn token_expired_line(id: ProviderId) -> &'static str {
+    match id {
+        ProviderId::ClaudeSubscription => "token expired — start any claude session (even `claude -p hi`) to refresh it. QuotaPane recovers on its own within ~3 min.",
+        ProviderId::CodexSubscription => "token expired — run `codex login` to refresh it. QuotaPane recovers on its own within ~3 min.",
+    }
+}
+
 /// Whether a provider failure message indicates an absent credential file (as
 /// opposed to a genuine error worth a red banner). The credential loader
 /// reports a missing file as `credential file not found: <path>` (see
@@ -256,6 +270,17 @@ fn is_absent_credentials(message: &str) -> bool {
     message.contains("not found")
 }
 
+/// Whether a provider failure message is an expired OAuth token.
+///
+/// `OAuth token expired` is a stable marker on `ProviderError`'s `Display`
+/// (documented as such on the impl in `usage_core::providers`), matched the
+/// same way [`is_absent_credentials`] matches its own. A pin test asserts the
+/// core's real message classifies here, so a reworded error cannot silently
+/// demote this pane to a raw banner.
+fn is_token_expired(message: &str) -> bool {
+    message.starts_with("OAuth token expired")
+}
+
 /// How a provider's latest failure should be presented.
 #[derive(Debug, PartialEq, Eq)]
 enum FailureDisplay {
@@ -263,6 +288,9 @@ enum FailureDisplay {
     NoFailure,
     /// Credentials absent — show the quiet "not signed in" line, not an error.
     NotSignedIn,
+    /// Token expired — show the per-provider refresh instruction, not the raw
+    /// poller message.
+    TokenExpired,
     /// A genuine failure — show a red banner with the message.
     Banner,
 }
@@ -272,6 +300,7 @@ fn classify_failure(failure: Option<&str>) -> FailureDisplay {
     match failure {
         None => FailureDisplay::NoFailure,
         Some(msg) if is_absent_credentials(msg) => FailureDisplay::NotSignedIn,
+        Some(msg) if is_token_expired(msg) => FailureDisplay::TokenExpired,
         Some(_) => FailureDisplay::Banner,
     }
 }
@@ -1531,6 +1560,12 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
             // Quiet, non-alarming: absent credentials are expected when a user
             // only uses one provider. The other pane is unaffected.
             ui.colored_label(ui.visuals().weak_text_color(), not_signed_in_line(pane.id));
+        }
+        FailureDisplay::TokenExpired => {
+            // The instruction replaces the raw poller message rather than
+            // joining it: two lines saying the same thing, one of them in
+            // architecture terms, is what made the recovery non-obvious.
+            ui.colored_label(CARDINAL, token_expired_line(pane.id));
         }
         FailureDisplay::Banner => {
             if let Some(message) = &pane.latest_failure {
@@ -3371,6 +3406,23 @@ mod tests {
         assert!(codex.contains("codex login"));
     }
 
+    // --- token_expired_line: the refresh instruction ---
+
+    #[test]
+    fn token_expired_lines_name_the_exact_command() {
+        // Full equality, not `contains`: the whole point of this milestone is
+        // the exact words, and a `contains` check would pass on a line that had
+        // quietly lost the command or the "recovers on its own" half.
+        assert_eq!(
+            token_expired_line(ProviderId::ClaudeSubscription),
+            "token expired — start any claude session (even `claude -p hi`) to refresh it. QuotaPane recovers on its own within ~3 min."
+        );
+        assert_eq!(
+            token_expired_line(ProviderId::CodexSubscription),
+            "token expired — run `codex login` to refresh it. QuotaPane recovers on its own within ~3 min."
+        );
+    }
+
     // --- is_absent_credentials: absent-credential detection ---
 
     #[test]
@@ -3386,7 +3438,7 @@ mod tests {
         // None of the other ProviderError Display strings contain "not found".
         for msg in [
             "egress error: egress denied: host \"chatgpt.com:8443\" is not on the allowlist",
-            "OAuth token expired — refresh via the provider's official CLI (`claude` or `codex login`), then retry",
+            "OAuth token expired — refresh it in the provider's official CLI (start a `claude` session, or run `codex login`); QuotaPane retries automatically",
             "rate limited by provider; retry after 30s",
             "provider response could not be interpreted",
             "credential error: failed to read credential file /x: permission denied",
@@ -3407,6 +3459,21 @@ mod tests {
         assert_eq!(
             classify_failure(Some("provider response could not be interpreted")),
             FailureDisplay::Banner
+        );
+    }
+
+    /// The load-bearing pin of this milestone: the core's real `TokenExpired`
+    /// message, produced by `Display` rather than copied here, must land in the
+    /// `TokenExpired` treatment. Rewording the core marker or the UI matcher
+    /// without the other fails CI instead of silently degrading the pane to a
+    /// raw error banner that explains nothing.
+    #[test]
+    fn the_core_expired_token_message_classifies_as_token_expired() {
+        use usage_core::providers::ProviderError;
+
+        assert_eq!(
+            classify_failure(Some(&ProviderError::TokenExpired.to_string())),
+            FailureDisplay::TokenExpired
         );
     }
 

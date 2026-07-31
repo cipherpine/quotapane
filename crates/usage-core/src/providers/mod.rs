@@ -57,6 +57,14 @@ impl From<EgressError> for ProviderError {
     }
 }
 
+/// Human-readable, non-secret text for each variant.
+///
+/// The `OAuth token expired` prefix of the [`ProviderError::TokenExpired`] arm
+/// is a **stable marker**, not incidental wording: `usage-ui` classifies a
+/// failure by matching on it (the same pattern as its absent-credential
+/// detection) and shows per-provider refresh instructions instead of a raw
+/// error banner. A pin test in `usage-ui` welds the two together — renaming the
+/// prefix without updating that matcher fails CI, which is the point.
 impl std::fmt::Display for ProviderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -64,8 +72,9 @@ impl std::fmt::Display for ProviderError {
             ProviderError::Credential(msg) => write!(f, "credential error: {msg}"),
             ProviderError::TokenExpired => write!(
                 f,
-                "OAuth token expired — refresh via the provider's official CLI \
-                 (`claude` or `codex login`), then retry"
+                "OAuth token expired — refresh it in the provider's official CLI \
+                 (start a `claude` session, or run `codex login`); \
+                 QuotaPane retries automatically"
             ),
             ProviderError::RateLimited {
                 retry_after_secs: Some(s),
@@ -98,4 +107,25 @@ pub trait UsageProvider {
     fn poll(&self, http: &Egress) -> Result<ProviderSnapshot, ProviderError>;
     /// Current cadence hint for the poller.
     fn cadence(&self) -> Cadence;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_expired_token_message_names_the_action_for_both_providers() {
+        // Byte-exact: this is the most-seen error state in the product, and the
+        // string is written on one line here precisely so it can be read (and
+        // grepped) as the user will see it.
+        assert_eq!(
+            ProviderError::TokenExpired.to_string(),
+            "OAuth token expired — refresh it in the provider's official CLI (start a `claude` session, or run `codex login`); QuotaPane retries automatically"
+        );
+        // The prefix `usage-ui` keys on. Its own pin test asserts the matcher
+        // side; this one asserts the marker is where the matcher expects it.
+        assert!(ProviderError::TokenExpired
+            .to_string()
+            .starts_with("OAuth token expired"));
+    }
 }
