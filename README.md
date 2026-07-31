@@ -169,6 +169,24 @@ The system tray is **Windows and macOS only**. On Linux, QuotaPane is window-onl
 
 Deferred to after 1.0: usage history and sparklines, forecast-to-limit, configurable thresholds and alerts, an optional token-free `OtelSource` (the only acceptable route to any cost view), and package-manager distribution (WinGet / Homebrew / AUR).
 
+## FAQ
+
+### Why does it say my token expired?
+
+QuotaPane has no login of its own — it reads the credential files the
+official `claude` / `codex` CLIs keep on your machine, and it never
+writes them. When the stored token's lifetime runs out, QuotaPane fails
+closed: it stops sending the stale token and shows the message instead.
+
+The refresh happens in the provider's CLI, not in QuotaPane:
+
+- **Claude** — start any `claude` session (even `claude -p hi`). The
+  CLI refreshes its token file as it starts working.
+- **Codex** — run `codex login`.
+
+That's all. QuotaPane rechecks every 3 minutes while a token is
+expired and recovers on its own — no restart, no clicks.
+
 ## Disclaimer
 
 QuotaPane is an independent, community project — **not affiliated with, endorsed, or supported by Anthropic or OpenAI.** The subscription/quota view relies on **undocumented endpoints that may change or break at any time**, uses **your own local credentials only**, bypasses no authentication, and scrapes nothing. To read subscription usage, QuotaPane sends the same `User-Agent: claude-code/<version>` header the official Claude Code client uses — the endpoint rate-limits requests without it — so these requests **present as the official client**; the Codex provider likewise sends the Codex CLI's default `User-Agent` (`codex-cli`). Each provider queries only the endpoint its official client already calls, with your own token, read-only. Use at your own risk.
