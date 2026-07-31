@@ -351,6 +351,23 @@ fn is_stale(age: Duration) -> bool {
     age >= STALE_AFTER
 }
 
+/// Whether the at-risk pace line should be drawn for data of this age.
+///
+/// A forecast is an extrapolation from the last couple of hours; extrapolating
+/// from data the footer is simultaneously calling stale is not a forecast, it
+/// is misinformation, and it is stated with more confidence than the rest of
+/// the pane. So the line goes quiet on exactly [`is_stale`]'s boundary — one
+/// predicate, deliberately adjacent to it, so the two cannot drift apart.
+///
+/// An unknown age keeps drawing, consistent with how `None` is treated
+/// elsewhere: the pane declines to assert staleness it cannot measure.
+///
+/// Rendering only. The ring is still fed and the forecast still computed and
+/// stored; when a fresh poll lands, the line simply reappears.
+fn show_pace_warning(age: Option<Duration>) -> bool {
+    !age.is_some_and(is_stale)
+}
+
 /// Bar color for a quota window's used fraction: pine/amber/cardinal by
 /// severity threshold, or gray when the fraction is unknown.
 ///
@@ -1582,7 +1599,9 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
 /// user clicked the toggle this frame; the caller owns the flip.
 ///
 /// `pace` is the pane's at-risk line, already selected and already computed off
-/// a poll event ([`ProviderPane::ingest_pace`]) — this function only draws it.
+/// a poll event ([`ProviderPane::ingest_pace`]) — this function only draws it,
+/// and only while the snapshot is fresh enough to extrapolate from
+/// ([`show_pace_warning`]).
 fn render_windows(
     ui: &mut egui::Ui,
     snapshot: &ProviderSnapshot,
@@ -1597,8 +1616,10 @@ fn render_windows(
 
     // The at-risk forecast, directly under the bars it is about — one line at
     // most, and absent entirely when nothing is at risk. Calm is silent: a pane
-    // that is fine looks exactly as it did before this milestone.
-    if let Some(warning) = pace {
+    // that is fine looks exactly as it did before this milestone. Stale is
+    // silent too (see `show_pace_warning`): the footer already says the data is
+    // dead, and a projection drawn off dead data would contradict it.
+    if let Some(warning) = pace.filter(|_| show_pace_warning(age)) {
         ui.label(
             egui::RichText::new(pace_warning_line(warning))
                 .small()
@@ -3024,6 +3045,55 @@ mod tests {
             "a long at-risk label wanted {}px inside {}px",
             long.width,
             long.available_width
+        );
+    }
+
+    // --- M10: the at-risk line goes quiet on stale data ---
+
+    #[test]
+    fn the_at_risk_line_is_suppressed_exactly_when_the_footer_says_stale() {
+        // Fresh forecasts.
+        assert!(show_pace_warning(Some(Duration::from_secs(1))));
+        assert!(show_pace_warning(Some(
+            STALE_AFTER - Duration::from_secs(1)
+        )));
+        // The boundary is `is_stale`'s own, not a second opinion about it —
+        // asserted against the predicate so moving STALE_AFTER moves both.
+        assert_eq!(show_pace_warning(Some(STALE_AFTER)), !is_stale(STALE_AFTER));
+        assert!(!show_pace_warning(Some(STALE_AFTER)));
+        // Well past it.
+        assert!(!show_pace_warning(Some(STALE_AFTER * 10)));
+        // Unknown age keeps drawing, as everywhere else in the pane.
+        assert!(show_pace_warning(None));
+    }
+
+    #[test]
+    fn stale_data_draws_no_at_risk_line() {
+        // The helper being right is not the same as it being wired in: this
+        // measures the rendered pane, so a gate that got factored out but never
+        // called would fail here.
+        let snapshot = per_model_snapshot(vec![]);
+        let render = |age: Duration, pace: Option<&PaceWarning>| {
+            lay_out(|ui| {
+                render_windows(ui, &snapshot, Some(age), false, Theme::CipherPine, pace);
+            })
+        };
+        let at_risk = warning("5h", 6_000);
+
+        // Stale: the warned pane is exactly the silent pane — no line, no gap.
+        let stale = STALE_AFTER + Duration::from_secs(1);
+        assert_eq!(
+            render(stale, Some(&at_risk)).height,
+            render(stale, None).height,
+            "a stale pane drew the at-risk line anyway"
+        );
+
+        // Fresh: unchanged from M8 — the line is still there. Both directions
+        // together, so this cannot pass by suppressing the line everywhere.
+        let fresh = Duration::from_secs(30);
+        assert!(
+            render(fresh, Some(&at_risk)).height > render(fresh, None).height,
+            "a fresh pane stopped drawing the at-risk line"
         );
     }
 
