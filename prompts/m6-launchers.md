@@ -656,3 +656,17 @@ URL — the owner publishes. Phase 4 (after publish confirmation): the
 exact §4a M9 ✅ stamp, push, CI green, STOP. No code changes, no new
 dependencies, nothing published by you.
 ```
+
+## M10 — expired-token UX (v1.4.1 slice)
+
+```
+You are a floor session for QuotaPane (C:\dev\QuotaPane\QuotaPane). Read DECISIONS.md fully first — §3, §4, §4a, §4.4, §4.7, §4.8 govern everything you do. Then read prompts/m10-token-ux.md and execute it exactly.
+
+Scope: three phases, three commits, in order. (1) Per-provider expired-token copy: core Display fallback in providers/mod.rs, FailureDisplay::TokenExpired + token_expired_line in usage-ui, CLI hint lines in usage-cli, plus the pin test welding the core marker to the UI matcher. (2) Suppress the at-risk pace line when the pane's data is stale — rendering only; the pace math and tick are untouched. (3) README FAQ section. Every user-visible string is given byte-exact in the spec — no rewording, no punctuation changes.
+
+Hard limits: zero new dependencies. No §4.1 path may change (crates/usage-core/src/egress/**, credentials/**, any security-invariant test, deny.toml, SECURITY.md, THREAT_MODEL.md, .github/**, .cargo/**, .claude/**) — a change that seems to need one is a STOP and a report, not a workaround. No version bump, no CHANGELOG edit — both belong to M10-RELEASE.
+
+The §3 bar runs green before every commit: cargo fmt --check; cargo clippy --all-targets -- -D warnings; full cargo test.
+
+End gate: push all three commits, wait for CI 7/7 green, then report the three SHAs, the test-count delta, verbatim-grep proof of each exact string, and a diff-stat proof that no §4.1 path changed. Then STOP. Acceptance belongs to the owner.
+```
