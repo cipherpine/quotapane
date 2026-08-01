@@ -5,6 +5,32 @@ All notable changes to QuotaPane are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-08-01
+
+A small patch: the expired-token experience now explains itself.
+
+### Changed
+
+- **The expired-token message names the exact refresh action.** Each pane
+  says what to do — start any `claude` session (even `claude -p hi`), or run
+  `codex login` — and that QuotaPane recovers on its own within ~3 minutes of
+  the refresh: no restart, no clicks. The CLI prints the same hint. QuotaPane
+  itself has no login and never writes credential files; refresh always
+  happens in the provider's official CLI.
+- **The at-risk pace line goes quiet when data is stale.** A burn-rate
+  forecast extrapolated from stale data is misinformation; once a pane
+  crosses the 10-minute staleness threshold the "at this pace: …" line is
+  suppressed until fresh data arrives. The pace tick on each bar still
+  draws — elapsed time is a fact of the clock, not of the data.
+
+### Added
+
+- **README FAQ** — "Why does it say my token expired?": what the message
+  means, why QuotaPane cannot refresh the token itself, and how recovery
+  works.
+
+No JSON key changed in this release. Zero new dependencies.
+
 ## [1.4.0] - 2026-07-31
 
 The security-review release: an owner-commissioned adversarial review of the
