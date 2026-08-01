@@ -670,3 +670,15 @@ The §3 bar runs green before every commit: cargo fmt --check; cargo clippy --al
 
 End gate: push all three commits, wait for CI 7/7 green, then report the three SHAs, the test-count delta, verbatim-grep proof of each exact string, and a diff-stat proof that no §4.1 path changed. Then STOP. Acceptance belongs to the owner.
 ```
+
+## M10-RELEASE — v1.4.1
+
+```
+You are a floor release session for QuotaPane (C:\dev\QuotaPane\QuotaPane). Read CLAUDE.md, then DECISIONS.md in full — §3, §4, §4a, §4.7 govern; §4 stops override everything. Then read prompts/m10-release.md and execute it exactly.
+
+This is the proven release pipeline, sixth run. TWO HARD STOPS, both mandatory: Phase 2 (v1.4.1-rc.1 dry run: release 3/3, six-step outsider verification in a clean directory, six negative controls per the four-rule standard in the spec — both attestation subjects digest-matched, each control asserted on its specific error and restored before the next, tamper controls proving before/after digests differ, wrong-repo control against a confirmed-existing repo) ends in a report and a WAIT for the top tier's explicit written go-ahead. Phase 3 (tag v1.4.1 on the verified commit, re-verify fresh, prune the rc, hand back the draft URL) ends in a STOP — the owner publishes, never you. Phase 4 runs only after the owner confirms publication: two §4a byte-exact DECISIONS.md replacements from the spec, push, CI 7/7, STOP.
+
+Phase 1 first: version 1.4.0 → 1.4.1 (lock moves only the three workspace members), the CHANGELOG entry verbatim from the spec, §3 bar, push, CI 7/7 green before any tag.
+
+Preconditions gate everything: tip 33749eb, tree clean, version 1.4.0, tags exactly v1.0.0–v1.4.0 — any mismatch is a STOP, not a workaround. Do not touch code, .github/, README.md, or any §4.1 path (Phase 4's DECISIONS patches excepted, verbatim). Zero new dependencies. Skipping either stop is a §4 violation.
+```
