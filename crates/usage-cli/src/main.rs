@@ -1155,6 +1155,7 @@ mod tests {
 
     // --- M9b: --allow-proxy is the only proxy opt-in surface ---
 
+    // INV:7 — registered in invariants.manifest (checked in CI)
     #[test]
     fn allow_proxy_defaults_off_and_is_the_only_input_that_turns_it_on() {
         // The default must be off: the whole point of invariant 7 is that
@@ -1223,6 +1224,7 @@ mod tests {
         );
     }
 
+    // INV:7 — registered in invariants.manifest (checked in CI)
     #[test]
     fn proxy_gate_refusal_is_matched_on_the_variant_not_the_message() {
         use usage_core::egress::EgressError;
@@ -1258,6 +1260,7 @@ mod tests {
         }
     }
 
+    // INV:7 — registered in invariants.manifest (checked in CI)
     #[test]
     fn help_documents_the_proxy_flag_and_its_fail_closed_default() {
         assert!(HELP.contains("--allow-proxy"), "{HELP}");

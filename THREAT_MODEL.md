@@ -127,7 +127,9 @@ Stating these plainly is part of being trustworthy:
 This table is honest about its two kinds of rows: invariants that assert a
 **behavior** are backed by named tests; invariants that assert an **absence**
 (1, 5) are enforced by there being no code path — the control is the empty
-grep, re-checked at every review touching the trust boundary (§11).
+grep, re-checked at every review touching the trust boundary (§11). The
+test column below is machine-checked: `invariants.manifest` binds each
+invariant to its tests and CI's `invariants` job fails on drift.
 
 | Invariant (`SECURITY.md`) | Enforcing control | Test / check |
 |---|---|---|

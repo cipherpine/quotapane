@@ -511,6 +511,7 @@ mod tests {
         }
     }
 
+    // INV:2 — registered in invariants.manifest (checked in CI)
     #[test]
     fn failures_are_forwarded_as_non_secret_messages() {
         let handle = spawn(

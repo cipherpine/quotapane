@@ -272,6 +272,7 @@ mod tests {
 
     /// SECURITY.md invariant 3 / THREAT_MODEL.md §9 row 3:
     /// a non-allowlisted host is a hard error.
+    // INV:3,5 — registered in invariants.manifest (checked in CI)
     #[test]
     fn non_allowlisted_host_is_rejected() {
         for host in [
@@ -295,6 +296,7 @@ mod tests {
         }
     }
 
+    // INV:3 — registered in invariants.manifest (checked in CI)
     #[test]
     fn allowlisted_hosts_pass_host_check() {
         for host in ALLOWED_HOSTS {
@@ -306,6 +308,7 @@ mod tests {
 
     /// End-to-end through the public API: the denial holds at the chokepoint,
     /// not just in the helper. (Denied before any dial — no network in tests.)
+    // INV:3 — registered in invariants.manifest (checked in CI)
     #[test]
     fn get_refuses_non_allowlisted_host() {
         let egress = Egress::new(false);
@@ -321,6 +324,7 @@ mod tests {
     /// A path that does not start with `/` could smuggle userinfo or an
     /// alternate authority into the composed URL (`…com@evil.com/…`).
     /// Rejected before any dial.
+    // INV:3 — registered in invariants.manifest (checked in CI)
     #[test]
     fn authority_smuggling_paths_are_rejected() {
         let egress = Egress::new(false);
@@ -343,6 +347,7 @@ mod tests {
     }
 
     /// SECURITY.md invariant 7: proxy env present without opt-in fails closed.
+    // INV:7 — registered in invariants.manifest (checked in CI)
     #[test]
     fn proxy_env_without_opt_in_fails_closed() {
         let env = vec![("HTTPS_PROXY".to_string(), "http://gateway:3128".to_string())];
@@ -355,12 +360,14 @@ mod tests {
         );
     }
 
+    // INV:7 — registered in invariants.manifest (checked in CI)
     #[test]
     fn proxy_env_with_explicit_opt_in_passes_the_gate() {
         let env = vec![("HTTPS_PROXY".to_string(), "http://gateway:3128".to_string())];
         Egress::check_proxy_gate(true, &env).unwrap();
     }
 
+    // INV:7 — registered in invariants.manifest (checked in CI)
     #[test]
     fn empty_proxy_vars_do_not_trigger_the_gate() {
         let env = vec![("HTTPS_PROXY".to_string(), String::new())];
@@ -369,6 +376,7 @@ mod tests {
 
     /// The error type must never carry secret bytes: exercise every variant's
     /// Display/Debug against a marker string.
+    // INV:2 — registered in invariants.manifest (checked in CI)
     #[test]
     fn egress_errors_never_echo_secrets() {
         let marker = "synthetic-token-MARKER-000";

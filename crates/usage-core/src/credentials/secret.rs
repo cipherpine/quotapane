@@ -76,6 +76,7 @@ mod tests {
 
     const SYNTHETIC: &str = "synthetic-bearer-XYZZY-0000-not-real";
 
+    // INV:2 — registered in invariants.manifest (checked in CI)
     #[test]
     fn debug_and_display_are_redacted() {
         let s = Secret::new(SYNTHETIC.to_string());
@@ -87,6 +88,7 @@ mod tests {
         assert_eq!(display, REDACTED);
     }
 
+    // INV:2 — registered in invariants.manifest (checked in CI)
     #[test]
     fn redaction_survives_nested_formatting() {
         // Secrets embedded in larger structures must still redact.
@@ -95,6 +97,7 @@ mod tests {
         assert!(!wrapped.contains("XYZZY"));
     }
 
+    // INV:2 — registered in invariants.manifest (checked in CI)
     #[test]
     fn explicit_zeroize_wipes_contents() {
         let mut s = Secret::new(SYNTHETIC.to_string());
@@ -105,6 +108,7 @@ mod tests {
         );
     }
 
+    // INV:2 — registered in invariants.manifest (checked in CI)
     #[test]
     fn zeroize_on_drop_is_guaranteed_by_the_type_system() {
         // Compile-time assertion: Secret<T> implements ZeroizeOnDrop, so the

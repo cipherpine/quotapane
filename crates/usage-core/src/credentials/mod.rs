@@ -118,6 +118,7 @@ mod tests {
         p
     }
 
+    // INV:1,6 — registered in invariants.manifest (checked in CI)
     #[test]
     fn loads_credential_readonly_and_redacted() {
         let path = fixture_path("cred.json");
@@ -147,6 +148,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
+    // INV:2 — registered in invariants.manifest (checked in CI)
     #[test]
     fn missing_file_is_a_clean_error_without_secret_bytes() {
         let path = fixture_path("does-not-exist.json");
@@ -157,6 +159,7 @@ mod tests {
         }
     }
 
+    // INV:2 — registered in invariants.manifest (checked in CI)
     #[test]
     fn error_display_never_panics_and_has_no_token() {
         let err = CredentialError::Io {

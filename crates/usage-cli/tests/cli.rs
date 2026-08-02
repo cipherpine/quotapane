@@ -144,6 +144,7 @@ fn version_exits_zero_and_prints_the_workspace_version() {
 
 // --- M9b: the proxy gate, end to end ---
 
+// INV:7 — registered in invariants.manifest (checked in CI)
 #[test]
 fn proxy_env_without_the_flag_fails_closed_and_prints_the_hint() {
     // The gate itself is egress's (SECURITY.md invariant 7) and is untouched
@@ -169,6 +170,7 @@ fn proxy_env_without_the_flag_fails_closed_and_prints_the_hint() {
     );
 }
 
+// INV:7 — registered in invariants.manifest (checked in CI)
 #[test]
 fn lowercase_proxy_env_fails_closed_too() {
     // Pins the invariant's "upper- or lowercase" claim. The helper clears the
@@ -186,6 +188,7 @@ fn lowercase_proxy_env_fails_closed_too() {
     );
 }
 
+// INV:7 — registered in invariants.manifest (checked in CI)
 #[test]
 fn allow_proxy_prints_the_token_visibility_warning_and_passes_the_gate() {
     // With the flag the gate no longer refuses, so the run proceeds past it

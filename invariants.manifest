@@ -1,0 +1,65 @@
+# invariants.manifest — SECURITY.md "Security invariants" <-> test traceability, machine-checked.
+#
+# Checked by tools/check-invariants.py (CI job: invariants). The checker fails when:
+#   - this file and SECURITY.md's numbered invariant list disagree on the id set;
+#   - a `test:` entry names a function that does not exist in the tree;
+#   - a test tagged `// INV:<ids>` in source is missing from this file, or vice versa
+#     (the tag<->manifest pairing is set-equal in both directions);
+#   - a kind=absence entry lacks `enforced-by:`, or names a ci-job absent from ci.yml.
+#
+# Grammar (one block per invariant, blank-line separated):
+#   invariant <N>: <one-line claim summary>
+#   kind: test-backed | absence
+#   enforced-by: <free text; "ci-job <name>" is asserted to exist in .github/workflows/ci.yml>
+#   test: <path>::<fn>   (repeatable; each must carry a matching // INV:<N> tag in source)
+#
+# Editing rules: this file is a §4.1 protected path — top tier only. A new or changed
+# security claim lands with its manifest entry in the SAME commit (the same-change rule).
+
+invariant 1: No credential persistence — no code path writes a token; the only file ever written is theme.cfg (one word, preferences only).
+kind: absence
+enforced-by: absence of any credential write path in the workspace; re-checked at every trust-boundary review (THREAT_MODEL §9 row 1, §11)
+test: crates/usage-core/src/credentials/mod.rs::loads_credential_readonly_and_redacted
+
+invariant 2: No credential leakage — Secret<T> zeroizes on drop and redacts in Debug/Display; every failure path carries no token bytes.
+kind: test-backed
+test: crates/usage-core/src/credentials/secret.rs::debug_and_display_are_redacted
+test: crates/usage-core/src/credentials/secret.rs::redaction_survives_nested_formatting
+test: crates/usage-core/src/credentials/secret.rs::explicit_zeroize_wipes_contents
+test: crates/usage-core/src/credentials/secret.rs::zeroize_on_drop_is_guaranteed_by_the_type_system
+test: crates/usage-core/src/credentials/mod.rs::missing_file_is_a_clean_error_without_secret_bytes
+test: crates/usage-core/src/credentials/mod.rs::error_display_never_panics_and_has_no_token
+test: crates/usage-core/src/poller/mod.rs::failures_are_forwarded_as_non_secret_messages
+test: crates/usage-core/src/egress/mod.rs::egress_errors_never_echo_secrets
+
+invariant 3: Deny-by-default egress — compile-time two-host allowlist; a request to any other host is a hard error.
+kind: test-backed
+test: crates/usage-core/src/egress/mod.rs::non_allowlisted_host_is_rejected
+test: crates/usage-core/src/egress/mod.rs::allowlisted_hosts_pass_host_check
+test: crates/usage-core/src/egress/mod.rs::get_refuses_non_allowlisted_host
+test: crates/usage-core/src/egress/mod.rs::authority_smuggling_paths_are_rejected
+
+invariant 4: No first-party telemetry — nothing is collected or transmitted to anyone.
+kind: absence
+enforced-by: ci-job no-telemetry (dependency and source greps, every push)
+
+invariant 5: No self-update — no updater or update check exists in the codebase at all.
+kind: absence
+enforced-by: absence of any updater code path; the invariant-3 allowlist leaves a covert updater nowhere to call
+test: crates/usage-core/src/egress/mod.rs::non_allowlisted_host_is_rejected
+
+invariant 6: Read-only credentials — credential files are opened read-only; refresh is delegated to the official CLIs; auth.json is never written.
+kind: test-backed
+test: crates/usage-core/src/credentials/mod.rs::loads_credential_readonly_and_redacted
+
+invariant 7: Proxy is opt-in, CLI-only, and fail-closed — a set proxy variable means nothing is sent without quotapane-cli --allow-proxy; the window has no opt-in surface.
+kind: test-backed
+test: crates/usage-core/src/egress/mod.rs::proxy_env_without_opt_in_fails_closed
+test: crates/usage-core/src/egress/mod.rs::proxy_env_with_explicit_opt_in_passes_the_gate
+test: crates/usage-core/src/egress/mod.rs::empty_proxy_vars_do_not_trigger_the_gate
+test: crates/usage-cli/src/main.rs::allow_proxy_defaults_off_and_is_the_only_input_that_turns_it_on
+test: crates/usage-cli/src/main.rs::proxy_gate_refusal_is_matched_on_the_variant_not_the_message
+test: crates/usage-cli/src/main.rs::help_documents_the_proxy_flag_and_its_fail_closed_default
+test: crates/usage-cli/tests/cli.rs::proxy_env_without_the_flag_fails_closed_and_prints_the_hint
+test: crates/usage-cli/tests/cli.rs::lowercase_proxy_env_fails_closed_too
+test: crates/usage-cli/tests/cli.rs::allow_proxy_prints_the_token_visibility_warning_and_passes_the_gate

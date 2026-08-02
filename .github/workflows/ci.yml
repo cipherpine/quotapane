@@ -111,3 +111,14 @@ jobs:
         # --redact: a finding must never print candidate secret bytes into
         # a CI log (the log would out-leak the leak).
         run: ./gitleaks git --no-banner --redact .
+
+  invariants:
+    name: invariants — manifest, docs, and tests agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check invariant traceability
+        # invariants.manifest <-> SECURITY.md numbered list <-> // INV tags on
+        # tests, set-equal in every direction. A security claim cannot drift
+        # from the code that proves it without this job going red.
+        run: python3 tools/check-invariants.py
