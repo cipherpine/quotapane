@@ -95,7 +95,7 @@ cmp -s "$TW" "$TL" || { INV_OK=0; note "  TOOLCHAIN.txt differs between archives
 [ "$INV_OK" = 1 ] && pass "step 5: inventory + identical TOOLCHAIN.txt" || fail "step 5: inventory"
 
 # ---- step 6: run the shipped CLI (platform-appropriate; no credentials) -----
-BIN=""
+BIN=""; STEP6="ran"
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) BIN="$(find x_win -name quotapane-cli.exe | head -1)";;
   Linux)                BIN="$(find x_lin -name quotapane-cli    | head -1)"; chmod +x "$BIN" 2>/dev/null;;
@@ -104,6 +104,7 @@ if [ -n "$BIN" ]; then
   V="$("$BIN" --version 2>&1)" && grep -q "${TAG#v}" <<<"$V" && "$BIN" --help >/dev/null 2>&1 \
     && pass "step 6: shipped CLI runs ($V)" || fail "step 6: shipped CLI ($V)"
 else
+  STEP6="skipped"
   note "step 6: SKIP — no binary for this host platform (record as skipped, not passed)"
 fi
 
@@ -181,7 +182,11 @@ verify_att "$WIN" "$REPO" >/dev/null && verify_att "$LIN" "$REPO" >/dev/null || 
 
 # ---- verdict ------------------------------------------------------------------
 if [ "$FAILURES" -eq 0 ]; then
-  echo "RESULT: PASS — $TAG: six steps, six controls, R1-R4"
+  if [ "$STEP6" = "ran" ]; then
+    echo "RESULT: PASS — $TAG: six steps, six controls, R1-R4"
+  else
+    echo "RESULT: PASS — $TAG: five of six steps (step 6 skipped: no binary for this host), six controls, R1-R4"
+  fi
   exit 0
 else
   echo "RESULT: FAIL — $FAILURES check(s) failed for $TAG"

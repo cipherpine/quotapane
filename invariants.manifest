@@ -13,6 +13,12 @@
 #   enforced-by: <free text; "ci-job <name>" is asserted to exist in .github/workflows/ci.yml>
 #   test: <path>::<fn>   (repeatable; each must carry a matching // INV:<N> tag in source)
 #
+# Guarantee limits (M11-VERIFY F1/F2): the checker proves each named test is
+# LIVE (uncommented, #[test], not #[ignore]d) and that each claim HEADLINE
+# matches SECURITY.md's bold lead phrase. Prose beyond the headline and the
+# CONTENT of a test body are not machine-checked — human review of both
+# remains load-bearing.
+#
 # Editing rules: this file is a §4.1 protected path — top tier only. A new or changed
 # security claim lands with its manifest entry in the SAME commit (the same-change rule).
 

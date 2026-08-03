@@ -2,8 +2,16 @@
 """Invariant traceability checker (CI job: invariants).
 
 Enforces that invariants.manifest, SECURITY.md's numbered invariant list,
-and the `// INV:<ids>` tags on tests in the tree all agree. Stdlib only.
+and the `// INV:<ids>` tags on tests in the tree all agree; that every
+manifest-named test is LIVE (uncommented, carries an uncommented #[test],
+and is not #[ignore]d); and that each invariant's SECURITY.md claim
+headline (the bold lead phrase) matches the manifest summary. Stdlib only.
 Exit 0 = coherent; exit 1 = drift, with every violation listed.
+
+Guarantee limits, stated so they are not overread (M11-VERIFY F1/F2):
+prose BEYOND the claim headline is not machine-checked, and a test's
+BODY is not judged — human review of SECURITY.md prose and of test
+content remains load-bearing.
 
 This file is a §4.1 protected path — top tier only.
 """
@@ -26,6 +34,7 @@ if not manifest_path.exists():
     sys.exit(1)
 
 inv_ids = []            # [int]
+inv_summary = {}        # id -> one-line claim summary
 inv_kind = {}           # id -> "test-backed" | "absence"
 inv_enforced = {}       # id -> str
 manifest_pairs = set()  # (id, "path::fn")
@@ -41,6 +50,7 @@ for lineno, raw in enumerate(manifest_path.read_text(encoding="utf-8").splitline
         if current in inv_ids:
             err(f"manifest:{lineno}: duplicate invariant id {current}")
         inv_ids.append(current)
+        inv_summary[current] = m.group(2).strip()
         continue
     if current is None:
         err(f"manifest:{lineno}: content before any invariant block: {line!r}")
@@ -77,23 +87,77 @@ if not m:
     err("SECURITY.md: could not locate the '## Security invariants' section")
 else:
     sec_ids = [int(n) for n in re.findall(r"^(\d+)\. \*\*", m.group(1), re.M)]
+    # Claim headlines: "N. **Bold lead phrase.**" -> head = text up to the
+    # first "." or " — ", which must prefix the manifest summary (F2).
+    sec_heads = {int(n): t for n, t in
+                 re.findall(r"^(\d+)\. \*\*(.+?)\*\*", m.group(1), re.M)}
     if sec_ids != sorted(set(sec_ids)):
         err(f"SECURITY.md: invariant numbering is not strictly increasing: {sec_ids}")
     if set(sec_ids) != set(inv_ids):
         err(f"id drift: SECURITY.md lists invariants {sorted(set(sec_ids))} "
             f"but the manifest lists {sorted(set(inv_ids))}")
+    for i, head in sorted(sec_heads.items()):
+        stop = len(head)
+        for sep in (".", " \u2014 "):
+            k = head.find(sep)
+            if k != -1:
+                stop = min(stop, k)
+        head = head[:stop].strip()
+        summary = inv_summary.get(i, "")
+        if head and not summary.startswith(head):
+            err(f"invariant {i}: claim-headline drift — SECURITY.md says "
+                f"{head!r} but the manifest summary starts "
+                f"{summary[:60]!r}")
 
 # ---------- 4. Every manifest test exists in the tree ----------
-fn_cache = {}
+def is_comment(line: str) -> bool:
+    return line.lstrip().startswith("//")
+
+
+def find_live_test(lines, fn):
+    """Return (found, problems) for fn as a LIVE test in these lines."""
+    pat = re.compile(rf"\bfn {re.escape(fn)}\s*\(")
+    for i, line in enumerate(lines):
+        if not pat.search(line) or is_comment(line):
+            continue
+        # Walk the attribute/comment block above the fn.
+        has_test, has_ignore = False, False
+        j = i - 1
+        while j >= 0:
+            stripped = lines[j].strip()
+            if stripped.startswith("#["):
+                if "#[test]" in stripped:
+                    has_test = True
+                if "ignore" in stripped:
+                    has_ignore = True
+                j -= 1
+            elif is_comment(lines[j]) or not stripped:
+                j -= 1
+            else:
+                break
+        problems = []
+        if not has_test:
+            problems.append("no uncommented #[test] attribute above it")
+        if has_ignore:
+            problems.append("carries #[ignore] — the test does not run")
+        return True, problems
+    return False, []
+
+
+lines_cache = {}
 for inv, entry in sorted(manifest_pairs):
     path_s, fn = entry.rsplit("::", 1)
     p = ROOT / path_s
     if not p.exists():
         err(f"invariant {inv}: test file missing: {path_s}")
         continue
-    text = fn_cache.setdefault(path_s, p.read_text(encoding="utf-8"))
-    if not re.search(rf"\bfn {re.escape(fn)}\s*\(", text):
-        err(f"invariant {inv}: fn {fn} not found in {path_s}")
+    lines = lines_cache.setdefault(
+        path_s, p.read_text(encoding="utf-8").splitlines())
+    found, problems = find_live_test(lines, fn)
+    if not found:
+        err(f"invariant {inv}: fn {fn} not found LIVE (uncommented) in {path_s}")
+    for prob in problems:
+        err(f"invariant {inv}: fn {fn} in {path_s}: {prob}")
 
 # ---------- 5. Source tags <-> manifest, set-equal both directions ----------
 tag_pairs = set()
@@ -105,9 +169,17 @@ for p in sorted((ROOT / "crates").rglob("*.rs")):
         if not tm:
             continue
         ids = [int(x) for x in tm.group(1).split(",") if x]
+        if line.lstrip().startswith("//") and "INV:" in line and \
+                not line.lstrip().startswith("// INV:"):
+            # A tag inside ordinary commented-out code (e.g. "// // INV:2")
+            # is dead text; skip it so dead blocks cannot satisfy set-equality.
+            continue
         fn_name = None
         for j in range(i + 1, min(i + 6, len(lines))):
-            fm = re.search(r"\bfn (\w+)\s*\(", lines[j])
+            cand = lines[j]
+            if cand.lstrip().startswith("//"):
+                continue
+            fm = re.search(r"\bfn (\w+)\s*\(", cand)
             if fm:
                 fn_name = fm.group(1)
                 break
