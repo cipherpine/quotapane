@@ -17,3 +17,7 @@ auth.json
 
 # Local Claude staging folder (not part of the project)
 /_claude_setup/
+
+# local dispatcher logs (M11d) — never committed
+reports/dispatch/
+prompts/queue/
