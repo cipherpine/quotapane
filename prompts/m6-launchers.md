@@ -682,3 +682,15 @@ Phase 1 first: version 1.4.0 → 1.4.1 (lock moves only the three workspace memb
 
 Preconditions gate everything: tip 33749eb, tree clean, version 1.4.0, tags exactly v1.0.0–v1.4.0 — any mismatch is a STOP, not a workaround. Do not touch code, .github/, README.md, or any §4.1 path (Phase 4's DECISIONS patches excepted, verbatim). Zero new dependencies. Skipping either stop is a §4 violation.
 ```
+
+## M11-VERIFY — adversarial verification of the process-hardening slice
+
+```
+You are a floor session for QuotaPane (C:\dev\QuotaPane\QuotaPane). Read DECISIONS.md fully — §3, §4, §4.4, §4.7 govern. M11 (commits e09d702, c5a0eec, fbcd892, 72043dd) was authored and committed at the top tier; your job is to VERIFY it adversarially. You change nothing on main: verification only, then a report. Any fix you believe necessary is a STOP and a report, not an edit.
+
+1. §3 bar on main as-is: cargo fmt --check; cargo clippy --workspace --all-targets -- -D warnings; full cargo test. The M11 code changes are comment-only tags — prove the bar still holds (expect 292 tests).
+2. Checker baseline: python3 tools/check-invariants.py must PASS on main.
+3. Mutation-test the checker on a scratch branch (never pushed; delete after): (a) delete one tagged test function → checker must FAIL naming it; (b) revert, delete one `test:` line from invariants.manifest → FAIL on the tag side; (c) revert, remove one `// INV` tag → FAIL on the manifest side; (d) revert, renumber an invariant in SECURITY.md → FAIL on id drift. Record the exact error line each mutation produced. A mutation the checker misses is a finding, not a fix.
+4. Dry-run the release verifier in Git Bash: tools/release-verify.sh v1.4.1 — expect RESULT: PASS with all six steps, six controls, R1-R4. Paste full output. If the script has a bug, STOP and report it precisely (script is top-tier-authored; you do not patch it).
+5. Write your complete end-gate report to reports/m11-verify-endgate.md (the new convention — reports/README.md), commit exactly that one file ("reports: M11 adversarial verification"), push, confirm CI green on all required checks (the new invariants job included). Then STOP. Acceptance is the owner's.
+```
