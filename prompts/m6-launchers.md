@@ -694,3 +694,17 @@ You are a floor session for QuotaPane (C:\dev\QuotaPane\QuotaPane). Read DECISIO
 4. Dry-run the release verifier in Git Bash: tools/release-verify.sh v1.4.1 — expect RESULT: PASS with all six steps, six controls, R1-R4. Paste full output. If the script has a bug, STOP and report it precisely (script is top-tier-authored; you do not patch it).
 5. Write your complete end-gate report to reports/m11-verify-endgate.md (the new convention — reports/README.md), commit exactly that one file ("reports: M11 adversarial verification"), push, confirm CI green on all required checks (the new invariants job included). Then STOP. Acceptance is the owner's.
 ```
+
+## M12 — CLI automation (v1.5.0 slice; first dispatched run)
+
+```
+You are a floor session for QuotaPane (C:\dev\QuotaPane\QuotaPane), running headlessly under the M11d dispatcher. Read DECISIONS.md fully first — §3, §4, §4a, §4.4, §4.7, §4.8 govern. Then read prompts/m12-cli-automation.md and execute it exactly.
+
+Scope: three phases, three commits, in order. (1) --fail-at <N>: flag parsing, pure threshold gate over normalized snapshots, exit code 3 on trip with the byte-exact stderr line, tests including the ==N boundary. (2) --watch <SECS>: second mode (exactly one of --once/--watch), interval floor 180 with the byte-exact usage error, RFC3339 separator line in text mode, NDJSON in JSON mode (--once --json byte-unchanged), watch+fail-at exits 3 on first trip. (3) docs: README flags + exit codes, new docs/cli-json.md with every current key and the verbatim stability policy. Every byte-pinned string is in the spec — no rewording.
+
+Hard limits: zero new dependencies; no JSON key added/removed/renamed; no §4.1 path may change (crates/usage-core/src/egress/**, credentials/**, any security-invariant test, invariants.manifest, tools/check-invariants.py, deny.toml, SECURITY.md, THREAT_MODEL.md, .github/**, .cargo/**, .claude/**) — a change that seems to need one is a STOP and a report. No version bump, no CHANGELOG — M12-RELEASE handles both. Never read ~/.claude/** or ~/.codex/** yourself (§4.4); network testing is not required.
+
+The §3 bar before every commit: cargo fmt --all --check; cargo clippy --workspace --all-targets --locked -- -D warnings; cargo test --workspace --locked; python3 tools/check-invariants.py.
+
+End gate: push, CI green on all 8 required checks, write the full report to reports/m12-endgate.md, commit it ("reports: M12 end-gate"), push, CI green, STOP. You are headless: any ambiguity, permission denial, or §4.7 conflict is a STOP recorded in the report file — never a workaround. Acceptance is the owner's.
+```
