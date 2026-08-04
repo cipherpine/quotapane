@@ -331,3 +331,110 @@ digests above show.
    amend step 6 for prerelease tags, or reject and re-cut.
 2. Leg B remains unqueued. This session is ending here, as instructed — the
    hard stop is the session end.
+
+---
+
+## Re-run after the step-6 tooling fix (Leg A-2)
+
+**Session:** floor (Opus, Claude Code), headless under the M11d dispatcher,
+2026-08-04T14:43Z. **Spec:** `prompts/queue/m12-release-a2.md` —
+re-verification only.
+**Host:** MINGW64_NT-10.0-26200, gh 2.92.0 (2026-04-28), cosign v3.1.2,
+Python 3.14.4.
+
+The top tier fixed the defect analysed in §5 — `9ced94c` *"tools:
+release-verify — rc tags carry the base crate version (step 6)"*. Step 6 now
+strips an `-rc.*` suffix from the tag before asserting, so it compares the
+shipped binary against the base version the crate actually carries:
+
+```sh
+BASEVER="${TAG#v}"; BASEVER="${BASEVER%%-rc.*}"
+V="$("$BIN" --version 2>&1)" && grep -q "$BASEVER" <<<"$V" && "$BIN" --help >/dev/null 2>&1 \
+  && pass "step 6: shipped CLI runs ($V, matches $BASEVER)" || fail "step 6: shipped CLI ($V, wanted $BASEVER)"
+```
+
+### Preconditions for the re-run
+
+| # | Required | Observed | |
+|---|---|---|---|
+| A2-1 | Fix commit is the tip | `9ced94c6a89f43d75397613814ba4d494366a017`, subject exact | ✅ |
+| A2-2 | Tree clean | `git status --porcelain` empty | ✅ |
+| A2-3 | `v1.5.0-rc.1` unchanged | still `5c0c85da8a0eb5b1180551a8c82133655d294636` | ✅ |
+| A2-4 | Tags unchanged | v1.0.0–v1.4.1 plus v1.5.0-rc.1; no `v1.5.0` | ✅ |
+
+Nothing was rebuilt, re-tagged or re-uploaded. The release artifacts under
+test are the same bytes verified in §3/§4 — the run's own digest lines below
+match §3's asset digests exactly (`43bf3d04…` zip, `300838a5…` SHA256SUMS),
+so this is the fixed script re-judging identical evidence.
+
+### `tools/release-verify.sh v1.5.0-rc.1` — complete output
+
+Run verbatim, in Git Bash, from the repo root. Exit code **0**.
+
+```
+PASS  step 1: downloaded 4 assets for v1.5.0-rc.1
+PASS  step 2: sha256sum -c SHA256SUMS
+PASS  step 3: cosign verify-blob (Verified OK)
+PASS  step 4a: attestation quotapane-v1.5.0-rc.1-x86_64-pc-windows-msvc.zip
+PASS  step 4b: attestation quotapane-v1.5.0-rc.1-x86_64-unknown-linux-gnu.tar.gz
+PASS  R1: both attestation subjects digest-match disk
+PASS  step 5: inventory + identical TOOLCHAIN.txt
+PASS  step 6: shipped CLI runs (quotapane-cli 1.5.0, matches 1.5.0)
+PASS  NC1/R3: zip bytes changed (43bf3d04e4d2dafe4eacba4738e95d6e4b2791eaafbd3a28b1b087f6febf9db3 -> bee0827092c4fe6057aaaf86791c5942a4694543209930c802b099501c239eec)
+PASS  NC1: checksum names the tampered file specifically
+PASS  NC1: attestation refuses tampered zip
+PASS    restored: quotapane-v1.5.0-rc.1-x86_64-pc-windows-msvc.zip digest back to pristine
+PASS  NC2: wrong identity rejected on the identity check specifically
+PASS  NC3: wrong issuer rejected on the issuer check specifically
+PASS  NC4/R3: SHA256SUMS bytes changed (300838a5b42e9bf537a3d2faa0f0b9db31b7978ae6d95e681180b8ce4ebcc077 -> e00a5827b7d186632a1b201e0ebf736cbf3a2b07b600c1366b02f3953bd60b8a)
+PASS  NC4: cosign rejects tampered SHA256SUMS on the signature check
+PASS    restored: SHA256SUMS digest back to pristine
+PASS  NC5/R4: wrong-repo target cli/cli confirmed to exist
+PASS  NC5: real repo, real digest-miss (no attestations for our artifact)
+PASS  NC6: unrelated file has no attestation
+PASS  sweep: all artifacts pristine, steps 2-4 re-run clean
+RESULT: PASS — v1.5.0-rc.1: six steps, six controls, R1-R4
+```
+
+**21 PASS, 0 FAIL, exit code 0.** The one line that changed against §4 is
+step 6, which now reads its verdict off the base version:
+
+| | §4 (before the fix) | Leg A-2 (after) |
+|---|---|---|
+| step 6 | `FAIL  step 6: shipped CLI (quotapane-cli 1.5.0)` | `PASS  step 6: shipped CLI runs (quotapane-cli 1.5.0, matches 1.5.0)` |
+| verdict | `RESULT: FAIL — 1 check(s) failed` (exit 1) | `RESULT: PASS — six steps, six controls, R1-R4` (exit 0) |
+
+Every other line is identical to §4, including all six negative controls, the
+restore proofs and the post-control sweep. The binary's output did not change
+— `quotapane-cli 1.5.0` in both runs; only the assertion was corrected.
+
+The block above was verified rather than trusted: the script was run a second
+time into a scratch file and diffed against the block as extracted back out of
+this report — `VERBATIM MATCH: OK`, exit 0 again. The run is deterministic
+(same artifacts, fixed tamper offsets and substitution), so the two runs are
+byte-identical and the transcription carries no drift.
+
+The §5 analysis is preserved above as the record of why this failed the first
+time. It stands as written: the defect was in the tool's rc handling, not in
+the release.
+
+### State left behind (unchanged from §7)
+
+- `main` = `9ced94c`, plus this report commit. The fix commit `9ced94c` was
+  local-only until this leg's push carried it to `origin` (as with `d2afb47`
+  in §2); it was authored at the top tier and this session did not modify it.
+- Tag `v1.5.0-rc.1` and its draft still exist — **not pruned**; pruning stays
+  Leg B's step.
+- **No `v1.5.0` tag exists. Nothing published.** No tagging, pruning or
+  publishing was performed by this leg.
+- No code, `.github/`, `assets/`, `README.md`, `tools/` or §4.1 path was
+  touched. No dependency added. This report is the leg's entire footprint.
+- Scratch artifacts stayed in the script's own `mktemp -d` outside the
+  repository and were removed by its `EXIT` trap.
+
+### Status
+
+Leg A's verification objective is met: `RESULT: PASS` for `v1.5.0-rc.1`.
+Whether that clears the spec's Leg-B gate is the top tier's call, not this
+session's — Leg B is queued only by the top tier, and no queue file for it
+exists. This session ends here.
