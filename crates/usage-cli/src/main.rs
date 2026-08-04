@@ -26,6 +26,14 @@
 //! byte-exact dump behind an explicit stderr warning — for the schema-pinning
 //! case where the exact bytes are the point.
 //!
+//! M12 makes the CLI usable as a gate rather than only as a reporter.
+//! `--fail-at <N>` exits **3** when any window has reached N percent, so a
+//! script can stop *before* a long run dies mid-flight; `--watch <SECS>` is
+//! the second mode, polling on an interval (floored at the poller's own 180 s)
+//! and emitting NDJSON under `--json`. Both are deliberately inert: QuotaPane
+//! never executes anything on the user's behalf — it reports, and the user's
+//! own script decides what to do about it.
+//!
 //! `--allow-proxy` (M9b) is the **only** proxy opt-in surface in the product.
 //! Egress refuses to send anything while a proxy environment variable is set
 //! and the user has not opted in — it fails closed, it does not quietly
@@ -35,6 +43,7 @@
 //! unconditionally (SECURITY.md invariant 7).
 
 use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use usage_core::egress::{Egress, EgressError};
 use usage_core::model::{ProviderId, ProviderSnapshot};
@@ -53,16 +62,25 @@ const DEFAULT_CLIENT_VERSION: &str = "0.0.0";
 const HELP: &str = "\
 QuotaPane CLI — read your own Claude and Codex subscription usage locally.
 
-usage: quotapane-cli --once [--json] [--provider claude|codex|all]
-                     [--fail-at <N>] [--client-version <VER>] [--debug-raw]
+usage: quotapane-cli (--once | --watch <SECS>) [--json]
+                     [--provider claude|codex|all] [--fail-at <N>]
+                     [--client-version <VER>] [--debug-raw]
                      [--debug-raw-unsafe] [--allow-proxy]
 
 Options:
-  --once                  Poll once and exit. Required — the only mode today.
+  --once                  Poll once and exit. Exactly one of --once and
+                          --watch is required.
+  --watch <SECS>          Poll every SECS seconds until interrupted. SECS must
+                          be at least 180 — the polling floor applies to
+                          scripted polling just as it does to the window. Text
+                          output precedes each cycle with a separator line,
+                          `--- <RFC 3339 UTC timestamp> ---`; with --json each
+                          cycle prints one compact line instead (NDJSON).
   --fail-at <N>           Exit 3 if any window is at or over N percent used
                           (N is 1–100). Checked after the normal output is
                           printed, over every window of every provider that
                           polled successfully — headline and per-model both.
+                          Under --watch, the first tripping cycle exits.
   --json                  Print the normalized snapshot as JSON instead of a
                           text summary. With --provider all, prints an array.
   --provider <WHICH>      Which provider to poll: claude, codex, or all.
@@ -116,6 +134,140 @@ fn parse_provider(s: &str) -> Result<ProviderSel, String> {
         other => Err(format!(
             "--provider must be one of claude|codex|all (got {other:?})"
         )),
+    }
+}
+
+/// How this invocation polls: once and out, or every `SECS` until interrupted.
+///
+/// Exactly one is chosen at parse time, so nothing downstream has to handle
+/// "neither" or "both".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Once,
+    Watch(u64),
+}
+
+/// The shortest `--watch` interval, taken from the poller's own floor rather
+/// than restated.
+///
+/// A script polling faster than the window does would be the same endpoint
+/// pressure the poller exists to avoid (DECISIONS.md §1: ≥180 s per provider),
+/// so scripted polling gets the same limit — and gets it from the same
+/// constant, so the two cannot drift apart.
+const WATCH_MIN_INTERVAL_SECS: u64 = usage_core::poller::MIN_INTERVAL.as_secs();
+
+/// Usage error for `--watch` below [`WATCH_MIN_INTERVAL_SECS`]. Names the
+/// floor and why it exists: a bare "invalid value" would leave the script
+/// author guessing at the number.
+const WATCH_FLOOR_ERROR: &str = "--watch interval must be at least 180 seconds (the polling floor)";
+
+/// Parse `--watch <SECS>`: whole seconds, at or above the polling floor.
+fn parse_watch_interval(s: &str) -> Result<u64, String> {
+    let secs: u64 = s
+        .parse()
+        .map_err(|_| format!("--watch requires a whole number of seconds (got {s:?})"))?;
+    if secs < WATCH_MIN_INTERVAL_SECS {
+        return Err(WATCH_FLOOR_ERROR.to_string());
+    }
+    Ok(secs)
+}
+
+/// Wall-clock seconds since the Unix epoch.
+///
+/// The CLI's only clock, and deliberately outside the threshold gate — that
+/// stays a pure function of the snapshots. A clock set before 1970 yields 0
+/// rather than panicking; a timestamp is a log ornament, not a reason to fail
+/// a poll.
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Civil (proleptic Gregorian) year/month/day for a day count since the epoch.
+/// Howard Hinnant's `civil_from_days` — the inverse of the `days_from_civil`
+/// usage-core parses timestamps with, and the reason this needs no dependency.
+fn civil_from_days(days: i64) -> (i64, u64, u64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m as u64, d as u64)
+}
+
+/// Format a Unix second count as an RFC 3339 UTC timestamp,
+/// `YYYY-MM-DDTHH:MM:SSZ`.
+///
+/// UTC with an explicit `Z`, never local time: a watcher's log is read later,
+/// often on another machine, and an offsetless local timestamp is the exact
+/// ambiguity usage-core's parser refuses to accept from a provider.
+fn format_rfc3339_utc(unix_secs: u64) -> String {
+    let (days, rem) = (
+        (unix_secs / 86_400) as i64,
+        // Seconds into the day; `days` above already floored the division.
+        unix_secs % 86_400,
+    );
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute, second) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// The line that precedes each `--watch` text cycle.
+fn watch_separator(unix_secs: u64) -> String {
+    format!("--- {} ---", format_rfc3339_utc(unix_secs))
+}
+
+/// Does this invocation's JSON output become NDJSON — one compact line per
+/// cycle — or stay the pretty document `--once --json` has always printed?
+///
+/// A named seam rather than an inline `matches!`, so "watch ⇒ NDJSON, once ⇒
+/// byte-unchanged" is unit-testable and its single call site can be pinned.
+fn json_is_ndjson(mode: Mode) -> bool {
+    matches!(mode, Mode::Watch(_))
+}
+
+/// Does this cycle print the `--- <timestamp> ---` separator first?
+///
+/// `--watch` text output only. `--once` prints one block and has nothing to
+/// delimit; a JSON cycle is already exactly one line, and a separator in that
+/// stream would break every NDJSON consumer.
+fn prints_cycle_separator(args: &Args) -> bool {
+    matches!(args.mode, Mode::Watch(_)) && !args.json
+}
+
+/// Serialize a cycle's snapshots exactly as this invocation prints them.
+///
+/// `compact` is what makes `--watch --json` NDJSON: one line per cycle, so a
+/// consumer can read the stream line by line as it arrives instead of waiting
+/// for a document to close. Without it the output is the pretty form
+/// `--once --json` has always emitted, byte for byte.
+///
+/// A single provider that failed to poll yields an empty string, which the
+/// caller prints as nothing at all — not as `null`, and not as a blank line.
+fn render_json(
+    snapshots: &[ProviderSnapshot],
+    multi: bool,
+    compact: bool,
+) -> serde_json::Result<String> {
+    if multi {
+        // `all` → array, even when partial or empty.
+        if compact {
+            serde_json::to_string(snapshots)
+        } else {
+            serde_json::to_string_pretty(snapshots)
+        }
+    } else {
+        match snapshots.first() {
+            Some(snapshot) if compact => serde_json::to_string(snapshot),
+            Some(snapshot) => serde_json::to_string_pretty(snapshot),
+            None => Ok(String::new()),
+        }
     }
 }
 
@@ -246,6 +398,8 @@ const PROXY_GATE_HINT: &str =
 /// string — so deriving `Debug` here cannot leak a token.
 #[derive(Debug)]
 struct Args {
+    /// `--once` or `--watch <SECS>` — exactly one, resolved at parse time.
+    mode: Mode,
     json: bool,
     provider: ProviderSel,
     client_version: String,
@@ -360,6 +514,7 @@ enum Invocation {
 
 fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, String> {
     let mut once = false;
+    let mut watch: Option<u64> = None;
     let mut json = false;
     let mut provider: Option<ProviderSel> = None;
     let mut client_version: Option<String> = None;
@@ -373,10 +528,16 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
         match arg.as_str() {
             // Answered before any other validation, so `--help` works on its
             // own — without it the parser would reject the invocation for a
-            // missing `--once`.
+            // missing mode.
             "--help" | "-h" => return Ok(Invocation::Help),
             "--version" => return Ok(Invocation::Version),
             "--once" => once = true,
+            "--watch" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--watch requires a value".to_string())?;
+                watch = Some(parse_watch_interval(&value)?);
+            }
             "--json" => json = true,
             "--debug-raw" => debug_raw = true,
             // Implies --debug-raw: it is the same mode, minus the redaction,
@@ -410,12 +571,20 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
         }
     }
 
-    if !once {
-        return Err("--once is required (the only supported mode for now)".to_string());
-    }
+    // Exactly one mode. "Both" is not a merge of two intents and "neither" is
+    // not a default — either way the CLI would be guessing, so it refuses.
+    let mode = match (once, watch) {
+        (true, None) => Mode::Once,
+        (false, Some(secs)) => Mode::Watch(secs),
+        (true, Some(_)) => {
+            return Err("--once and --watch cannot be combined; pass exactly one".to_string())
+        }
+        (false, None) => return Err("a mode is required: --once or --watch <SECS>".to_string()),
+    };
 
     let client_version_defaulted = client_version.is_none();
     Ok(Invocation::Run(Args {
+        mode,
         json,
         provider: provider.unwrap_or(ProviderSel::Claude),
         client_version: client_version.unwrap_or_else(|| DEFAULT_CLIENT_VERSION.to_string()),
@@ -442,6 +611,117 @@ fn build_provider(id: ProviderId, client_version: &str) -> Option<Box<dyn UsageP
     }
 }
 
+/// What one poll cycle produced.
+struct Cycle {
+    /// Snapshots from the providers that polled successfully, in output order.
+    snapshots: Vec<ProviderSnapshot>,
+    /// Whether any selected provider failed (credential, egress, or schema).
+    had_error: bool,
+}
+
+/// Poll every selected provider once and print this cycle's output.
+///
+/// The entire per-cycle body, and the **only** one: `--once` calls it exactly
+/// once, `--watch` calls it every tick. Keeping the two modes on one function
+/// is what guarantees a watched cycle prints what a one-shot run prints — a
+/// test pins the single call site so a watch-only path cannot appear later.
+///
+/// Printing lives here, not in `main`, because the output shape is per cycle:
+/// under `--watch --json` each cycle is one NDJSON line, and a document that
+/// spanned cycles could not be read until the watcher was killed.
+fn run_cycle(
+    args: &Args,
+    ids: &[ProviderId],
+    egress: &Egress,
+    proxy_hint_shown: &mut bool,
+) -> Cycle {
+    let multi = matches!(args.provider, ProviderSel::All);
+    let mut snapshots: Vec<ProviderSnapshot> = Vec::new();
+    let mut had_error = false;
+
+    // Poll each selected provider independently: one signed-out or erroring
+    // provider records a clean diagnostic and flips the exit code, but never
+    // aborts the others (`all` still emits whatever succeeded).
+    for &id in ids {
+        // `--debug-raw` bypasses the normal snapshot path, reading the wire
+        // response through the same `fetch` the normal poll uses
+        // (`debug_raw_body`), so the dump is guaranteed to reflect the real
+        // request. What reaches stdout is redacted unless the user asked for
+        // byte-exact output — see `render_debug_raw`. Supported by **both**
+        // providers: the flag used to be
+        // silently ignored for Claude, which made it look like the endpoint
+        // returned nothing rather than that the flag did not apply.
+        if args.debug_raw {
+            // `None` means the credential *path* could not be resolved at all.
+            let dumped = match id {
+                ProviderId::ClaudeSubscription => {
+                    ClaudeSubscription::with_default_path(args.client_version.clone())
+                        .map(|p| p.debug_raw_body(egress))
+                }
+                ProviderId::CodexSubscription => {
+                    CodexSubscription::with_default_path(CODEX_DEFAULT_USER_AGENT)
+                        .map(|p| p.debug_raw_body(egress))
+                }
+            };
+            match dumped {
+                None => {
+                    eprintln!(
+                        "error: {}: could not resolve a home directory for the credentials path",
+                        provider_cli_name(id)
+                    );
+                    had_error = true;
+                }
+                Some(Ok(raw)) => println!("{}", render_debug_raw(&raw, args.debug_raw_unsafe)),
+                Some(Err(e)) => {
+                    report_provider_error(id, &e, proxy_hint_shown);
+                    had_error = true;
+                }
+            }
+            continue;
+        }
+
+        match build_provider(id, &args.client_version) {
+            None => {
+                eprintln!(
+                    "error: {}: could not resolve a home directory for the credentials path",
+                    provider_cli_name(id)
+                );
+                had_error = true;
+            }
+            Some(provider) => match provider.poll(egress) {
+                Ok(snapshot) => snapshots.push(snapshot),
+                Err(e) => {
+                    report_provider_error(id, &e, proxy_hint_shown);
+                    had_error = true;
+                }
+            },
+        }
+    }
+
+    if args.json {
+        // `all` → array (even if partial/empty); single provider → object,
+        // preserving the exact M1 output shape for the default invocation.
+        // Compact only under `--watch`, which makes that stream NDJSON.
+        match render_json(&snapshots, multi, json_is_ndjson(args.mode)) {
+            Ok(s) if !s.is_empty() => println!("{s}"),
+            Ok(_) => {} // single provider failed: nothing on stdout
+            Err(e) => {
+                eprintln!("error: failed to serialize snapshot(s): {e}");
+                had_error = true;
+            }
+        }
+    } else {
+        for snapshot in &snapshots {
+            print_summary(snapshot);
+        }
+    }
+
+    Cycle {
+        snapshots,
+        had_error,
+    }
+}
+
 fn main() -> ExitCode {
     let args = match parse_args(std::env::args().skip(1)) {
         Ok(Invocation::Help) => {
@@ -456,7 +736,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
-                "usage: quotapane-cli --once [--json] [--provider claude|codex|all] [--fail-at <N>] [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe] [--allow-proxy]"
+                "usage: quotapane-cli (--once | --watch <SECS>) [--json] [--provider claude|codex|all] [--fail-at <N>] [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe] [--allow-proxy]"
             );
             eprintln!("try `quotapane-cli --help` for the full list of options");
             return ExitCode::from(2);
@@ -499,115 +779,52 @@ fn main() -> ExitCode {
     // variable is set — the CLI does not decide that, and does not route
     // around it; it only surfaces the way out (see `report_provider_error`).
     let egress = Egress::new(egress_proxy_opt_in(&args));
-    let multi = matches!(args.provider, ProviderSel::All);
-    let mut snapshots: Vec<ProviderSnapshot> = Vec::new();
-    let mut had_error = false;
     // The proxy hint is a once-per-run line, for the same reason the warnings
     // above are: `--provider all` failing twice on one gate does not need to
-    // say it twice.
+    // say it twice. It survives across watch cycles for the same reason.
     let mut proxy_hint_shown = false;
 
-    // Poll each selected provider independently: one signed-out or erroring
-    // provider records a clean diagnostic and flips the exit code, but never
-    // aborts the others (`all` still emits whatever succeeded).
-    for id in ids {
-        // `--debug-raw` bypasses the normal snapshot path, reading the wire
-        // response through the same `fetch` the normal poll uses
-        // (`debug_raw_body`), so the dump is guaranteed to reflect the real
-        // request. What reaches stdout is redacted unless the user asked for
-        // byte-exact output — see `render_debug_raw`. Supported by **both**
-        // providers: the flag used to be
-        // silently ignored for Claude, which made it look like the endpoint
-        // returned nothing rather than that the flag did not apply.
-        if args.debug_raw {
-            // `None` means the credential *path* could not be resolved at all.
-            let dumped = match id {
-                ProviderId::ClaudeSubscription => {
-                    ClaudeSubscription::with_default_path(args.client_version.clone())
-                        .map(|p| p.debug_raw_body(&egress))
-                }
-                ProviderId::CodexSubscription => {
-                    CodexSubscription::with_default_path(CODEX_DEFAULT_USER_AGENT)
-                        .map(|p| p.debug_raw_body(&egress))
-                }
-            };
-            match dumped {
-                None => {
-                    eprintln!(
-                        "error: {}: could not resolve a home directory for the credentials path",
-                        provider_cli_name(id)
-                    );
-                    had_error = true;
-                }
-                Some(Ok(raw)) => println!("{}", render_debug_raw(&raw, args.debug_raw_unsafe)),
-                Some(Err(e)) => {
-                    report_provider_error(id, &e, &mut proxy_hint_shown);
-                    had_error = true;
-                }
-            }
-            continue;
+    loop {
+        // Text cycles are delimited so a watcher's log can be read back: one
+        // timestamped line, then the block a `--once` run would have printed.
+        // JSON cycles need no delimiter — each is already exactly one line.
+        if prints_cycle_separator(&args) {
+            println!("{}", watch_separator(now_unix_secs()));
         }
 
-        match build_provider(id, &args.client_version) {
-            None => {
-                eprintln!(
-                    "error: {}: could not resolve a home directory for the credentials path",
-                    provider_cli_name(id)
-                );
-                had_error = true;
-            }
-            Some(provider) => match provider.poll(&egress) {
-                Ok(snapshot) => snapshots.push(snapshot),
-                Err(e) => {
-                    report_provider_error(id, &e, &mut proxy_hint_shown);
-                    had_error = true;
-                }
-            },
-        }
-    }
+        let cycle = run_cycle(&args, &ids, &egress, &mut proxy_hint_shown);
 
-    if args.json {
-        // `all` → array (even if partial/empty); single provider → object,
-        // preserving the exact M1 output shape for the default invocation.
-        let serialized = if multi {
-            serde_json::to_string_pretty(&snapshots)
-        } else {
-            match snapshots.first() {
-                Some(snapshot) => serde_json::to_string_pretty(snapshot),
-                None => Ok(String::new()), // single provider failed: nothing on stdout
-            }
-        };
-        match serialized {
-            Ok(s) if !s.is_empty() => println!("{s}"),
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("error: failed to serialize snapshot(s): {e}");
-                return ExitCode::FAILURE;
+        // The gate runs after the cycle's output, so a script that trips still
+        // has the full picture in its log. It sees only snapshots that actually
+        // polled: an errored provider is exit-1 territory (below), never a
+        // silent pass through the gate.
+        if let Some(n) = args.fail_at {
+            if let Some((provider, label, percent)) = worst_at_or_over(&cycle.snapshots, n) {
+                eprintln!("{}", fail_at_line(provider, label, percent, n));
+                // Precedence: a trip outranks a provider error. The script
+                // asked "am I about to run out?", and the answer is yes.
+                // Under --watch this is the first tripping cycle, and it ends
+                // the run — a gate that kept watching after tripping would
+                // have nothing left to say.
+                return ExitCode::from(3);
             }
         }
-    } else {
-        for snapshot in &snapshots {
-            print_summary(snapshot);
-        }
-    }
 
-    // The gate runs after the normal output, so a script that trips still has
-    // the full picture in its log. It sees only snapshots that actually
-    // polled: an errored provider is exit-1 territory (below), never a silent
-    // pass through the gate.
-    if let Some(n) = args.fail_at {
-        if let Some((provider, label, percent)) = worst_at_or_over(&snapshots, n) {
-            eprintln!("{}", fail_at_line(provider, label, percent, n));
-            // Precedence: a trip outranks a provider error. The script asked
-            // "am I about to run out?", and the answer is yes.
-            return ExitCode::from(3);
+        match args.mode {
+            Mode::Once => {
+                return if cycle.had_error {
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                };
+            }
+            // A failed cycle does not end a watch: a watcher exists to survive
+            // the transient failure that would otherwise kill the script it
+            // guards. Sleeping (not scheduling) means the interval is the gap
+            // *between* polls, so it can drift later than SECS but never
+            // sooner — never under the floor.
+            Mode::Watch(secs) => std::thread::sleep(Duration::from_secs(secs)),
         }
-    }
-
-    if had_error {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
     }
 }
 
@@ -1722,5 +1939,261 @@ exit codes:
             ),
             "{HELP}"
         );
+    }
+
+    // --- M12 P2: --watch, the second mode ---
+
+    #[test]
+    fn exactly_one_mode_is_required() {
+        assert_eq!(parse_run(&["--once"]).mode, Mode::Once);
+        assert_eq!(parse_run(&["--watch", "300"]).mode, Mode::Watch(300));
+        assert_eq!(
+            parse_run(&["--json", "--watch", "180", "--provider", "all"]).mode,
+            Mode::Watch(180)
+        );
+
+        // Both is a usage error — the two modes mean different things and
+        // guessing which one was meant is not the CLI's call.
+        assert!(parse_args(args(&["--once", "--watch", "300"])).is_err());
+        assert!(parse_args(args(&["--watch", "300", "--once"])).is_err());
+        // Neither is still a usage error, as it was before --watch existed.
+        assert!(parse_args(args(&["--json"])).is_err());
+        assert!(parse_args(args(&[])).is_err());
+    }
+
+    #[test]
+    fn watch_interval_floor_is_the_pollers_own() {
+        // 179/180/181: the floor is inclusive, and it is not a rounded-off
+        // approximation of the poller's — it IS the poller's constant.
+        assert_eq!(
+            WATCH_MIN_INTERVAL_SECS,
+            usage_core::poller::MIN_INTERVAL.as_secs(),
+            "the scripted floor must be the poller's own floor"
+        );
+        assert_eq!(WATCH_MIN_INTERVAL_SECS, 180);
+
+        assert!(parse_watch_interval("179").is_err());
+        assert_eq!(parse_watch_interval("180"), Ok(180));
+        assert_eq!(parse_watch_interval("181"), Ok(181));
+        assert_eq!(parse_watch_interval("3600"), Ok(3600));
+    }
+
+    #[test]
+    fn watch_below_the_floor_names_the_floor_verbatim() {
+        // Byte-exact: a script author who sees this line should learn the
+        // number, not just that something was wrong.
+        assert_eq!(
+            parse_watch_interval("179").unwrap_err(),
+            "--watch interval must be at least 180 seconds (the polling floor)"
+        );
+        assert_eq!(parse_watch_interval("0").unwrap_err(), WATCH_FLOOR_ERROR);
+        assert_eq!(parse_watch_interval("1").unwrap_err(), WATCH_FLOOR_ERROR);
+        // The message and the constant cannot drift apart silently.
+        assert!(WATCH_FLOOR_ERROR.contains(&WATCH_MIN_INTERVAL_SECS.to_string()));
+    }
+
+    #[test]
+    fn watch_rejects_non_integer_intervals_and_a_missing_value() {
+        for bad in ["", "300.5", "-300", "five minutes", "300s"] {
+            assert!(
+                parse_watch_interval(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+        assert!(parse_args(args(&["--watch"])).is_err());
+        assert!(parse_args(args(&["--watch", "abc"])).is_err());
+    }
+
+    #[test]
+    fn rfc3339_utc_formats_known_anchors() {
+        assert_eq!(format_rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_rfc3339_utc(946_684_800), "2000-01-01T00:00:00Z");
+        // A leap day, and the second before a year boundary — the two places a
+        // hand-rolled civil-date conversion goes wrong.
+        assert_eq!(format_rfc3339_utc(1_709_164_800), "2024-02-29T00:00:00Z");
+        assert_eq!(format_rfc3339_utc(1_767_225_599), "2025-12-31T23:59:59Z");
+        assert_eq!(format_rfc3339_utc(1_767_225_600), "2026-01-01T00:00:00Z");
+        // Time-of-day fields, all three non-zero.
+        assert_eq!(format_rfc3339_utc(1_784_000_000), "2026-07-14T03:33:20Z");
+    }
+
+    #[test]
+    fn watch_separator_is_byte_exact() {
+        // The line that delimits cycles in a watcher's log.
+        assert_eq!(
+            watch_separator(1_767_225_600),
+            "--- 2026-01-01T00:00:00Z ---"
+        );
+        assert_eq!(watch_separator(0), "--- 1970-01-01T00:00:00Z ---");
+    }
+
+    #[test]
+    fn once_json_output_is_byte_for_byte_the_pretty_form() {
+        // The M12 promise to existing scripts: --once --json did not change.
+        // Compared against the exact expression the pre-M12 CLI used.
+        let claude = snap(
+            ProviderId::ClaudeSubscription,
+            vec![win("5h", Some(0.25))],
+            vec![win("7d-opus", Some(0.5))],
+        );
+        let codex = snap(
+            ProviderId::CodexSubscription,
+            vec![win("5h", Some(0.1))],
+            vec![],
+        );
+
+        assert_eq!(
+            render_json(std::slice::from_ref(&claude), false, false).unwrap(),
+            serde_json::to_string_pretty(&claude).unwrap()
+        );
+        let both = vec![claude, codex];
+        assert_eq!(
+            render_json(&both, true, false).unwrap(),
+            serde_json::to_string_pretty(&both).unwrap()
+        );
+        // A single provider that failed to poll prints nothing at all, as before.
+        assert_eq!(render_json(&[], false, false).unwrap(), "");
+    }
+
+    #[test]
+    fn ndjson_is_one_compact_line_carrying_the_same_object() {
+        let claude = snap(
+            ProviderId::ClaudeSubscription,
+            vec![win("5h", Some(0.25)), win("7d", None)],
+            vec![win("7d-opus", Some(0.5))],
+        );
+
+        let line = render_json(std::slice::from_ref(&claude), false, true).unwrap();
+        assert!(
+            !line.contains('\n'),
+            "an NDJSON cycle must be exactly one line: {line}"
+        );
+        assert!(!line.is_empty());
+
+        // Same object, only the whitespace differs — one line per cycle must
+        // not mean less data per cycle.
+        let pretty = render_json(std::slice::from_ref(&claude), false, false).unwrap();
+        let compact: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let expanded: serde_json::Value = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(compact, expanded);
+        assert!(line.len() < pretty.len(), "compact form is not compact");
+
+        // The --provider all array form is one line too.
+        let both = vec![claude, snap(ProviderId::CodexSubscription, vec![], vec![])];
+        let array_line = render_json(&both, true, true).unwrap();
+        assert!(!array_line.contains('\n'), "{array_line}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&array_line)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// This file's own real (non-test, non-comment) source, for the wiring
+    /// pins below. Same technique as the `Egress::new` pin above: a pure
+    /// function being right is worth nothing if nothing calls it.
+    fn real_code() -> String {
+        const SRC: &str = include_str!("main.rs");
+        SRC[..SRC
+            .find("#[cfg(test)]")
+            .expect("test module marker not found")]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn ndjson_is_the_watch_mode_and_nothing_else() {
+        assert!(
+            !json_is_ndjson(Mode::Once),
+            "--once --json must keep the pretty form"
+        );
+        assert!(json_is_ndjson(Mode::Watch(180)));
+        assert!(json_is_ndjson(Mode::Watch(3600)));
+
+        // And the cycle body's only JSON call is fed by that seam — so
+        // `--once --json` cannot be switched to compact output, nor
+        // `--watch --json` to a multi-line document, without failing here.
+        let code = real_code();
+        assert_eq!(
+            code.matches("render_json(").count(),
+            2,
+            "expected one definition and exactly one call site"
+        );
+        assert!(
+            code.contains("render_json(&snapshots, multi, json_is_ndjson(args.mode))"),
+            "the JSON output shape must come from the mode seam"
+        );
+    }
+
+    #[test]
+    fn only_watch_text_output_gets_a_separator() {
+        // The separator delimits cycles. One-shot output has nothing to
+        // delimit, and a JSON cycle is already exactly one line — a stray
+        // separator there would break every NDJSON consumer.
+        let cases = [
+            (&["--once"][..], false),
+            (&["--once", "--json"][..], false),
+            (&["--watch", "180"][..], true),
+            (&["--watch", "180", "--json"][..], false),
+        ];
+        for (argv, expected) in cases {
+            assert_eq!(
+                prints_cycle_separator(&parse_run(argv)),
+                expected,
+                "wrong separator decision for {argv:?}"
+            );
+        }
+
+        let code = real_code();
+        assert_eq!(
+            code.matches("watch_separator(").count(),
+            2,
+            "expected one definition and exactly one call site"
+        );
+        assert!(
+            code.contains("if prints_cycle_separator(&args) {"),
+            "the separator must be gated by the seam"
+        );
+    }
+
+    #[test]
+    fn both_modes_run_the_same_cycle_body() {
+        // The spec's seam: --watch must not grow its own poll/print path that
+        // could drift from --once. Pinned by scanning this file's own source —
+        // exactly one definition and one call site, so a second, watch-only
+        // body fails here. Same technique as the Egress::new pin above.
+        const SRC: &str = include_str!("main.rs");
+
+        let code: String = SRC[..SRC
+            .find("#[cfg(test)]")
+            .expect("test module marker not found")]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(code.contains("fn run_cycle("), "the cycle seam is missing");
+        assert_eq!(
+            code.matches("run_cycle(").count(),
+            2,
+            "expected one definition and exactly one call site"
+        );
+    }
+
+    #[test]
+    fn help_documents_the_watch_mode_and_its_floor() {
+        assert!(HELP.contains("--watch <SECS>"), "{HELP}");
+        // The floor is a number a script author must know before writing a
+        // loop, so it appears in the help, not just in the error.
+        assert!(
+            HELP.contains(&WATCH_MIN_INTERVAL_SECS.to_string()),
+            "{HELP}"
+        );
+        assert!(HELP.contains("NDJSON"), "{HELP}");
     }
 }

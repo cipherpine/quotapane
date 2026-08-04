@@ -298,6 +298,70 @@ fn fail_at_outside_one_to_hundred_exits_two_before_polling() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+// --- M12 P2: --watch, the second mode ---
+
+#[test]
+fn help_lists_the_watch_mode_and_the_two_mode_usage_line() {
+    let out = Command::new(BIN)
+        .arg("--help")
+        .output()
+        .expect("failed to run quotapane-cli");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(stdout.contains("--watch <SECS>"), "{stdout}");
+    assert!(
+        stdout.contains("usage: quotapane-cli (--once | --watch <SECS>)"),
+        "the usage line must show two modes, not one: {stdout}"
+    );
+    // The floor and the NDJSON behavior are both things a script author needs
+    // before writing the loop.
+    assert!(stdout.contains("180"), "{stdout}");
+    assert!(stdout.contains("NDJSON"), "{stdout}");
+}
+
+#[test]
+fn watch_below_the_polling_floor_exits_two_with_the_floor_message() {
+    // Rejected at parse time — the floor cannot be argued past by starting the
+    // run and rate-limiting later.
+    for bad in ["1", "60", "179"] {
+        let out = Command::new(BIN)
+            .args(["--watch", bad])
+            .output()
+            .expect("failed to run quotapane-cli");
+
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "`--watch {bad}` must exit 2, got {:?}",
+            out.status.code()
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--watch interval must be at least 180 seconds (the polling floor)"),
+            "expected the floor message verbatim for {bad}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn the_two_modes_cannot_be_combined() {
+    let out = Command::new(BIN)
+        .args(["--once", "--watch", "300"])
+        .output()
+        .expect("failed to run quotapane-cli");
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "--once with --watch must be a usage error"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--once and --watch cannot be combined"),
+        "expected the mode-conflict diagnostic: {stderr}"
+    );
+}
+
 #[test]
 fn missing_required_mode_still_errors() {
     let out = Command::new(BIN)
