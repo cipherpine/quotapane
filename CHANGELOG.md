@@ -5,6 +5,43 @@ All notable changes to QuotaPane are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-08-04
+
+The automation release: the CLI becomes a quota gate for scripts and
+agents.
+
+### Added
+
+- **`--fail-at <N>`.** After polling, if any reported window — headline or
+  per-model — has reached N% used, the CLI prints one stderr line naming the
+  worst offender (`fail-at: claude 5h at 92% >= 90%`) and exits with code 3.
+  The gate deliberately covers every window the providers report: a per-model
+  quota can block your run just as surely as a headline one. Scripts wanting
+  narrower semantics can filter `--json` themselves.
+- **`--watch <SECS>`.** A second mode alongside `--once`: poll on an
+  interval (minimum 180 seconds — the same floor the window's own poller
+  honors). Text mode prints each cycle under an RFC 3339 timestamp
+  separator; with `--json`, output is NDJSON — one compact line per cycle,
+  readable as a stream. Combined with `--fail-at`, the first tripping cycle
+  exits 3.
+- **Documented exit codes** in `--help`: 0 success (with `--fail-at`: all
+  windows under the threshold), 1 provider or credential error, 2 usage
+  error, 3 gate tripped.
+- **A written JSON stability contract** (`docs/cli-json.md`): every `--json`
+  key documented with type and nullability, plus the policy — keys are never
+  renamed or removed within a major version; new keys may be added in any
+  release and are announced here; consumers must ignore keys they do not
+  recognize.
+
+### Changed
+
+- `--once` is no longer described as the only mode; the usage line reads
+  `(--once | --watch <SECS>)`. `--once --json` output is byte-for-byte
+  unchanged; `--watch --json` differs only in whitespace.
+
+No JSON key was added, removed, or renamed in this release. Zero new
+dependencies.
+
 ## [1.4.1] - 2026-08-01
 
 A small patch: the expired-token experience now explains itself.
