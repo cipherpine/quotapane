@@ -708,3 +708,23 @@ The §3 bar before every commit: cargo fmt --all --check; cargo clippy --workspa
 
 End gate: push, CI green on all 8 required checks, write the full report to reports/m12-endgate.md, commit it ("reports: M12 end-gate"), push, CI green, STOP. You are headless: any ambiguity, permission denial, or §4.7 conflict is a STOP recorded in the report file — never a workaround. Acceptance is the owner's.
 ```
+
+## M12-RELEASE — v1.5.0 (three dispatched legs)
+
+### Leg A (queued on owner acceptance)
+
+```
+You are a headless floor release session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. Read CLAUDE.md, then DECISIONS.md in full — §4 stops override everything. Then read prompts/m12-release.md and execute LEG A ONLY: preconditions (mismatch = STOP), Phase 1 (1.4.1 → 1.5.0, lock moves only the three members, CHANGELOG entry verbatim from the spec, §3 bar + checker, push, CI 8/8), Phase 2 (tag v1.5.0-rc.1, release 3/3, tools/release-verify.sh v1.5.0-rc.1 verbatim, content spot-check), then write reports/m12-release-rc.md, commit that one file, push, CI green, and EXIT. You never tag v1.5.0, never publish, never proceed to Leg B — the hard stop is your session ending. A tooling failure or any §4.7 conflict is recorded in the report file, not worked around.
+```
+
+### Leg B (queued ONLY by the top tier — the act of queuing is the written go-ahead)
+
+```
+You are a headless floor release session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. This queue file was written by the top tier after independently verifying reports/m12-release-rc.md — that is the Phase-3 go-ahead. Read CLAUDE.md, DECISIONS.md, then prompts/m12-release.md and execute LEG B ONLY: confirm reports/m12-release-rc.md exists on main and no v1.5.0 tag exists (else STOP); tag v1.5.0 on the "release: v1.5.0" commit; release run 3/3; tools/release-verify.sh v1.5.0 fresh — only after RESULT: PASS prune the rc tag and rc draft; write reports/m12-release-draft.md with the draft URL, commit, push, CI green, EXIT. You never publish — the owner does.
+```
+
+### Leg C (queued ONLY after the owner confirms publication)
+
+```
+You are a headless floor release session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. The owner has published v1.5.0. Read CLAUDE.md, DECISIONS.md, then prompts/m12-release.md and execute LEG C ONLY: verify via gh that the v1.5.0 release has non-null publishedAt (else STOP); apply the spec's Patch A to DECISIONS.md under full §4a discipline (OLD/NEW extracted programmatically from the spec's bytes, unique before and after, DECISIONS.md the only protected file); write reports/m12-release-endgate.md with the full release ledger; commit both files ("docs: v1.5.0 published; M12 accepted (owner)"), push, CI green on all 8 required checks, EXIT. Nothing further is queued.
+```
