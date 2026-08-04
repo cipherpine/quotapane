@@ -101,8 +101,11 @@ case "$(uname -s)" in
   Linux)                BIN="$(find x_lin -name quotapane-cli    | head -1)"; chmod +x "$BIN" 2>/dev/null;;
 esac
 if [ -n "$BIN" ]; then
-  V="$("$BIN" --version 2>&1)" && grep -q "${TAG#v}" <<<"$V" && "$BIN" --help >/dev/null 2>&1 \
-    && pass "step 6: shipped CLI runs ($V)" || fail "step 6: shipped CLI ($V)"
+  # An rc tag points at the exact commit that ships as the final version, so
+  # the crate version has no -rc suffix; assert against the base version.
+  BASEVER="${TAG#v}"; BASEVER="${BASEVER%%-rc.*}"
+  V="$("$BIN" --version 2>&1)" && grep -q "$BASEVER" <<<"$V" && "$BIN" --help >/dev/null 2>&1 \
+    && pass "step 6: shipped CLI runs ($V, matches $BASEVER)" || fail "step 6: shipped CLI ($V, wanted $BASEVER)"
 else
   STEP6="skipped"
   note "step 6: SKIP — no binary for this host platform (record as skipped, not passed)"
