@@ -241,6 +241,63 @@ fn unknown_flag_still_errors() {
     );
 }
 
+// --- M12 P1: --fail-at ---
+
+#[test]
+fn help_prints_the_exit_codes_block() {
+    // The gate is only usable if a script author can look up what 3 means.
+    let out = Command::new(BIN)
+        .arg("--help")
+        .output()
+        .expect("failed to run quotapane-cli");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains(
+            "\
+exit codes:
+  0  success; with --fail-at: all windows under the threshold
+  1  a provider or credential error
+  2  usage error
+  3  --fail-at tripped: a window reached the threshold
+"
+        ),
+        "the exit-code section is missing or reworded: {stdout}"
+    );
+    assert!(stdout.contains("--fail-at <N>"), "{stdout}");
+}
+
+#[test]
+fn fail_at_outside_one_to_hundred_exits_two_before_polling() {
+    // Rejected at parse time, so nothing is read and nothing is sent — a
+    // mistyped threshold costs a usage error, not a request.
+    for bad in ["0", "101", "ninety"] {
+        let out = Command::new(BIN)
+            .args(["--once", "--fail-at", bad])
+            .output()
+            .expect("failed to run quotapane-cli");
+
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "`--fail-at {bad}` must exit 2, got {:?}",
+            out.status.code()
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--fail-at must be a whole number from 1 to 100"),
+            "expected the range diagnostic for {bad}: {stderr}"
+        );
+    }
+
+    // A missing value is a usage error too, not a threshold of "nothing".
+    let out = Command::new(BIN)
+        .args(["--once", "--fail-at"])
+        .output()
+        .expect("failed to run quotapane-cli");
+    assert_eq!(out.status.code(), Some(2));
+}
+
 #[test]
 fn missing_required_mode_still_errors() {
     let out = Command::new(BIN)

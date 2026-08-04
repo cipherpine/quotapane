@@ -54,11 +54,15 @@ const HELP: &str = "\
 QuotaPane CLI — read your own Claude and Codex subscription usage locally.
 
 usage: quotapane-cli --once [--json] [--provider claude|codex|all]
-                     [--client-version <VER>] [--debug-raw]
+                     [--fail-at <N>] [--client-version <VER>] [--debug-raw]
                      [--debug-raw-unsafe] [--allow-proxy]
 
 Options:
   --once                  Poll once and exit. Required — the only mode today.
+  --fail-at <N>           Exit 3 if any window is at or over N percent used
+                          (N is 1–100). Checked after the normal output is
+                          printed, over every window of every provider that
+                          polled successfully — headline and per-model both.
   --json                  Print the normalized snapshot as JSON instead of a
                           text summary. With --provider all, prints an array.
   --provider <WHICH>      Which provider to poll: claude, codex, or all.
@@ -86,6 +90,12 @@ Options:
 Credentials are read from your local claude/codex CLI files, read-only; they
 are never written, logged, or persisted. If a token has expired, run `claude`
 or `codex` to refresh it.
+
+exit codes:
+  0  success; with --fail-at: all windows under the threshold
+  1  a provider or credential error
+  2  usage error
+  3  --fail-at tripped: a window reached the threshold
 ";
 
 /// Which provider(s) to poll (`--provider`). Defaults to Claude for backward
@@ -107,6 +117,71 @@ fn parse_provider(s: &str) -> Result<ProviderSel, String> {
             "--provider must be one of claude|codex|all (got {other:?})"
         )),
     }
+}
+
+/// Parse the `--fail-at` value: a whole percentage in `1..=100`.
+///
+/// Neither end is clamped. `0` would trip on an untouched account and `101`
+/// could never trip at all — both are a script author's mistake, and a gate
+/// that silently "corrects" one is worse than a gate that refuses to start.
+fn parse_fail_at(s: &str) -> Result<u32, String> {
+    match s.parse::<u32>() {
+        Ok(n) if (1..=100).contains(&n) => Ok(n),
+        _ => Err(format!(
+            "--fail-at must be a whole number from 1 to 100 (got {s:?})"
+        )),
+    }
+}
+
+/// A used fraction as a whole percentage, rounded **exactly as the window
+/// rounds it** (`usage-ui`: `(f * 100.0).round().clamp(0.0, 100.0)`).
+///
+/// The agreement is the point: a gate that rounded differently would fail a
+/// script at a number the user never saw on screen. The clamp also keeps a
+/// provider reporting over-quota usage from printing `137%`.
+fn window_percent(used_fraction: f64) -> i64 {
+    (used_fraction * 100.0).round().clamp(0.0, 100.0) as i64
+}
+
+/// The worst window at or over `n` percent, or `None` if nothing reaches it.
+///
+/// Pure: no clock, no I/O, no exit — just the normalized snapshots the poll
+/// already produced, so the whole gate is unit-testable without a network.
+///
+/// Every window of every snapshot counts, **headline and per-model**: a gate
+/// fails safe, and a script that wants narrower semantics can filter `--json`
+/// itself. A window with unknown usage is skipped rather than read as 0 or
+/// 100 — "unknown" is not a measurement. Ties go to the earlier one, which
+/// given the caller's ordering means provider order, then window order with
+/// headline windows before per-model rows.
+fn worst_at_or_over(snapshots: &[ProviderSnapshot], n: u32) -> Option<(ProviderId, &str, i64)> {
+    let mut worst: Option<(ProviderId, &str, i64)> = None;
+    for snapshot in snapshots {
+        for window in snapshot.windows.iter().chain(snapshot.per_model.iter()) {
+            let Some(fraction) = window.used_fraction else {
+                continue;
+            };
+            let percent = window_percent(fraction);
+            if percent < i64::from(n) {
+                continue;
+            }
+            if worst.is_none_or(|(_, _, highest)| percent > highest) {
+                worst = Some((snapshot.provider, window.label.as_str(), percent));
+            }
+        }
+    }
+    worst
+}
+
+/// The single stderr line a tripped `--fail-at` prints, byte-exact.
+///
+/// A named function rather than an inline `eprintln!` so the exact bytes are
+/// unit-testable: this string ends up in other people's CI logs.
+fn fail_at_line(provider: ProviderId, label: &str, percent: i64, n: u32) -> String {
+    format!(
+        "fail-at: {} {label} at {percent}% >= {n}%",
+        provider_cli_name(provider)
+    )
 }
 
 /// The provider ids a selection expands to, in output order.
@@ -180,6 +255,8 @@ struct Args {
     debug_raw_unsafe: bool,
     /// Opt in to the proxy environment for this run (SECURITY.md invariant 7).
     allow_proxy: bool,
+    /// `--fail-at <N>`: exit 3 when a window reaches N percent used.
+    fail_at: Option<u32>,
 }
 
 /// The `proxy_opt_in` argument this run hands to [`Egress::new`].
@@ -289,6 +366,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
     let mut debug_raw = false;
     let mut debug_raw_unsafe = false;
     let mut allow_proxy = false;
+    let mut fail_at: Option<u32> = None;
 
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
@@ -322,6 +400,12 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
                     .ok_or_else(|| "--client-version requires a value".to_string())?;
                 client_version = Some(value);
             }
+            "--fail-at" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--fail-at requires a value".to_string())?;
+                fail_at = Some(parse_fail_at(&value)?);
+            }
             other => return Err(format!("unrecognized argument: {other}")),
         }
     }
@@ -339,6 +423,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
         debug_raw,
         debug_raw_unsafe,
         allow_proxy,
+        fail_at,
     }))
 }
 
@@ -371,7 +456,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
-                "usage: quotapane-cli --once [--json] [--provider claude|codex|all] [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe] [--allow-proxy]"
+                "usage: quotapane-cli --once [--json] [--provider claude|codex|all] [--fail-at <N>] [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe] [--allow-proxy]"
             );
             eprintln!("try `quotapane-cli --help` for the full list of options");
             return ExitCode::from(2);
@@ -503,6 +588,19 @@ fn main() -> ExitCode {
     } else {
         for snapshot in &snapshots {
             print_summary(snapshot);
+        }
+    }
+
+    // The gate runs after the normal output, so a script that trips still has
+    // the full picture in its log. It sees only snapshots that actually
+    // polled: an errored provider is exit-1 territory (below), never a silent
+    // pass through the gate.
+    if let Some(n) = args.fail_at {
+        if let Some((provider, label, percent)) = worst_at_or_over(&snapshots, n) {
+            eprintln!("{}", fail_at_line(provider, label, percent, n));
+            // Precedence: a trip outranks a provider error. The script asked
+            // "am I about to run out?", and the answer is yes.
+            return ExitCode::from(3);
         }
     }
 
@@ -1382,5 +1480,247 @@ mod tests {
     fn help_text_names_the_renamed_binary() {
         assert!(HELP.contains("quotapane-cli"));
         assert!(!HELP.contains("usage-cli"));
+    }
+
+    // --- M12 P1: --fail-at, the scripted quota gate ---
+
+    use usage_core::model::{QuotaWindow, SnapshotSource};
+
+    /// A window with only the two fields the gate reads.
+    fn win(label: &str, used_fraction: Option<f64>) -> QuotaWindow {
+        QuotaWindow {
+            label: label.to_string(),
+            used_fraction,
+            resets_in_secs: Some(3600),
+            duration_secs: Some(18_000),
+        }
+    }
+
+    /// A snapshot carrying the given headline and per-model windows.
+    fn snap(
+        provider: ProviderId,
+        windows: Vec<QuotaWindow>,
+        per_model: Vec<QuotaWindow>,
+    ) -> ProviderSnapshot {
+        ProviderSnapshot {
+            provider,
+            taken_at_unix_secs: 1_784_000_000,
+            windows,
+            per_model,
+            reset_credits: None,
+            source: SnapshotSource::UsageEndpoint,
+        }
+    }
+
+    #[test]
+    fn fail_at_defaults_off_and_parses_a_threshold() {
+        assert_eq!(parse_run(&["--once"]).fail_at, None);
+        assert_eq!(parse_run(&["--once", "--fail-at", "90"]).fail_at, Some(90));
+        // Order-independent, like every other flag.
+        assert_eq!(
+            parse_run(&["--fail-at", "1", "--provider", "codex", "--once"]).fail_at,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn fail_at_accepts_only_1_through_100() {
+        assert_eq!(parse_fail_at("1"), Ok(1));
+        assert_eq!(parse_fail_at("100"), Ok(100));
+        // A gate at 0 would trip on an untouched account, and >100 could never
+        // trip — both are user error, not a silently clamped value.
+        for bad in ["0", "101", "-1", "50.5", "", "ninety", "90%", " 90"] {
+            assert!(parse_fail_at(bad).is_err(), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn fail_at_with_a_bad_value_or_no_value_is_a_usage_error() {
+        assert!(parse_args(args(&["--once", "--fail-at"])).is_err());
+        assert!(parse_args(args(&["--once", "--fail-at", "0"])).is_err());
+        assert!(parse_args(args(&["--once", "--fail-at", "101"])).is_err());
+        assert!(parse_args(args(&["--once", "--fail-at", "lots"])).is_err());
+    }
+
+    #[test]
+    fn worst_at_or_over_returns_none_for_empty_input() {
+        assert_eq!(worst_at_or_over(&[], 1), None);
+        // A snapshot with no windows at all is the same story.
+        let empty = snap(ProviderId::ClaudeSubscription, vec![], vec![]);
+        assert_eq!(worst_at_or_over(std::slice::from_ref(&empty), 1), None);
+    }
+
+    #[test]
+    fn worst_at_or_over_trips_at_exactly_the_threshold() {
+        // The boundary the spec pins: == N trips, N-1 does not.
+        let s = [snap(
+            ProviderId::ClaudeSubscription,
+            vec![win("5h", Some(0.90))],
+            vec![],
+        )];
+        assert_eq!(
+            worst_at_or_over(&s, 90),
+            Some((ProviderId::ClaudeSubscription, "5h", 90))
+        );
+        assert_eq!(worst_at_or_over(&s, 91), None);
+        assert_eq!(
+            worst_at_or_over(&s, 89),
+            Some((ProviderId::ClaudeSubscription, "5h", 90))
+        );
+    }
+
+    #[test]
+    fn worst_at_or_over_rounds_as_the_window_rounds() {
+        // usage-ui renders `(f * 100.0).round().clamp(0.0, 100.0)`. The gate
+        // must agree to the percentage point, or a script fails on a number
+        // the user never saw.
+        let half_up = [snap(
+            ProviderId::ClaudeSubscription,
+            vec![win("5h", Some(0.895))],
+            vec![],
+        )];
+        assert_eq!(
+            worst_at_or_over(&half_up, 90),
+            Some((ProviderId::ClaudeSubscription, "5h", 90)),
+            "0.895 renders as 90% and must trip a 90% gate"
+        );
+
+        let just_under = [snap(
+            ProviderId::ClaudeSubscription,
+            vec![win("5h", Some(0.894))],
+            vec![],
+        )];
+        assert_eq!(
+            worst_at_or_over(&just_under, 90),
+            None,
+            "0.894 renders as 89%"
+        );
+
+        // Over-quota fractions clamp to 100 rather than reporting 137%.
+        let over = [snap(
+            ProviderId::ClaudeSubscription,
+            vec![win("5h", Some(1.37))],
+            vec![],
+        )];
+        assert_eq!(
+            worst_at_or_over(&over, 100),
+            Some((ProviderId::ClaudeSubscription, "5h", 100))
+        );
+    }
+
+    #[test]
+    fn worst_at_or_over_covers_per_model_buckets() {
+        // A gate fails safe: a per-model bucket at the threshold is a real
+        // exhaustion for the model a script is about to use.
+        let s = [snap(
+            ProviderId::CodexSubscription,
+            vec![win("5h", Some(0.10))],
+            vec![win("GPT-5.3-Codex-Max", Some(0.97))],
+        )];
+        assert_eq!(
+            worst_at_or_over(&s, 90),
+            Some((ProviderId::CodexSubscription, "GPT-5.3-Codex-Max", 97))
+        );
+    }
+
+    #[test]
+    fn worst_at_or_over_picks_the_highest_percentage() {
+        let s = [
+            snap(
+                ProviderId::ClaudeSubscription,
+                vec![win("5h", Some(0.91)), win("7d", Some(0.95))],
+                vec![win("7d-opus", Some(0.93))],
+            ),
+            snap(
+                ProviderId::CodexSubscription,
+                vec![win("5h", Some(0.99))],
+                vec![],
+            ),
+        ];
+        assert_eq!(
+            worst_at_or_over(&s, 90),
+            Some((ProviderId::CodexSubscription, "5h", 99))
+        );
+    }
+
+    #[test]
+    fn worst_at_or_over_breaks_ties_by_provider_then_window_order() {
+        // Same percentage everywhere: the first provider in output order wins,
+        // and within a provider the first window — headline before per-model.
+        let s = [
+            snap(
+                ProviderId::ClaudeSubscription,
+                vec![win("5h", Some(0.92)), win("7d", Some(0.92))],
+                vec![win("7d-opus", Some(0.92))],
+            ),
+            snap(
+                ProviderId::CodexSubscription,
+                vec![win("5h", Some(0.92))],
+                vec![],
+            ),
+        ];
+        assert_eq!(
+            worst_at_or_over(&s, 90),
+            Some((ProviderId::ClaudeSubscription, "5h", 92))
+        );
+
+        // With the headline windows below the threshold, the tie is decided
+        // among the per-model rows in their own order.
+        let per_model_only = [snap(
+            ProviderId::CodexSubscription,
+            vec![win("5h", Some(0.10))],
+            vec![win("first", Some(0.92)), win("second", Some(0.92))],
+        )];
+        assert_eq!(
+            worst_at_or_over(&per_model_only, 90),
+            Some((ProviderId::CodexSubscription, "first", 92))
+        );
+    }
+
+    #[test]
+    fn worst_at_or_over_ignores_windows_with_unknown_usage() {
+        // "Unknown" is not "under the threshold" and not "over" it — the gate
+        // simply has nothing to judge, and must not read it as 0 or as 100.
+        let s = [snap(
+            ProviderId::ClaudeSubscription,
+            vec![win("5h", None), win("7d", Some(0.50))],
+            vec![win("7d-opus", None)],
+        )];
+        assert_eq!(worst_at_or_over(&s, 90), None);
+        assert_eq!(
+            worst_at_or_over(&s, 50),
+            Some((ProviderId::ClaudeSubscription, "7d", 50))
+        );
+    }
+
+    #[test]
+    fn fail_at_line_is_byte_exact() {
+        // The line a script's log will show. Pinned in full: this is the
+        // milestone's user-visible contract.
+        assert_eq!(
+            fail_at_line(ProviderId::ClaudeSubscription, "5h", 92, 90),
+            "fail-at: claude 5h at 92% >= 90%"
+        );
+        assert_eq!(
+            fail_at_line(ProviderId::CodexSubscription, "GPT-5.3-Codex-Max", 100, 100),
+            "fail-at: codex GPT-5.3-Codex-Max at 100% >= 100%"
+        );
+    }
+
+    #[test]
+    fn help_documents_the_exit_codes_verbatim() {
+        // Scripts branch on these numbers; the block is part of the contract.
+        assert!(
+            HELP.contains(
+                "\
+exit codes:
+  0  success; with --fail-at: all windows under the threshold
+  1  a provider or credential error
+  2  usage error
+  3  --fail-at tripped: a window reached the threshold
+"
+            ),
+            "{HELP}"
+        );
     }
 }
