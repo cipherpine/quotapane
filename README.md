@@ -23,6 +23,7 @@ The entire value proposition is a **small, auditable trust boundary**. Credentia
 - **Staleness** — the window tells you when the data is older than it should be, rather than quietly showing you a stale number.
 - **System tray** — an icon rendering current usage, with a tooltip and a Show/Hide/Quit menu (Windows and macOS; see [Platform support](#platform-support)).
 - **Headless mode** — `quotapane-cli` prints the same normalized snapshot as text or JSON, for scripts, for cron, and for proving to yourself what the app talks to. (Text output is a compact summary; per-model rows and reset credits appear in `--json` and the window.)
+- **A gate for scripted runs** — `--fail-at <N>` exits non-zero when a quota window reaches N percent, and `--watch <SECS>` polls on an interval, so a long agentic or batch run can stop *before* it dies mid-flight. QuotaPane runs no commands of its own: it reports, your script decides.
 
 Two binaries are produced: `quotapane` (the window) and `quotapane-cli` (headless).
 
@@ -135,23 +136,43 @@ quotapane [--client-version <VER>] [--codex-user-agent <UA>] [--no-tray]
 | `--codex-user-agent <UA>` | Override the `User-Agent` sent to the Codex endpoint. Defaults to the Codex CLI's own. |
 | `--no-tray` | Start without the system tray icon. The escape hatch if tray creation fails. |
 
-The headless CLI requires `--once`; one-shot polling is its only mode today.
+The headless CLI takes exactly one mode: `--once` or `--watch <SECS>`.
 
 ```
-quotapane-cli --once [--json] [--provider claude|codex|all]
+quotapane-cli (--once | --watch <SECS>) [--json]
+              [--provider claude|codex|all] [--fail-at <N>]
               [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe]
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--once` | Poll once and exit. **Required.** |
-| `--json` | Emit the normalized snapshot as JSON instead of a text summary. With `--provider all`, emits an array. |
+| `--once` | Poll once and exit. Exactly one of `--once` and `--watch` is required. |
+| `--watch <SECS>` | Poll every `SECS` seconds until interrupted. `SECS` must be at least **180** — the same polling floor the window respects, applied to scripted polling too. Text output precedes each cycle with a `--- <RFC 3339 UTC timestamp> ---` separator; with `--json`, each cycle is one compact line (NDJSON). |
+| `--fail-at <N>` | Exit **3** if any window is at or over `N` percent used (`N` is 1–100), after printing the normal output. Checked over every window of every provider that polled successfully — headline **and** per-model, because a gate should fail safe. Under `--watch`, the first tripping cycle exits. |
+| `--json` | Emit the normalized snapshot as JSON instead of a text summary. With `--provider all`, emits an array. The keys are documented in [`docs/cli-json.md`](docs/cli-json.md), which also states the stability policy. |
 | `--provider <WHICH>` | `claude`, `codex`, or `all`. Default: `claude`. |
 | `--client-version <VER>` | As above. |
 | `--debug-raw` | Print the provider's wire response instead of a snapshot, for pinning an undocumented endpoint's schema. Takes precedence over `--json`. **Redacted by default:** the value of every `email`, `user_id`, `account_id`, and `id` key is replaced with `«redacted»` at any nesting depth, and a body that is not valid JSON is withheld rather than dumped. |
 | `--debug-raw-unsafe` | The same dump, byte-exact — no redaction, no withholding — after a stderr warning. The output can contain your email address and account identifiers, so treat it as private. Implies `--debug-raw`. |
 | `--allow-proxy` | Send this run through the proxy in your environment. Off by default, and the default **fails closed**: while `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` (either casing) is set and this flag is absent, QuotaPane sends nothing and exits with an error naming the variable — it does not connect directly instead. A TLS-inspecting proxy can read your bearer token, so opting in is explicit and lasts one run. The window has no equivalent flag. |
 | `-h`, `--help` / `--version` | Print help or version and exit. |
+
+Exit codes — what a script branches on:
+
+| Code | Meaning |
+|---|---|
+| `0` | Success; with `--fail-at`, all windows under the threshold. |
+| `1` | A provider or credential error. |
+| `2` | Usage error. |
+| `3` | `--fail-at` tripped: a window reached the threshold. |
+
+So the gate in front of a long run is one line:
+
+```sh
+quotapane-cli --once --provider all --fail-at 85 || exit 1
+```
+
+QuotaPane never executes anything on your behalf — `--fail-at` reports, and your script decides.
 
 If a token has expired, QuotaPane says so and tells you to run `claude` or `codex` — it never refreshes tokens itself.
 
