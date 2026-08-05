@@ -748,3 +748,23 @@ End gate: push, CI green on all 8 required checks, write the full report to repo
 ```
 You are a headless floor session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. Read DECISIONS.md fully — §3, §4, §4.4, §4.5, §4.7 govern. Then read prompts/m13-r1-sparkline-iteration.md and execute it exactly: sparkline strip 16px with TEXT_DIM full-alpha 1.5px stroke + alpha-18 fill, a TEXT full-alpha 2.5px "now" dot at the newest point, a TEXT_FAINT `24h` tag above the right edge, and a demo-only taller initial window sized from the layout harness so the full demo renders unscrolled — production default size untouched, the renders-as-v1.5.0 pins must stay green. Zero new dependencies, no §4.1 bytes, no --json changes, no version bump. §3 bar + check-invariants before the commit. End gate: push, CI 8/8, write reports/m13-r1-endgate.md, commit it, push, CI green, EXIT — then the owner looks again (§4.5); you never accept visuals.
 ```
+
+## M13-RELEASE — v1.6.0 (three dispatched legs)
+
+### Leg A
+
+```
+You are a headless floor release session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. Read CLAUDE.md, then DECISIONS.md in full — §4 stops override everything. Then read prompts/m13-release.md and execute LEG A ONLY: preconditions (mismatch = STOP); Phase 1 in one commit — 1.5.0 → 1.6.0 (lock moves only the three members), git rm tools/m13-apply-p1-patches.py (authorized), CHANGELOG entry verbatim from the spec above ## [1.5.0], §3 bar + check-invariants, push, CI 8/8; Phase 2 — tag v1.6.0-rc.1, release 3/3, tools/release-verify.sh v1.6.0-rc.1 verbatim, content spot-check (alert:/24h in GUI binaries, "Theming and preferences" in shipped README); write reports/m13-release-rc.md, commit that one file, push, CI green, EXIT. You never tag v1.6.0, never publish, never proceed to Leg B.
+```
+
+### Leg B (queued ONLY by the top tier — queuing is the go-ahead)
+
+```
+You are a headless floor release session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. This queue file was written by the top tier after verifying reports/m13-release-rc.md — that is the Phase-3 go-ahead. Read CLAUDE.md, DECISIONS.md, then prompts/m13-release.md and execute LEG B ONLY: confirm the rc report is on main and no v1.6.0 tag exists (else STOP); tag v1.6.0 on the "release: v1.6.0" commit; release 3/3; tools/release-verify.sh v1.6.0 fresh — only after RESULT: PASS prune the rc tag and draft; write reports/m13-release-draft.md with the draft URL, commit, push, CI green, EXIT. You never publish — the owner does.
+```
+
+### Leg C (queued ONLY after the owner confirms publication)
+
+```
+You are a headless floor release session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. The owner has published v1.6.0. Read CLAUDE.md, DECISIONS.md, then prompts/m13-release.md and execute LEG C ONLY: verify via gh that v1.6.0 has non-null publishedAt (else STOP); apply the spec's single §4a patch to DECISIONS.md (OLD/NEW extracted programmatically from the spec's bytes, unique before and after, DECISIONS.md the only protected file); write reports/m13-release-endgate.md; commit both ("docs: v1.6.0 published; M13 accepted (owner)"), push, record that commit's CI in a follow-up report commit per the M13 pattern, CI green on all 8 required checks, EXIT. Nothing further is queued.
+```
