@@ -104,8 +104,9 @@ pub enum AlertMode {
 }
 
 impl AlertMode {
-    /// The word written to disk.
-    fn as_word(self) -> &'static str {
+    /// The word written to disk — and the one the alert banner prints, so the
+    /// line a user reads names the setting they would edit.
+    pub fn as_word(self) -> &'static str {
         match self {
             AlertMode::Pace => "pace",
             AlertMode::Threshold => "threshold",

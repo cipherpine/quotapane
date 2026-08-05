@@ -60,6 +60,26 @@ const CLEAR: [u8; 4] = [0, 0, 0, 0];
 /// Pure and deterministic: same inputs, same bytes. That is what lets the tray
 /// wiring skip the platform call when nothing changed.
 pub fn render_icon(claude: Option<f32>, codex: Option<f32>, size: u32) -> Vec<u8> {
+    render_icon_with_alert(claude, codex, size, false)
+}
+
+/// The mark, optionally in its **alert** variant: a 1-pixel CARDINAL ring
+/// around the tile's edge (M13).
+///
+/// One pixel at the requested size, not one unit of the 64-unit viewBox, so the
+/// ring reads as a hairline outline at 32px in the tray rather than as a thick
+/// red border. Painted, like everything else here — no second asset, no
+/// decoder, no dependency, and nothing to keep in sync with the base mark.
+///
+/// The ring is the *only* difference: with `alert` false this is byte-for-byte
+/// the mark M7b accepted, which is what lets the tray revert simply by asking
+/// for it again.
+pub fn render_icon_with_alert(
+    claude: Option<f32>,
+    codex: Option<f32>,
+    size: u32,
+    alert: bool,
+) -> Vec<u8> {
     let n = size as usize;
     let mut px = vec![0u8; n * n * 4];
     if n == 0 {
@@ -67,12 +87,14 @@ pub fn render_icon(claude: Option<f32>, codex: Option<f32>, size: u32) -> Vec<u8
     }
 
     let scale = VIEW / size as f32;
+    // The ring's thickness in viewBox units: exactly one device pixel.
+    let ring = if alert { scale } else { 0.0 };
     for y in 0..n {
         for x in 0..n {
             // Sample at the pixel centre, in the mark's 64-unit space.
             let u = (x as f32 + 0.5) * scale;
             let v = (y as f32 + 0.5) * scale;
-            let color = sample(u, v, claude, codex);
+            let color = sample(u, v, claude, codex, ring);
             let i = (y * n + x) * 4;
             px[i..i + 4].copy_from_slice(&color);
         }
@@ -81,7 +103,7 @@ pub fn render_icon(claude: Option<f32>, codex: Option<f32>, size: u32) -> Vec<u8
 }
 
 /// Colour of the mark at one point, resolved topmost-layer-first.
-fn sample(u: f32, v: f32, claude: Option<f32>, codex: Option<f32>) -> [u8; 4] {
+fn sample(u: f32, v: f32, claude: Option<f32>, codex: Option<f32>, ring: f32) -> [u8; 4] {
     // Bars (topmost): trough always, fill up to the fraction.
     for (bar_y, fraction) in [(BAR1_Y, claude), (BAR2_Y, codex)] {
         if in_round_rect(
@@ -131,6 +153,23 @@ fn sample(u: f32, v: f32, claude: Option<f32>, codex: Option<f32>) -> [u8; 4] {
     // pixels are simply dropped rather than antialiased — at 32px and below the
     // difference is invisible, and it keeps this a pure geometry test.
     if in_round_rect(u, v, 0.0, 0.0, VIEW, VIEW, TILE_RADIUS) {
+        // The alert ring rides the tile's own edge, so it follows the rounded
+        // corners and never squares them off. Checked after the mark's contents
+        // (bars, dots, outline), all of which sit well inside it, so the ring
+        // can only ever replace tile background.
+        if ring > 0.0
+            && !in_round_rect(
+                u,
+                v,
+                ring,
+                ring,
+                VIEW - ring,
+                VIEW - ring,
+                (TILE_RADIUS - ring).max(0.0),
+            )
+        {
+            return crate::CARDINAL.to_array();
+        }
         return crate::GROUND.to_array();
     }
 

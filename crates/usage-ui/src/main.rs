@@ -45,6 +45,20 @@
 //! exactly as it did before. All of it recomputes on poll events only, and
 //! `--pace-demo` renders a fixed synthetic scenario (no polling, no network) so
 //! the feature can be reviewed without waiting hours for one to occur.
+//!
+//! M13 follows the pace work on: preferences, memory, and a way to be told.
+//! `config.cfg` replaces the one-word `theme.cfg` (see [`config`]); with
+//! `history=on` each poll's headline readings are appended to `history.jsonl`
+//! and replayed into the pace rings at startup, so a forecast survives a
+//! restart, and the day's readings draw a 12px sparkline under each provider's
+//! bars. With `alerts=on` a window over `alert_at` — and, in the default
+//! `pace` mode, also being spent faster than it elapses — raises one banner,
+//! rings the tray icon, prefixes the tray tooltip, and asks the taskbar for
+//! attention once. All of it is off by default and dep-free: no notification
+//! crate, and every surface one the app already owned. `--pace-demo` fabricates
+//! a day of history in memory and forces the alert settings to on-at-the-
+//! defaults, so all of it can be seen without real data — and, having no
+//! history path, it writes none of that day to disk.
 
 use eframe::egui;
 use std::path::PathBuf;
@@ -62,7 +76,7 @@ use usage_core::providers::{
 mod config;
 mod icon;
 
-use config::{Config, Theme};
+use config::{AlertMode, Config, Theme, DEFAULT_ALERT_AT};
 
 /// Sent when `--client-version` is omitted. Mirrors `usage-cli`'s default —
 /// real Claude Code versions avoid the provider's aggressively rate-limited
@@ -733,6 +747,27 @@ fn demo_history(provider: ProviderId, windows: &[DemoWindow]) -> Vec<HistoryEntr
     entries
 }
 
+/// The preferences `--pace-demo` runs under: the user's, with the three alert
+/// settings forced to on-at-the-defaults (M13).
+///
+/// Forcing all three, not just `alerts`, is the point. The demo exists so the
+/// alert surfaces can be seen and screenshotted without waiting for a real
+/// quota to fill; a reviewer whose own `config.cfg` says `alert_at=95` would
+/// otherwise get a demo with no alert in it and no hint why. The theme is left
+/// alone, because that is a look and the reviewer chose it.
+///
+/// The scenario's Codex `5h` window — 80% spent at 75% elapsed — is what makes
+/// exactly one alert fire under these settings, through the ordinary rules
+/// (`the_demo_raises_exactly_one_alert` pins it).
+fn demo_config(base: Config) -> Config {
+    Config {
+        alerts: true,
+        alert_at: DEFAULT_ALERT_AT,
+        alert_mode: AlertMode::Pace,
+        ..base
+    }
+}
+
 /// The scenario, one entry per provider. Deliberately covers every state the
 /// feature can be in, so one look at the window reviews all of them:
 ///
@@ -751,7 +786,7 @@ fn demo_history(provider: ProviderId, windows: &[DemoWindow]) -> Vec<HistoryEntr
 ///   disclosure toggle appears with a ticked row behind it (and M7a's filter
 ///   still hides the untouched one).
 /// - **Codex reset credits** — one available, as the real account reports.
-fn demo_panes() -> Vec<ProviderPane> {
+fn demo_panes(config: &Config) -> Vec<ProviderPane> {
     let claude_windows = [
         DemoWindow {
             label: "5h",
@@ -819,11 +854,13 @@ fn demo_panes() -> Vec<ProviderPane> {
             ProviderId::ClaudeSubscription,
             claude,
             demo_history(ProviderId::ClaudeSubscription, &claude_windows),
+            config,
         ),
         ProviderPane::demo(
             ProviderId::CodexSubscription,
             codex,
             demo_history(ProviderId::CodexSubscription, &codex_windows),
+            config,
         ),
     ]
 }
@@ -901,6 +938,14 @@ fn tray_tooltip(entries: &[(&str, Option<&ProviderSnapshot>)]) -> String {
         .collect::<Vec<_>>()
         .join(" | ")
 }
+
+/// Prefixed to the tray tooltip while any provider is in alert (M13).
+///
+/// A tooltip is the one alert surface that has to survive being read out of
+/// context — hovering the tray says nothing about which pane is which — so the
+/// word comes first, before the per-provider summary. The dash is U+2014, as
+/// everywhere else in the product's copy.
+const ALERT_TOOLTIP_PREFIX: &str = "ALERT — ";
 
 /// Side length (px) of the square icon generated at runtime.
 ///
@@ -1110,6 +1155,24 @@ struct ProviderPane {
     /// off, or this is a demo pane, whose fabricated numbers must never reach
     /// the user's real log.
     history_path: Option<PathBuf>,
+    /// Labels of this pane's headline windows currently in alert (M13).
+    ///
+    /// This **is** the debounce: a label enters once, on the crossing, and
+    /// leaves only when the window falls back under the threshold. A `Vec`
+    /// rather than a set for the same reason [`Self::rings`] is one — a
+    /// provider reports one or two headline windows.
+    alerts_firing: Vec<String>,
+    /// The banner for the worst window currently in alert, already formatted.
+    ///
+    /// Stored rather than derived at render time, on the same repaint
+    /// discipline as [`Self::pace_warning`]: the window repaints about once a
+    /// second, and none of the inputs can have changed since the last poll.
+    /// Doubles as the "is this pane alerting" flag the tray reads.
+    alert_line: Option<String>,
+    /// The refill line, shown for the one poll cycle after a window drops back
+    /// under the threshold, then cleared. There is no ongoing state to report —
+    /// a quota that is fine is reported by the pane looking normal.
+    refill_line: Option<String>,
     /// This provider's at-risk line, or `None` for "nothing to say".
     ///
     /// Recomputed **only** when a snapshot arrives, and stored rather than
@@ -1157,6 +1220,9 @@ impl ProviderPane {
             history: Vec::new(),
             history_enabled: false,
             history_path: None,
+            alerts_firing: Vec::new(),
+            alert_line: None,
+            refill_line: None,
             pace_warning: None,
         }
     }
@@ -1173,7 +1239,12 @@ impl ProviderPane {
     /// `history` is the fabricated 24 h trail behind the sparkline. It is held
     /// in memory only: `history_path` stays `None`, so a demo run cannot write
     /// a single invented reading into the user's real `history.jsonl`.
-    fn demo(id: ProviderId, series: Vec<ProviderSnapshot>, history: Vec<HistoryEntry>) -> Self {
+    fn demo(
+        id: ProviderId,
+        series: Vec<ProviderSnapshot>,
+        history: Vec<HistoryEntry>,
+        config: &Config,
+    ) -> Self {
         let mut pane = ProviderPane {
             id,
             handle: None,
@@ -1186,14 +1257,20 @@ impl ProviderPane {
             history,
             history_enabled: true,
             history_path: None,
+            alerts_firing: Vec::new(),
+            alert_line: None,
+            refill_line: None,
             pace_warning: None,
         };
         for snapshot in series {
             pane.ingest_pace(&snapshot);
-            // The same call a real poll makes, so the demo's last hour joins the
-            // fabricated day through the shipping code rather than beside it.
-            // With no `history_path` this touches memory only.
+            // The same calls a real poll makes, so the demo's last hour joins
+            // the fabricated day through the shipping code rather than beside
+            // it, and the alert surfaces are raised by the alert rules rather
+            // than switched on for the screenshot. With no `history_path` this
+            // touches memory only.
             pane.record_history(&snapshot);
+            pane.update_alerts(&snapshot, config);
             pane.latest_snapshot = Some(snapshot);
         }
         // The footer's age is the one thing the demo does not fake: it counts
@@ -1335,10 +1412,109 @@ impl ProviderPane {
         self.pace_warning = select_pace_warning(&candidates);
     }
 
+    /// Fold a fresh snapshot into this pane's alert state (M13).
+    ///
+    /// Returns `true` when a **new** alert was raised, which is the one event
+    /// that earns a taskbar attention request — a window that was already
+    /// alerting last poll and still is asks for nothing.
+    ///
+    /// Runs on the poll event, like the pace fit beside it, and leaves the two
+    /// rendered lines formatted and ready.
+    fn update_alerts(&mut self, snapshot: &ProviderSnapshot, config: &Config) -> bool {
+        // A label the provider has stopped reporting cannot refill, and would
+        // otherwise sit in the firing list forever suppressing a later crossing.
+        self.alerts_firing
+            .retain(|label| snapshot.windows.iter().any(|w| &w.label == label));
+
+        let mut raised = false;
+        let mut refilled: Option<String> = None;
+
+        for window in &snapshot.windows {
+            let already_firing = self.alerts_firing.iter().any(|l| l == &window.label);
+            match alert_action(
+                config,
+                window.used_fraction,
+                elapsed_fraction(window),
+                already_firing,
+            ) {
+                AlertAction::Fire => {
+                    self.alerts_firing.push(window.label.clone());
+                    raised = true;
+                }
+                AlertAction::Refill => {
+                    self.alerts_firing.retain(|l| l != &window.label);
+                    refilled = Some(window.label.clone());
+                }
+                AlertAction::Quiet => {}
+            }
+        }
+
+        // Worst offender only. Two alert lines in a 320px pane would make the
+        // reader compare them instead of act — the same choice the at-risk line
+        // makes (see `select_pace_warning`).
+        self.alert_line = snapshot
+            .windows
+            .iter()
+            .filter(|w| self.alerts_firing.iter().any(|l| l == &w.label))
+            .filter_map(|w| w.used_fraction.map(|used| (w, used)))
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(window, used)| {
+                alert_banner_line(
+                    self.id,
+                    &window.label,
+                    used,
+                    config.alert_at,
+                    config.alert_mode,
+                )
+            });
+
+        // Cleared and re-set every poll, so the notice shows once and the pane
+        // then goes back to looking ordinary.
+        self.refill_line =
+            refilled.map(|label| alert_refill_line(self.id, &label, config.alert_at));
+
+        raised
+    }
+
+    /// Fold one poller update into this pane's state.
+    ///
+    /// Returns `true` when it raised a new alert.
+    ///
+    /// Split out from [`Self::drain`] as a function over a plain `Update`, for
+    /// the same reason [`pane_wants_blink`] is split out of
+    /// [`cursor_should_blink`]: a live [`PollerHandle`] cannot be built in a
+    /// test without spawning a real poller thread, so everything reachable only
+    /// through the channel would otherwise be asserted by nothing.
+    fn apply_update(&mut self, update: Update, config: &Config) -> bool {
+        match update {
+            Update::Snapshot(snapshot) => {
+                // Pace first: the trail is fed from the arriving snapshot, and
+                // the at-risk line is recomputed here — on the poll event —
+                // rather than on every frame that renders it.
+                self.ingest_pace(&snapshot);
+                // Then the day trail and, when it is on, the disk log.
+                self.record_history(&snapshot);
+                let raised = self.update_alerts(&snapshot, config);
+                self.latest_snapshot = Some(snapshot);
+                self.snapshot_received_at = Some(Instant::now());
+                // A fresh success supersedes any prior failure.
+                self.latest_failure = None;
+                raised
+            }
+            Update::Failure { message, .. } => {
+                self.latest_failure = Some(message);
+                false
+            }
+        }
+    }
+
     /// Drain this pane's channel, folding every pending update into its state.
-    fn drain(&mut self) {
+    ///
+    /// Returns `true` when a new alert was raised by one of the updates.
+    fn drain(&mut self, config: &Config) -> bool {
+        let mut raised = false;
         let Some(handle) = &self.handle else {
-            return;
+            return raised;
         };
         // Collected before the loop so the channel borrow ends: folding a
         // snapshot in now takes `&mut self` (the pace trails). `try_iter` drains
@@ -1346,24 +1522,9 @@ impl ProviderPane {
         // holds no more than the loop would have.
         let updates: Vec<Update> = handle.updates().try_iter().collect();
         for update in updates {
-            match update {
-                Update::Snapshot(snapshot) => {
-                    // Pace first: the trail is fed from the arriving snapshot,
-                    // and the at-risk line is recomputed here — on the poll
-                    // event — rather than on every frame that renders it.
-                    self.ingest_pace(&snapshot);
-                    // Then the day trail and, when it is on, the disk log.
-                    self.record_history(&snapshot);
-                    self.latest_snapshot = Some(snapshot);
-                    self.snapshot_received_at = Some(Instant::now());
-                    // A fresh success supersedes any prior failure.
-                    self.latest_failure = None;
-                }
-                Update::Failure { message, .. } => {
-                    self.latest_failure = Some(message);
-                }
-            }
+            raised |= self.apply_update(update, config);
         }
+        raised
     }
 
     /// Stop the poller thread, if one is running.
@@ -1515,6 +1676,11 @@ impl QuotaPaneApp {
     /// Runs from `logic`, so it keeps working even while the window is hidden.
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn service_tray(&mut self, ctx: &egui::Context) {
+        // Any pane alerting puts the tray into its alert variant: the ringed
+        // icon and the prefixed tooltip. Both revert by themselves the moment
+        // no pane is alerting — there is no separate "clear" path to forget.
+        let alerting = self.panes.iter().any(|pane| pane.alert_line.is_some());
+
         // Build the tooltip from the same snapshots the window renders.
         let tooltip = {
             let entries: Vec<(&str, Option<&ProviderSnapshot>)> = self
@@ -1522,7 +1688,12 @@ impl QuotaPaneApp {
                 .iter()
                 .map(|pane| (provider_label(pane.id), pane.latest_snapshot.as_ref()))
                 .collect();
-            tray_tooltip(&entries)
+            let tooltip = tray_tooltip(&entries);
+            if alerting {
+                format!("{ALERT_TOOLTIP_PREFIX}{tooltip}")
+            } else {
+                tooltip
+            }
         };
 
         // The live miniature: the tray mark carries each provider's
@@ -1538,10 +1709,11 @@ impl QuotaPaneApp {
                     .and_then(|window| window.used_fraction)
                     .map(|f| f as f32)
             };
-            icon::render_icon(
+            icon::render_icon_with_alert(
                 fraction(ProviderId::ClaudeSubscription),
                 fraction(ProviderId::CodexSubscription),
                 ICON_SIZE,
+                alerting,
             )
         };
 
@@ -1605,8 +1777,21 @@ impl eframe::App for QuotaPaneApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Fold in every pending poller update. Runs even while hidden to tray,
         // so the tooltip stays live and Show/Quit keep responding.
+        let mut alert_raised = false;
         for pane in &mut self.panes {
-            pane.drain();
+            alert_raised |= pane.drain(&self.config);
+        }
+
+        // The third alert surface, and the only one that reaches outside the
+        // app: one attention request per new crossing, never per poll and never
+        // per frame. `Informational` is the gentle variant — on Windows it
+        // flashes the taskbar button rather than forcing the window forward,
+        // which is the right volume for "your quota is nearly gone" in a
+        // window the user chose to keep on top. A no-op where unsupported.
+        if alert_raised {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
         }
 
         #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -1775,8 +1960,12 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
             age,
             pane.expanded,
             theme,
-            pane.pace_warning.as_ref(),
-            &spark,
+            PaneLines {
+                pace: pane.pace_warning.as_ref(),
+                spark: &spark,
+                alert: pane.alert_line.as_deref(),
+                refill: pane.refill_line.as_deref(),
+            },
         );
     }
     if toggled {
@@ -1808,6 +1997,24 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
     }
 }
 
+/// The lines a pane hands [`render_windows`] beyond the snapshot itself:
+/// everything computed on a poll event and merely drawn on a frame.
+///
+/// A struct rather than four more parameters — the renderer already takes the
+/// snapshot, the age, the disclosure state and the theme, and a sixth, seventh
+/// and eighth positional `Option` would be a call site nobody could read.
+#[derive(Default)]
+struct PaneLines<'a> {
+    /// The at-risk forecast (M8), or `None` for "nothing to say".
+    pace: Option<&'a PaceWarning>,
+    /// The 24 h history series behind the sparkline (M13); empty draws nothing.
+    spark: &'a [(u64, f64)],
+    /// The alert banner for the worst window in alert (M13).
+    alert: Option<&'a str>,
+    /// The one-shot refill notice (M13).
+    refill: Option<&'a str>,
+}
+
 /// Render a snapshot's quota bars, the per-model disclosure, and its
 /// freshness/staleness line.
 ///
@@ -1824,8 +2031,7 @@ fn render_windows(
     age: Option<Duration>,
     expanded: bool,
     theme: Theme,
-    pace: Option<&PaceWarning>,
-    spark: &[(u64, f64)],
+    lines: PaneLines,
 ) -> bool {
     for window in &snapshot.windows {
         render_window_row(ui, window, theme);
@@ -1834,14 +2040,14 @@ fn render_windows(
     // The 24 h history strip, directly under the bars it is about. Draws only
     // when history is on and there are at least two readings in the day;
     // otherwise it takes no space at all (M13).
-    render_sparkline(ui, spark);
+    render_sparkline(ui, lines.spark);
 
     // The at-risk forecast, directly under the bars it is about — one line at
     // most, and absent entirely when nothing is at risk. Calm is silent: a pane
     // that is fine looks exactly as it did before this milestone. Stale is
     // silent too (see `show_pace_warning`): the footer already says the data is
     // dead, and a projection drawn off dead data would contradict it.
-    if let Some(warning) = pace.filter(|_| show_pace_warning(age)) {
+    if let Some(warning) = lines.pace.filter(|_| show_pace_warning(age)) {
         ui.label(
             egui::RichText::new(pace_warning_line(warning))
                 .small()
@@ -1882,6 +2088,22 @@ fn render_windows(
                 }
             });
         }
+    }
+
+    // The alert surfaces, immediately above the freshness footer (M13). Both
+    // are absent by default — alerts are opt-in, and a pane with nothing to
+    // alert about renders exactly as it did before. The banner is CARDINAL
+    // because it is the same class of thing as the stale line; the refill
+    // notice is TEXT_DIM because good news does not get to shout.
+    if let Some(line) = lines.alert {
+        ui.label(egui::RichText::new(line).small().color(CARDINAL));
+    }
+    if let Some(line) = lines.refill {
+        ui.label(
+            egui::RichText::new(line)
+                .small()
+                .color(dim_color(ui, theme)),
+        );
     }
 
     if let Some(age) = age {
@@ -2124,6 +2346,128 @@ fn pace_tick_color() -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(TEXT_DIM.r(), TEXT_DIM.g(), TEXT_DIM.b(), PACE_TICK_ALPHA)
 }
 
+// --------------------------------------------------------------------------
+// Quota alerts (M13). Dep-free by owner decision: no notification crate, no
+// Shell_NotifyIcon plumbing. The three surfaces are ones the app already owns —
+// a line in its own window, its own tray icon and tooltip, and eframe's
+// built-in taskbar attention request.
+//
+// The decision itself is one pure function over four facts, so every rule
+// below is testable without a window, a tray, or a clock.
+// --------------------------------------------------------------------------
+
+/// What one window's numbers ask the app to do this poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlertAction {
+    /// Nothing to say — the overwhelming majority of polls.
+    Quiet,
+    /// A fresh crossing: raise the alert on every surface.
+    Fire,
+    /// A window that had fired has fallen back under the threshold.
+    Refill,
+}
+
+/// Whether this window should raise, clear, or say nothing — the whole alert
+/// policy, in one place.
+///
+/// `already_firing` is the debounce: an alert fires **once per crossing**, not
+/// once per poll, so a window sitting at 92% for six hours interrupts a user
+/// exactly once. It re-arms only by falling back under the threshold, which is
+/// what a reset or a refill looks like from here.
+///
+/// In [`AlertMode::Pace`] — the default — crossing the threshold is not enough
+/// on its own: the window must also be spent *ahead of its own clock*, because
+/// a weekly quota 85% used six days in is on budget and saying otherwise is
+/// noise. A window whose provider never stated a duration has no clock to
+/// compare against, and falls back to threshold semantics: an alert that might
+/// not have been needed beats silence about a quota that is nearly gone.
+///
+/// An unknown used fraction says nothing at all. There is no reading to judge,
+/// and inventing one would be the one way this function could lie.
+fn alert_action(
+    config: &Config,
+    used_fraction: Option<f64>,
+    elapsed_fraction: Option<f64>,
+    already_firing: bool,
+) -> AlertAction {
+    if !config.alerts {
+        return AlertAction::Quiet;
+    }
+    // A non-finite reading is no more a reading than an absent one: it cannot
+    // be compared with a threshold, and letting it fall through would make the
+    // answer depend on which side of a NaN comparison happened to be written.
+    let Some(used) = used_fraction.filter(|f| f.is_finite()) else {
+        return AlertAction::Quiet;
+    };
+    if used * 100.0 < config.alert_at as f64 {
+        return if already_firing {
+            AlertAction::Refill
+        } else {
+            AlertAction::Quiet
+        };
+    }
+    if already_firing {
+        return AlertAction::Quiet;
+    }
+    match config.alert_mode {
+        AlertMode::Threshold => AlertAction::Fire,
+        AlertMode::Pace => match elapsed_fraction {
+            Some(elapsed) if used <= elapsed => AlertAction::Quiet,
+            _ => AlertAction::Fire,
+        },
+    }
+}
+
+/// The in-window banner line, byte-exact:
+/// `alert: Codex 5h at 80% >= 80% (pace)`.
+///
+/// Names the provider even though it renders inside that provider's own pane:
+/// the same words go in a bug report or a message to someone else, where the
+/// pane it sat in is not part of the quote. The mode is the word from
+/// `config.cfg`, so the line names the setting a reader would edit.
+fn alert_banner_line(
+    provider: ProviderId,
+    label: &str,
+    used_fraction: f64,
+    alert_at: u8,
+    alert_mode: AlertMode,
+) -> String {
+    format!(
+        "alert: {} {label} at {} >= {alert_at}% ({})",
+        provider_label(provider),
+        format_percent(Some(used_fraction)),
+        alert_mode.as_word(),
+    )
+}
+
+/// The refill line, byte-exact: `refilled: Codex 5h back under 80%`.
+///
+/// Deliberately quiet — TEXT_DIM, and no attention request. Getting a quota
+/// back is good news, and good news that steals focus is a bug.
+fn alert_refill_line(provider: ProviderId, label: &str, alert_at: u8) -> String {
+    format!(
+        "refilled: {} {label} back under {alert_at}%",
+        provider_label(provider)
+    )
+}
+
+/// How far through its window the account is: `1 - resets_in / duration`,
+/// clamped to `0..=1`. `None` when the provider did not state both, or stated a
+/// zero-length window (the one value that would divide).
+///
+/// One definition, shared by the pace tick and the alert decision, so what the
+/// tick draws and what an alert compares against cannot drift apart.
+fn elapsed_fraction(window: &QuotaWindow) -> Option<f64> {
+    let duration = window.duration_secs?;
+    let resets_in = window.resets_in_secs?;
+    if duration == 0 {
+        return None;
+    }
+    // Clamped because a countdown longer than the window (clock skew, a
+    // provider's own rounding) must not push the elapsed fraction negative.
+    Some(1.0 - (resets_in as f64 / duration as f64).clamp(0.0, 1.0))
+}
+
 /// Where the elapsed-time tick belongs inside a bar `bar_width` px wide: the
 /// offset, in px, from the bar's left edge. `None` when the bar earns no tick.
 ///
@@ -2145,17 +2489,13 @@ fn pace_tick_color() -> egui::Color32 {
 /// window of no length has no elapsed fraction to show. Guarding here rather
 /// than laundering it in the provider keeps the snapshot honest about what the
 /// endpoint said (see `codex_subscription::to_quota_window`).
+///
+/// The clamped ratio itself comes from [`elapsed_fraction`], shared with the
+/// alert decision (M13) so the mark on the bar and the rule behind an alert are
+/// the same arithmetic rather than two copies of it.
 fn pace_tick_x(window: &QuotaWindow, bar_width: f32) -> Option<f32> {
     window.used_fraction?;
-    let duration = window.duration_secs?;
-    let resets_in = window.resets_in_secs?;
-    if duration == 0 {
-        return None;
-    }
-    // Clamped because a countdown longer than the window (clock skew, a
-    // provider's own rounding) must not push the tick off the left edge.
-    let remaining = (resets_in as f64 / duration as f64).clamp(0.0, 1.0);
-    Some(bar_width * (1.0 - remaining) as f32)
+    Some(bar_width * elapsed_fraction(window)? as f32)
 }
 
 /// Add a quota bar, outline its trough with a HAIRLINE border, and mark how far
@@ -2381,8 +2721,21 @@ fn main() -> ExitCode {
     // branch is what makes "no network" structural rather than promised:
     // `ProviderPane::new` is where a poller thread would be spawned and where an
     // `Egress` would be handed to it.
+    // Preferences are read here, before the window, because `history=on` and
+    // the alert settings both have to be answered before the first poll can be
+    // folded in.
+    let mut config = config::load();
+    // A run-only flag beats the saved preference; every other preference comes
+    // from the file only, since there is no flag for them.
+    if let Some(theme) = theme_override {
+        config.theme = theme;
+    }
+    if pace_demo {
+        config = demo_config(config);
+    }
+
     let mut panes = if pace_demo {
-        demo_panes()
+        demo_panes(&config)
     } else {
         vec![
             ProviderPane::new(
@@ -2396,16 +2749,8 @@ fn main() -> ExitCode {
         ]
     };
 
-    // Preferences are read here, before the window, because `history=on` has to
-    // be answered before the first poll can be recorded. Demo panes carry their
-    // own fabricated trail and must never touch the real log, so the whole
-    // block is skipped under `--pace-demo`.
-    let mut config = config::load();
-    // A run-only flag beats the saved preference; every other preference comes
-    // from the file only, since there is no flag for them.
-    if let Some(theme) = theme_override {
-        config.theme = theme;
-    }
+    // Demo panes carry their own fabricated trail and must never touch the real
+    // log, so this block is skipped under `--pace-demo`.
     if config.history && !pace_demo {
         if let Some(path) = config::config_dir().map(|dir| dir.join(history::FILE_NAME)) {
             // Retention first, so a log that outgrew the cap is trimmed before
@@ -2490,6 +2835,13 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The demo panes exactly as `--pace-demo` builds them: default
+    /// preferences put through `demo_config`, so alerts are on at the
+    /// defaults. Every demo test measures the shipped scenario, not a variant.
+    fn demo_test_panes() -> Vec<ProviderPane> {
+        demo_panes(&demo_config(Config::default()))
+    }
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -2884,8 +3236,12 @@ mod tests {
                 Some(Duration::from_secs(30)),
                 true,
                 Theme::CipherPine,
-                None,
-                &[],
+                PaneLines {
+                    pace: None,
+                    spark: &[],
+                    alert: None,
+                    refill: None,
+                },
             );
         });
         assert!(
@@ -2929,8 +3285,12 @@ mod tests {
                 Some(Duration::from_secs(30)),
                 true,
                 Theme::CipherPine,
-                None,
-                &[],
+                PaneLines {
+                    pace: None,
+                    spark: &[],
+                    alert: None,
+                    refill: None,
+                },
             );
         });
         assert!(
@@ -2984,8 +3344,12 @@ mod tests {
                 Some(Duration::from_secs(30)),
                 expanded,
                 Theme::CipherPine,
-                None,
-                &[],
+                PaneLines {
+                    pace: None,
+                    spark: &[],
+                    alert: None,
+                    refill: None,
+                },
             );
         })
     }
@@ -3362,8 +3726,12 @@ mod tests {
                     Some(Duration::from_secs(30)),
                     false,
                     Theme::CipherPine,
-                    pace,
-                    &[],
+                    PaneLines {
+                        pace,
+                        spark: &[],
+                        alert: None,
+                        refill: None,
+                    },
                 );
             })
         };
@@ -3421,8 +3789,12 @@ mod tests {
                     Some(age),
                     false,
                     Theme::CipherPine,
-                    pace,
-                    &[],
+                    PaneLines {
+                        pace,
+                        spark: &[],
+                        alert: None,
+                        refill: None,
+                    },
                 );
             })
         };
@@ -3472,7 +3844,12 @@ mod tests {
             &[model_window_at("GPT-5.3-Codex-Max", Some(0.42))],
             None,
         );
-        let pane = ProviderPane::demo(ProviderId::CodexSubscription, series, Vec::new());
+        let pane = ProviderPane::demo(
+            ProviderId::CodexSubscription,
+            series,
+            Vec::new(),
+            &Config::default(),
+        );
 
         let labels: Vec<&str> = pane.rings.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(labels, vec!["5h", "7d"]);
@@ -3503,7 +3880,12 @@ mod tests {
         for snapshot in &mut series {
             snapshot.windows[0].used_fraction = None;
         }
-        let pane = ProviderPane::demo(ProviderId::ClaudeSubscription, series, Vec::new());
+        let pane = ProviderPane::demo(
+            ProviderId::ClaudeSubscription,
+            series,
+            Vec::new(),
+            &Config::default(),
+        );
         assert!(pane.rings.is_empty());
         assert!(pane.pace_warning.is_none());
     }
@@ -3525,7 +3907,12 @@ mod tests {
             &[],
             None,
         );
-        let before = ProviderPane::demo(ProviderId::CodexSubscription, series.clone(), Vec::new());
+        let before = ProviderPane::demo(
+            ProviderId::CodexSubscription,
+            series.clone(),
+            Vec::new(),
+            &Config::default(),
+        );
         assert!(
             before.pace_warning.is_some(),
             "the pre-reset pane must be warning, or this test proves nothing"
@@ -3538,7 +3925,12 @@ mod tests {
         rolled_over.windows[0].resets_in_secs = Some(18_000);
         series.push(rolled_over);
 
-        let after = ProviderPane::demo(ProviderId::CodexSubscription, series, Vec::new());
+        let after = ProviderPane::demo(
+            ProviderId::CodexSubscription,
+            series,
+            Vec::new(),
+            &Config::default(),
+        );
         assert_eq!(after.rings[0].1.len(), 1, "the old trail must be gone");
         assert!(
             after.pace_warning.is_none(),
@@ -3564,6 +3956,9 @@ mod tests {
             history: Vec::new(),
             history_enabled: false,
             history_path: None,
+            alerts_firing: Vec::new(),
+            alert_line: None,
+            refill_line: None,
             pace_warning: None,
         }
     }
@@ -3801,7 +4196,7 @@ mod tests {
 
     #[test]
     fn the_demo_fabricates_a_day_of_history_and_writes_none_of_it() {
-        for pane in demo_panes() {
+        for pane in demo_test_panes() {
             assert!(
                 pane.history_path.is_none(),
                 "a demo pane must never name a real log file"
@@ -3846,8 +4241,10 @@ mod tests {
     fn the_demo_history_is_deterministic() {
         // Same rule as the rest of the demo: two runs must draw the same strip,
         // or a screenshot proves nothing.
-        let first: Vec<Vec<HistoryEntry>> = demo_panes().into_iter().map(|p| p.history).collect();
-        let second: Vec<Vec<HistoryEntry>> = demo_panes().into_iter().map(|p| p.history).collect();
+        let first: Vec<Vec<HistoryEntry>> =
+            demo_test_panes().into_iter().map(|p| p.history).collect();
+        let second: Vec<Vec<HistoryEntry>> =
+            demo_test_panes().into_iter().map(|p| p.history).collect();
         assert_eq!(first, second);
     }
 
@@ -3971,7 +4368,19 @@ mod tests {
         let snapshot = climbing_snapshot(ProviderId::ClaudeSubscription, now);
         for theme in [Theme::CipherPine, Theme::Plain] {
             let off = lay_out_themed(theme, |ui| {
-                render_windows(ui, &snapshot, None, false, theme, None, &[]);
+                render_windows(
+                    ui,
+                    &snapshot,
+                    None,
+                    false,
+                    theme,
+                    PaneLines {
+                        pace: None,
+                        spark: &[],
+                        alert: None,
+                        refill: None,
+                    },
+                );
             });
             let on = lay_out_themed(theme, |ui| {
                 render_windows(
@@ -3980,8 +4389,12 @@ mod tests {
                     None,
                     false,
                     theme,
-                    None,
-                    &[(now - 600, 0.4), (now, 0.5)],
+                    PaneLines {
+                        pace: None,
+                        spark: &[(now - 600, 0.4), (now, 0.5)],
+                        alert: None,
+                        refill: None,
+                    },
                 );
             });
             assert!(
@@ -4018,7 +4431,7 @@ mod tests {
     fn the_demo_draws_a_strip_for_every_pane() {
         // The review path: `--pace-demo` must show the feature, not an empty
         // space where it would be.
-        for pane in demo_panes() {
+        for pane in demo_test_panes() {
             let snapshot = pane.latest_snapshot.as_ref().expect("a demo snapshot");
             let label = representative_window(snapshot)
                 .expect("a representative window")
@@ -4032,6 +4445,430 @@ mod tests {
                 spark_window(&series, now).len()
             );
         }
+    }
+
+    // --- M13: quota alerts ---
+
+    fn alert_config(alert_at: u8, alert_mode: AlertMode) -> Config {
+        Config {
+            alerts: true,
+            alert_at,
+            alert_mode,
+            ..Config::default()
+        }
+    }
+
+    /// A headline window at `used`, `elapsed` of the way through its 5 h span.
+    fn alerting_window(label: &str, used: f64, elapsed: f64) -> QuotaWindow {
+        let duration = 18_000u64;
+        QuotaWindow {
+            label: label.to_string(),
+            used_fraction: Some(used),
+            resets_in_secs: Some(((1.0 - elapsed) * duration as f64) as u64),
+            duration_secs: Some(duration),
+        }
+    }
+
+    fn alerting_snapshot(provider: ProviderId, windows: Vec<QuotaWindow>) -> ProviderSnapshot {
+        ProviderSnapshot {
+            provider,
+            taken_at_unix_secs: DEMO_BASE_UNIX_SECS,
+            windows,
+            per_model: Vec::new(),
+            reset_credits: None,
+            source: usage_core::model::SnapshotSource::UsageEndpoint,
+        }
+    }
+
+    #[test]
+    fn alerts_off_is_silent_no_matter_the_numbers() {
+        let off = Config::default();
+        assert!(!off.alerts, "alerts must be opt-in");
+        for used in [0.0, 0.5, 0.8, 1.0] {
+            for firing in [false, true] {
+                assert_eq!(
+                    alert_action(&off, Some(used), Some(0.0), firing),
+                    AlertAction::Quiet,
+                    "used={used} firing={firing}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_or_impossible_reading_says_nothing() {
+        let config = alert_config(80, AlertMode::Threshold);
+        for used in [None, Some(f64::NAN), Some(f64::INFINITY)] {
+            assert_eq!(
+                alert_action(&config, used, Some(0.0), false),
+                AlertAction::Quiet,
+                "{used:?} is not a reading to judge"
+            );
+        }
+    }
+
+    #[test]
+    fn threshold_mode_fires_on_every_crossing_regardless_of_the_clock() {
+        let config = alert_config(80, AlertMode::Threshold);
+        // Exactly at the threshold counts as crossing it.
+        assert_eq!(
+            alert_action(&config, Some(0.80), Some(0.99), false),
+            AlertAction::Fire,
+            "80% of an almost-elapsed window still fires in threshold mode"
+        );
+        assert_eq!(
+            alert_action(&config, Some(0.79), Some(0.0), false),
+            AlertAction::Quiet
+        );
+    }
+
+    #[test]
+    fn pace_mode_only_speaks_when_spending_beats_the_clock() {
+        let config = alert_config(80, AlertMode::Pace);
+        // 85% spent one day into a week: over the threshold, and burning hard.
+        assert_eq!(
+            alert_action(&config, Some(0.85), Some(0.14), false),
+            AlertAction::Fire
+        );
+        // 85% spent six days into a week: over the threshold, but on budget.
+        assert_eq!(
+            alert_action(&config, Some(0.85), Some(0.86), false),
+            AlertAction::Quiet,
+            "a window spent slower than it elapses is not news"
+        );
+        // Dead level is not ahead of the clock.
+        assert_eq!(
+            alert_action(&config, Some(0.85), Some(0.85), false),
+            AlertAction::Quiet
+        );
+    }
+
+    #[test]
+    fn an_unknown_duration_falls_back_to_threshold_semantics() {
+        // Fail-safe: with no clock to compare against, an alert that might not
+        // have been needed beats silence about a quota that is nearly gone.
+        let config = alert_config(80, AlertMode::Pace);
+        assert_eq!(
+            alert_action(&config, Some(0.9), None, false),
+            AlertAction::Fire
+        );
+        // And that is exactly what a window with no stated duration produces.
+        let window = QuotaWindow {
+            label: "5h".to_string(),
+            used_fraction: Some(0.9),
+            resets_in_secs: Some(3_600),
+            duration_secs: None,
+        };
+        assert_eq!(elapsed_fraction(&window), None);
+    }
+
+    #[test]
+    fn an_alert_fires_once_per_crossing_and_re_arms_on_refill() {
+        let config = alert_config(80, AlertMode::Threshold);
+        // First crossing speaks.
+        assert_eq!(
+            alert_action(&config, Some(0.9), None, false),
+            AlertAction::Fire
+        );
+        // Still over: silent, however many polls land.
+        assert_eq!(
+            alert_action(&config, Some(0.95), None, true),
+            AlertAction::Quiet
+        );
+        assert_eq!(
+            alert_action(&config, Some(1.0), None, true),
+            AlertAction::Quiet
+        );
+        // Back under: the refill notice, and the alert is re-armed.
+        assert_eq!(
+            alert_action(&config, Some(0.1), None, true),
+            AlertAction::Refill
+        );
+        // A window that never fired does not announce a refill it never lost.
+        assert_eq!(
+            alert_action(&config, Some(0.1), None, false),
+            AlertAction::Quiet
+        );
+        // And the next crossing speaks again.
+        assert_eq!(
+            alert_action(&config, Some(0.9), None, false),
+            AlertAction::Fire
+        );
+    }
+
+    #[test]
+    fn the_threshold_is_the_one_from_the_config() {
+        for alert_at in [1u8, 50, 95, 100] {
+            let config = alert_config(alert_at, AlertMode::Threshold);
+            let just_under = (alert_at as f64 - 0.5) / 100.0;
+            assert_eq!(
+                alert_action(&config, Some(alert_at as f64 / 100.0), None, false),
+                AlertAction::Fire,
+                "alert_at={alert_at} should fire at exactly {alert_at}%"
+            );
+            assert_eq!(
+                alert_action(&config, Some(just_under), None, false),
+                AlertAction::Quiet,
+                "alert_at={alert_at} should not fire just under it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_banner_and_refill_lines_are_byte_exact() {
+        assert_eq!(
+            alert_banner_line(
+                ProviderId::CodexSubscription,
+                "5h",
+                0.823,
+                80,
+                AlertMode::Pace
+            ),
+            "alert: Codex 5h at 82% >= 80% (pace)"
+        );
+        assert_eq!(
+            alert_banner_line(
+                ProviderId::ClaudeSubscription,
+                "7d",
+                0.95,
+                90,
+                AlertMode::Threshold
+            ),
+            "alert: Claude 7d at 95% >= 90% (threshold)"
+        );
+        assert_eq!(
+            alert_refill_line(ProviderId::CodexSubscription, "5h", 80),
+            "refilled: Codex 5h back under 80%"
+        );
+        assert_eq!(
+            alert_refill_line(ProviderId::ClaudeSubscription, "weekly", 42),
+            "refilled: Claude weekly back under 42%"
+        );
+    }
+
+    #[test]
+    fn the_pane_banners_the_worst_offender_only() {
+        let config = alert_config(80, AlertMode::Threshold);
+        let mut pane = bare_pane(ProviderId::CodexSubscription);
+        let snapshot = alerting_snapshot(
+            ProviderId::CodexSubscription,
+            vec![
+                alerting_window("5h", 0.85, 0.1),
+                alerting_window("7d", 0.97, 0.1),
+                alerting_window("odd", 0.10, 0.1),
+            ],
+        );
+        assert!(pane.update_alerts(&snapshot, &config), "a new alert");
+        assert_eq!(pane.alerts_firing, vec!["5h".to_string(), "7d".to_string()]);
+        assert_eq!(
+            pane.alert_line.as_deref(),
+            Some("alert: Codex 7d at 97% >= 80% (threshold)"),
+            "two alerts must not both take a row"
+        );
+        assert_eq!(pane.refill_line, None);
+    }
+
+    #[test]
+    fn only_a_new_crossing_asks_for_attention() {
+        let config = alert_config(80, AlertMode::Threshold);
+        let mut pane = bare_pane(ProviderId::ClaudeSubscription);
+        let over = alerting_snapshot(
+            ProviderId::ClaudeSubscription,
+            vec![alerting_window("5h", 0.85, 0.1)],
+        );
+        assert!(pane.update_alerts(&over, &config), "the crossing");
+        assert!(
+            !pane.update_alerts(&over, &config),
+            "still over is not a new crossing"
+        );
+        assert!(pane.alert_line.is_some(), "but the banner stays up");
+
+        // The refill: the line appears, the banner clears, and nothing asks for
+        // attention — good news does not steal focus.
+        let under = alerting_snapshot(
+            ProviderId::ClaudeSubscription,
+            vec![alerting_window("5h", 0.05, 0.9)],
+        );
+        assert!(
+            !pane.update_alerts(&under, &config),
+            "a refill is not an alert"
+        );
+        assert_eq!(
+            pane.refill_line.as_deref(),
+            Some("refilled: Claude 5h back under 80%")
+        );
+        assert_eq!(pane.alert_line, None);
+        assert!(pane.alerts_firing.is_empty(), "and the alert is re-armed");
+
+        // The notice shows once: the next poll clears it.
+        assert!(!pane.update_alerts(&under, &config));
+        assert_eq!(pane.refill_line, None);
+    }
+
+    #[test]
+    fn a_window_the_provider_stops_reporting_does_not_stay_armed() {
+        let config = alert_config(80, AlertMode::Threshold);
+        let mut pane = bare_pane(ProviderId::CodexSubscription);
+        let with_window = alerting_snapshot(
+            ProviderId::CodexSubscription,
+            vec![alerting_window("5h", 0.85, 0.1)],
+        );
+        assert!(pane.update_alerts(&with_window, &config));
+
+        // The provider drops the window entirely, then brings it back over the
+        // threshold. Without pruning, the stale firing entry would suppress the
+        // second crossing forever.
+        let without = alerting_snapshot(ProviderId::CodexSubscription, vec![]);
+        assert!(!pane.update_alerts(&without, &config));
+        assert!(pane.alerts_firing.is_empty());
+        assert_eq!(pane.alert_line, None);
+        assert!(
+            pane.update_alerts(&with_window, &config),
+            "the window coming back over the threshold is a fresh crossing"
+        );
+    }
+
+    #[test]
+    fn the_alert_lines_cost_a_row_only_when_there_is_one() {
+        let snapshot = alerting_snapshot(
+            ProviderId::CodexSubscription,
+            vec![alerting_window("5h", 0.85, 0.1)],
+        );
+        let render = |alert: Option<&str>, refill: Option<&str>| {
+            lay_out(|ui| {
+                render_windows(
+                    ui,
+                    &snapshot,
+                    None,
+                    false,
+                    Theme::CipherPine,
+                    PaneLines {
+                        alert,
+                        refill,
+                        ..Default::default()
+                    },
+                );
+            })
+            .height
+        };
+        let quiet = render(None, None);
+        let banner = render(Some("alert: Codex 5h at 85% >= 80% (pace)"), None);
+        let refill = render(None, Some("refilled: Codex 5h back under 80%"));
+        assert!(
+            banner > quiet,
+            "the banner should cost a row: {quiet} -> {banner}"
+        );
+        assert!(refill > quiet, "so should the refill line");
+        assert!(
+            render(Some("alert: a"), Some("refilled: b")) > banner,
+            "both at once cost both rows"
+        );
+    }
+
+    #[test]
+    fn the_tray_alert_variant_rings_the_icon_and_prefixes_the_tooltip() {
+        assert_eq!(ALERT_TOOLTIP_PREFIX, "ALERT \u{2014} ");
+
+        let calm = icon::render_icon_with_alert(Some(0.9), Some(0.2), ICON_SIZE, false);
+        let alarmed = icon::render_icon_with_alert(Some(0.9), Some(0.2), ICON_SIZE, true);
+        assert_eq!(
+            calm,
+            icon::render_icon(Some(0.9), Some(0.2), ICON_SIZE),
+            "the calm variant must be byte-identical to the accepted mark"
+        );
+        assert_ne!(calm, alarmed, "the alert variant must look different");
+
+        let n = ICON_SIZE as usize;
+        let px = |buf: &[u8], x: usize, y: usize| {
+            let i = (y * n + x) * 4;
+            [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+        };
+        // The top edge, mid-span: ring in the alert variant, tile otherwise.
+        assert_eq!(px(&alarmed, n / 2, 0), CARDINAL.to_array());
+        assert_eq!(px(&calm, n / 2, 0), GROUND.to_array());
+        // One pixel in is already past the ring — it is a hairline, not a border.
+        assert_eq!(px(&alarmed, n / 2, 1), GROUND.to_array());
+        // The corners stay transparent: the ring follows the rounded tile.
+        assert_eq!(px(&alarmed, 0, 0), [0, 0, 0, 0]);
+        // And the mark itself is untouched — same bars, same dots.
+        for (x, y) in [(n / 2, n / 2), (8, 16), (8, 21)] {
+            assert_eq!(px(&alarmed, x, y), px(&calm, x, y), "pixel ({x},{y}) moved");
+        }
+    }
+
+    #[test]
+    fn folding_an_update_reports_the_new_alert_to_its_caller() {
+        // The channel-side wiring: a snapshot arriving from the poller has to
+        // carry the "raise attention" answer back out of the pane, and this is
+        // the only place that hop is asserted — `drain` itself needs a live
+        // poller thread, which a unit test must not spawn.
+        let config = alert_config(80, AlertMode::Threshold);
+        let mut pane = bare_pane(ProviderId::CodexSubscription);
+        let over = alerting_snapshot(
+            ProviderId::CodexSubscription,
+            vec![alerting_window("5h", 0.85, 0.1)],
+        );
+
+        assert!(
+            pane.apply_update(Update::Snapshot(over.clone()), &config),
+            "the crossing must reach the caller"
+        );
+        assert!(pane.latest_snapshot.is_some(), "and the snapshot must land");
+        assert!(
+            !pane.apply_update(Update::Snapshot(over), &config),
+            "a repeat is not a new crossing"
+        );
+
+        // A failure is never an alert, and never clears the last snapshot.
+        assert!(!pane.apply_update(
+            Update::Failure {
+                provider: ProviderId::CodexSubscription,
+                message: "boom".to_string(),
+            },
+            &config
+        ));
+        assert_eq!(pane.latest_failure.as_deref(), Some("boom"));
+        assert!(
+            pane.alert_line.is_some(),
+            "the banner survives a failed poll"
+        );
+    }
+
+    #[test]
+    fn the_demo_raises_exactly_one_alert() {
+        // `--pace-demo` must show the alert surfaces without real data, and it
+        // does it through the ordinary rules rather than a switch: the Codex 5h
+        // window is 80% spent at 75% elapsed, so it is the only one both over
+        // the threshold and ahead of its clock.
+        let panes = demo_test_panes();
+        let banners: Vec<&str> = panes
+            .iter()
+            .filter_map(|pane| pane.alert_line.as_deref())
+            .collect();
+        assert_eq!(banners, vec!["alert: Codex 5h at 80% >= 80% (pace)"]);
+        assert!(
+            panes.iter().all(|pane| pane.refill_line.is_none()),
+            "nothing refilled in the scenario"
+        );
+    }
+
+    #[test]
+    fn the_demo_forces_the_alert_settings_but_leaves_the_look_alone() {
+        // A reviewer whose own config says alert_at=95, alerts=off must still
+        // see the feature — and must still see their own theme.
+        let theirs = Config {
+            theme: Theme::Plain,
+            history: true,
+            alerts: false,
+            alert_at: 95,
+            alert_mode: AlertMode::Threshold,
+        };
+        let forced = demo_config(theirs);
+        assert!(forced.alerts);
+        assert_eq!(forced.alert_at, DEFAULT_ALERT_AT);
+        assert_eq!(forced.alert_mode, AlertMode::Pace);
+        assert_eq!(forced.theme, Theme::Plain, "the look is the reviewer's");
+        assert!(forced.history, "and so is everything else");
     }
 
     // --- M8: --pace-demo ---
@@ -4057,7 +4894,7 @@ mod tests {
         // The structural half of "no network in demo mode": a pane with no
         // handle has no poller thread, and `ProviderPane::new` — the only place
         // an `Egress` is constructed — was never called.
-        for pane in demo_panes() {
+        for pane in demo_test_panes() {
             assert!(pane.handle.is_none(), "a demo pane must not own a poller");
             assert!(pane.startup_error.is_none());
             assert!(pane.latest_failure.is_none());
@@ -4070,8 +4907,8 @@ mod tests {
         // Two runs must be identical, or a screenshot means nothing and a
         // regression hides in the noise. Nothing in the scenario reads a clock:
         // the observation times come from the fixed base.
-        let first = demo_panes();
-        let second = demo_panes();
+        let first = demo_test_panes();
+        let second = demo_test_panes();
         assert_eq!(first.len(), second.len());
         for (a, b) in first.iter().zip(&second) {
             assert_eq!(a.id, b.id);
@@ -4095,7 +4932,7 @@ mod tests {
     fn the_demo_scenario_exercises_both_warning_colours() {
         // The point of the flag: one pane amber, one cardinal — reviewable in
         // one glance instead of after a day of real usage.
-        let panes = demo_panes();
+        let panes = demo_test_panes();
         let claude = &panes[0];
         let codex = &panes[1];
 
@@ -4138,7 +4975,7 @@ mod tests {
         // Ticks are the other half of what the flag exists to show, so every
         // demo bar must earn one — and at spread-out positions, not bunched at
         // one end.
-        let panes = demo_panes();
+        let panes = demo_test_panes();
         let mut offsets = Vec::new();
         for pane in &panes {
             let snapshot = pane.latest_snapshot.as_ref().expect("a snapshot");
@@ -4163,11 +5000,11 @@ mod tests {
     fn the_demo_scenario_fits_the_window() {
         // This *is* the review path: if the demo clips, the owner reviews a
         // clipped window and learns nothing about the feature.
-        let mut panes = demo_panes();
+        let mut panes = demo_test_panes();
         let pane_count = panes.len() as f32;
         for theme in [Theme::CipherPine, Theme::Plain] {
             let mut collapsed_height = 0.0;
-            let mut without_history = 0.0;
+            let mut without_m13 = 0.0;
             for pane in &mut panes {
                 pane.expanded = false;
                 let laid = lay_out_themed(theme, |ui| render_pane(ui, pane, theme));
@@ -4179,23 +5016,27 @@ mod tests {
                 );
                 collapsed_height += laid.height;
 
-                // The same pane with its trail taken away: the pre-M13 layout,
-                // which is the one already visually accepted.
+                // The same pane with everything M13 added taken away — no
+                // trail, no alert lines: the layout already visually accepted.
                 let trail = std::mem::take(&mut pane.history);
+                let alert = pane.alert_line.take();
+                let refill = pane.refill_line.take();
                 let bare = lay_out_themed(theme, |ui| render_pane(ui, pane, theme));
                 pane.history = trail;
-                without_history += bare.height;
+                pane.alert_line = alert;
+                pane.refill_line = refill;
+                without_m13 += bare.height;
             }
 
-            // Height is the honest part. Without history the collapsed demo —
-            // two panes, both warning, Codex also reporting a reset credit —
-            // comes to 231px against the 216px the central panel can offer.
-            // Every row is *reachable* (the ScrollArea, accepted since the M5a
-            // fix), but the default view does not fit, and that is a real
-            // finding about the 240px window rather than a demo artifact: it is
-            // the state a subscriber sees whenever both providers are at risk
-            // at once. Flagged at the M8 gate; the window's size is the owner's
-            // call.
+            // Height is the honest part. Stripped of everything M13 added, the
+            // collapsed demo — two panes, both warning, Codex also reporting a
+            // reset credit — comes to 231px against the 216px the central panel
+            // can offer. Every row is *reachable* (the ScrollArea, accepted
+            // since the M5a fix), but the default view does not fit, and that is
+            // a real finding about the 240px window rather than a demo artifact:
+            // it is the state a subscriber sees whenever both providers are at
+            // risk at once. Flagged at the M8 gate; the window's size is the
+            // owner's call.
             //
             // Asserted as "within one row of fitting", so unbounded growth
             // still fails here while the known, reported overflow does not get
@@ -4203,32 +5044,34 @@ mod tests {
             let usable = WINDOW_HEIGHT - TITLEBAR_HEIGHT;
             let one_row = 24.0; // a bar row with its spacing
             assert!(
-                without_history <= usable + one_row,
-                "{theme:?} collapsed demo wanted {without_history}px before the \
-                 sparkline existed, more than one row past the {usable}px the \
-                 panel offers — something other than M13 grew the pane"
+                without_m13 <= usable + one_row,
+                "{theme:?} collapsed demo wanted {without_m13}px before M13 added \
+                 anything, more than one row past the {usable}px the panel offers \
+                 — something outside this milestone grew the pane"
             );
 
-            // M13's own cost, measured rather than assumed: the strip's height
-            // plus one item spacing, per pane, and not a pixel more. This is
-            // what keeps "the sparkline is 12px" from quietly becoming "the
-            // sparkline reflowed the pane".
-            let spark_cost = collapsed_height - without_history;
-            let spark_budget = pane_count * (SPARK_HEIGHT + 6.0);
+            // M13's own cost, measured rather than assumed: one 12px strip per
+            // pane, plus one small banner row for the single alert the demo
+            // raises (`the_demo_raises_exactly_one_alert`). This is what keeps
+            // "the sparkline is 12px" from quietly becoming "the sparkline
+            // reflowed the pane".
+            let m13_cost = collapsed_height - without_m13;
+            let small_row = 20.0;
+            let m13_budget = pane_count * (SPARK_HEIGHT + 6.0) + small_row;
             assert!(
-                spark_cost > 0.0 && spark_cost <= spark_budget,
-                "{theme:?} sparkline cost {spark_cost}px across {pane_count} panes, \
-                 outside the {spark_budget}px the strip itself accounts for"
+                m13_cost > 0.0 && m13_cost <= m13_budget,
+                "{theme:?} M13 cost {m13_cost}px across {pane_count} panes, outside \
+                 the {m13_budget}px its strip and one banner account for"
             );
 
-            // And the total, so the pane cannot grow past the strip's budget by
-            // some other route. Turning history on therefore deepens the known
-            // overflow by one strip per pane — reported to the owner at the M13
-            // gate, not decided here (§4.5).
+            // And the total, so the pane cannot grow past that budget by some
+            // other route. History and alerts therefore deepen the known,
+            // already-reported overflow — reported to the owner at the M13 gate,
+            // not decided here (§4.5).
             assert!(
-                collapsed_height <= usable + one_row + spark_budget,
-                "{theme:?} collapsed demo with history wanted {collapsed_height}px, \
-                 past the {usable}px panel by more than one row plus the strip"
+                collapsed_height <= usable + one_row + m13_budget,
+                "{theme:?} collapsed demo wanted {collapsed_height}px, past the \
+                 {usable}px panel by more than one row plus M13's own budget"
             );
         }
     }
