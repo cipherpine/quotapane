@@ -47,9 +47,11 @@
 //! the feature can be reviewed without waiting hours for one to occur.
 
 use eframe::egui;
+use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use usage_core::egress::Egress;
+use usage_core::history::{self, HistoryEntry};
 use usage_core::model::{ProviderId, ProviderSnapshot, QuotaWindow, ResetCredits};
 use usage_core::pace::{self, Burn, PaceRing, PaceSample};
 use usage_core::poller::{self, PollerHandle, Update};
@@ -150,6 +152,29 @@ const PACE_TICK_ALPHA: u8 = 200;
 /// A working session, not a round number: inside six hours the forecast is
 /// something to act on now, and beyond it something to merely know.
 const PACE_CARDINAL_UNDER_SECS: u64 = 21_600;
+
+/// How far back the in-memory history trail — and the sparkline drawn from it —
+/// reaches (24 h).
+///
+/// A day is the span where "am I burning faster than usual" is answerable at a
+/// glance: it covers several 5h windows and a meaningful slice of a weekly one.
+/// Longer would compress the interesting part of the line into a few pixels of
+/// a 120px strip.
+const HISTORY_WINDOW_SECS: u64 = 86_400;
+
+/// The current unix second.
+///
+/// The one clock read in the history path, and it lives here rather than in
+/// `usage_core::history` on purpose: that module stays clock-free so its
+/// retention and rehydration cutoffs are testable at any moment (the same rule
+/// `usage_core::pace` follows). Zero on a system clock before the epoch, which
+/// simply reads as "nothing in the file is recent".
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 struct Args {
     /// Claude Code client version → `User-Agent: claude-code/<ver>`.
@@ -647,6 +672,53 @@ fn demo_series(
         .collect()
 }
 
+/// Spacing between fabricated history points, in seconds (30 min) — 48 of them
+/// cover the sparkline's full 24 h.
+const DEMO_HISTORY_STEP_SECS: u64 = 1_800;
+/// How far the fabricated history reaches back from the series' first
+/// snapshot — [`HISTORY_WINDOW_SECS`] minus the hour the series itself spans.
+const DEMO_HISTORY_STEPS: u64 =
+    (HISTORY_WINDOW_SECS - DEMO_STEPS * DEMO_STEP_SECS).div_ceil(DEMO_HISTORY_STEP_SECS);
+/// How much lower the fabricated day starts than the series does.
+const DEMO_HISTORY_CLIMB: f64 = 0.35;
+
+/// Fabricate the day of history behind the demo's snapshots (M13).
+///
+/// The sparkline needs 24 h of readings and the demo series is one hour long,
+/// so the missing 23 are written down here — rising toward the series' opening
+/// fraction with a small repeating wobble, because a perfectly straight line
+/// would read as a rendering bug rather than as usage.
+///
+/// Deterministic, like everything else in the demo: a fixed base second, a
+/// fixed step, and an arithmetic wobble rather than a random one. Two runs draw
+/// the same strip, or a screenshot means nothing.
+///
+/// In memory only — [`ProviderPane::demo`] gives these panes no history path,
+/// so not one fabricated reading can reach the user's real log.
+fn demo_history(provider: ProviderId, windows: &[DemoWindow]) -> Vec<HistoryEntry> {
+    let mut entries = Vec::new();
+    for step in 0..DEMO_HISTORY_STEPS {
+        // Counted back from the first real snapshot, so the fabricated day ends
+        // exactly where the series begins.
+        let at = DEMO_BASE_UNIX_SECS - (DEMO_HISTORY_STEPS - step) * DEMO_HISTORY_STEP_SECS;
+        let progress = step as f64 / (DEMO_HISTORY_STEPS - 1) as f64;
+        for window in windows {
+            let base = window.from_fraction - DEMO_HISTORY_CLIMB * (1.0 - progress);
+            // A period that does not divide the step count, so the wobble never
+            // lines up into a visible stripe.
+            let wobble = 0.012 * ((step % 7) as f64 - 3.0);
+            entries.push(HistoryEntry {
+                at_unix_secs: at,
+                provider,
+                label: window.label.to_string(),
+                used_fraction: (base + wobble).clamp(0.0, 1.0),
+                duration_secs: Some(window.duration_secs),
+            });
+        }
+    }
+    entries
+}
+
 /// The scenario, one entry per provider. Deliberately covers every state the
 /// feature can be in, so one look at the window reviews all of them:
 ///
@@ -666,46 +738,43 @@ fn demo_series(
 ///   still hides the untouched one).
 /// - **Codex reset credits** — one available, as the real account reports.
 fn demo_panes() -> Vec<ProviderPane> {
-    let claude = demo_series(
-        ProviderId::ClaudeSubscription,
-        &[
-            DemoWindow {
-                label: "5h",
-                duration_secs: 18_000,
-                final_resets_in_secs: 14_400,
-                from_fraction: 0.10,
-                to_fraction: 0.12,
-            },
-            DemoWindow {
-                label: "7d",
-                duration_secs: 604_800,
-                final_resets_in_secs: 302_400,
-                from_fraction: 0.50,
-                to_fraction: 0.55,
-            },
-        ],
-        &[],
-        None,
-    );
+    let claude_windows = [
+        DemoWindow {
+            label: "5h",
+            duration_secs: 18_000,
+            final_resets_in_secs: 14_400,
+            from_fraction: 0.10,
+            to_fraction: 0.12,
+        },
+        DemoWindow {
+            label: "7d",
+            duration_secs: 604_800,
+            final_resets_in_secs: 302_400,
+            from_fraction: 0.50,
+            to_fraction: 0.55,
+        },
+    ];
+    let claude = demo_series(ProviderId::ClaudeSubscription, &claude_windows, &[], None);
 
+    let codex_windows = [
+        DemoWindow {
+            label: "5h",
+            duration_secs: 18_000,
+            final_resets_in_secs: 4_500,
+            from_fraction: 0.60,
+            to_fraction: 0.80,
+        },
+        DemoWindow {
+            label: "7d",
+            duration_secs: 604_800,
+            final_resets_in_secs: 60_480,
+            from_fraction: 0.30,
+            to_fraction: 0.30,
+        },
+    ];
     let codex = demo_series(
         ProviderId::CodexSubscription,
-        &[
-            DemoWindow {
-                label: "5h",
-                duration_secs: 18_000,
-                final_resets_in_secs: 4_500,
-                from_fraction: 0.60,
-                to_fraction: 0.80,
-            },
-            DemoWindow {
-                label: "7d",
-                duration_secs: 604_800,
-                final_resets_in_secs: 60_480,
-                from_fraction: 0.30,
-                to_fraction: 0.30,
-            },
-        ],
+        &codex_windows,
         &[
             QuotaWindow {
                 label: "GPT-5.3-Codex-Max".to_string(),
@@ -732,8 +801,16 @@ fn demo_panes() -> Vec<ProviderPane> {
     );
 
     vec![
-        ProviderPane::demo(ProviderId::ClaudeSubscription, claude),
-        ProviderPane::demo(ProviderId::CodexSubscription, codex),
+        ProviderPane::demo(
+            ProviderId::ClaudeSubscription,
+            claude,
+            demo_history(ProviderId::ClaudeSubscription, &claude_windows),
+        ),
+        ProviderPane::demo(
+            ProviderId::CodexSubscription,
+            codex,
+            demo_history(ProviderId::CodexSubscription, &codex_windows),
+        ),
     ]
 }
 
@@ -999,9 +1076,23 @@ struct ProviderPane {
     /// would be several more lines in a 320px pane for a fact the headline
     /// windows already carry.
     ///
-    /// In memory only, and for the process's lifetime only. Nothing here is
-    /// written anywhere; on-disk history is a later milestone.
+    /// Seeded from `history.jsonl` at startup when history is on (M13), so a
+    /// restart resumes the trail instead of going quiet for two hours.
     rings: Vec<(String, PaceRing)>,
+    /// The last [`HISTORY_WINDOW_SECS`] of readings for this provider, oldest
+    /// first — what the sparkline is drawn from.
+    ///
+    /// Empty unless history is on, or `--pace-demo` fabricated one. Held
+    /// separately from [`Self::rings`] because the two answer different
+    /// questions over different spans: a ring is the last two hours, fitted;
+    /// this is the last day, drawn.
+    history: Vec<HistoryEntry>,
+    /// Whether this pane maintains [`Self::history`] at all.
+    history_enabled: bool,
+    /// Where readings are appended. `None` means write nothing — history is
+    /// off, or this is a demo pane, whose fabricated numbers must never reach
+    /// the user's real log.
+    history_path: Option<PathBuf>,
     /// This provider's at-risk line, or `None` for "nothing to say".
     ///
     /// Recomputed **only** when a snapshot arrives, and stored rather than
@@ -1046,6 +1137,9 @@ impl ProviderPane {
             startup_error,
             expanded: false,
             rings: Vec::new(),
+            history: Vec::new(),
+            history_enabled: false,
+            history_path: None,
             pace_warning: None,
         }
     }
@@ -1058,7 +1152,11 @@ impl ProviderPane {
     /// synthetic numbers rather than a parallel mock of it. `handle` is `None`,
     /// so no poller thread exists, no [`Egress`] is ever constructed, and this
     /// pane cannot make a request even in principle.
-    fn demo(id: ProviderId, series: Vec<ProviderSnapshot>) -> Self {
+    ///
+    /// `history` is the fabricated 24 h trail behind the sparkline. It is held
+    /// in memory only: `history_path` stays `None`, so a demo run cannot write
+    /// a single invented reading into the user's real `history.jsonl`.
+    fn demo(id: ProviderId, series: Vec<ProviderSnapshot>, history: Vec<HistoryEntry>) -> Self {
         let mut pane = ProviderPane {
             id,
             handle: None,
@@ -1068,10 +1166,17 @@ impl ProviderPane {
             startup_error: None,
             expanded: false,
             rings: Vec::new(),
+            history,
+            history_enabled: true,
+            history_path: None,
             pace_warning: None,
         };
         for snapshot in series {
             pane.ingest_pace(&snapshot);
+            // The same call a real poll makes, so the demo's last hour joins the
+            // fabricated day through the shipping code rather than beside it.
+            // With no `history_path` this touches memory only.
+            pane.record_history(&snapshot);
             pane.latest_snapshot = Some(snapshot);
         }
         // The footer's age is the one thing the demo does not fake: it counts
@@ -1079,6 +1184,86 @@ impl ProviderPane {
         // schedule exactly as a live one would.
         pane.snapshot_received_at = Some(Instant::now());
         pane
+    }
+
+    /// Turn history on for this pane: keep the day's readings for the
+    /// sparkline, replay the pace trail, and start appending to `path` (M13).
+    ///
+    /// `entries` is the whole decoded log — both providers' lines — so the
+    /// caller reads and retains the file once rather than once per pane.
+    ///
+    /// What survives a restart is the **trail**, not the forecast: a
+    /// [`PaceWarning`] needs the reset countdown, which history deliberately
+    /// does not store, so the line reappears with the first poll rather than
+    /// before it. Ahead of M13 that first poll produced nothing at all and the
+    /// pane stayed silent for the two hours it took to refill a ring.
+    fn enable_history(&mut self, path: PathBuf, entries: &[HistoryEntry], now_unix_secs: u64) {
+        self.history_enabled = true;
+        self.history_path = Some(path);
+
+        let mine: Vec<HistoryEntry> = entries
+            .iter()
+            .filter(|entry| entry.provider == self.id)
+            .cloned()
+            .collect();
+
+        // Seed each window's ring through `observe`, the same door a live poll
+        // uses — so a reset inside the replayed span still clears the trail
+        // (the used-fraction signal works without a countdown, and the
+        // countdown signal being unavailable can only fail toward keeping
+        // samples, never toward inventing a reset).
+        for entry in history::rehydratable(&mine, now_unix_secs) {
+            let index = match self
+                .rings
+                .iter()
+                .position(|(label, _)| label == &entry.label)
+            {
+                Some(index) => index,
+                None => {
+                    self.rings.push((entry.label.clone(), PaceRing::new()));
+                    self.rings.len() - 1
+                }
+            };
+            self.rings[index].1.observe(
+                PaceSample {
+                    at_unix_secs: entry.at_unix_secs,
+                    used_fraction: entry.used_fraction,
+                },
+                None,
+                entry.duration_secs,
+            );
+        }
+
+        self.history = history::within(&mine, now_unix_secs, HISTORY_WINDOW_SECS);
+    }
+
+    /// Record a fresh snapshot's headline readings: append them to the log (when
+    /// one is configured) and keep the in-memory day trail current.
+    ///
+    /// A write failure is swallowed, exactly as a preference write is: a full
+    /// disk is not worth an error dialog in an always-on-top window, and the
+    /// only thing lost is a sparkline's memory.
+    fn record_history(&mut self, snapshot: &ProviderSnapshot) {
+        if !self.history_enabled {
+            return;
+        }
+        let entries = history::entries_for_snapshot(snapshot);
+        if entries.is_empty() {
+            return;
+        }
+        if let Some(path) = &self.history_path {
+            let _ = history::append(path, &entries);
+        }
+        self.history.extend(entries);
+        // Pruned against the newest reading rather than the wall clock, so the
+        // trail this pane holds is exactly the span the sparkline draws.
+        let newest = self
+            .history
+            .iter()
+            .map(|entry| entry.at_unix_secs)
+            .max()
+            .unwrap_or(0);
+        self.history = history::within(&self.history, newest, HISTORY_WINDOW_SECS);
     }
 
     /// Fold a fresh snapshot's headline windows into their sample trails, then
@@ -1150,6 +1335,8 @@ impl ProviderPane {
                     // and the at-risk line is recomputed here — on the poll
                     // event — rather than on every frame that renders it.
                     self.ingest_pace(&snapshot);
+                    // Then the day trail and, when it is on, the disk log.
+                    self.record_history(&snapshot);
                     self.latest_snapshot = Some(snapshot);
                     self.snapshot_received_at = Some(Instant::now());
                     // A fresh success supersedes any prior failure.
@@ -2073,7 +2260,7 @@ fn main() -> ExitCode {
     // branch is what makes "no network" structural rather than promised:
     // `ProviderPane::new` is where a poller thread would be spawned and where an
     // `Egress` would be handed to it.
-    let panes = if pace_demo {
+    let mut panes = if pace_demo {
         demo_panes()
     } else {
         vec![
@@ -2087,6 +2274,29 @@ fn main() -> ExitCode {
             ),
         ]
     };
+
+    // Preferences are read here, before the window, because `history=on` has to
+    // be answered before the first poll can be recorded. Demo panes carry their
+    // own fabricated trail and must never touch the real log, so the whole
+    // block is skipped under `--pace-demo`.
+    let mut config = config::load();
+    // A run-only flag beats the saved preference; every other preference comes
+    // from the file only, since there is no flag for them.
+    if let Some(theme) = theme_override {
+        config.theme = theme;
+    }
+    if config.history && !pace_demo {
+        if let Some(path) = config::config_dir().map(|dir| dir.join(history::FILE_NAME)) {
+            // Retention first, so a log that outgrew the cap is trimmed before
+            // it is read — the one moment the whole file is in memory.
+            let _ = history::apply_retention(&path);
+            let entries = history::read(&path);
+            let now = now_unix_secs();
+            for pane in &mut panes {
+                pane.enable_history(path.clone(), &entries, now);
+            }
+        }
+    }
 
     // The window/taskbar icon is the neutral mark — no usage yet at startup,
     // and a taskbar entry is not the place for a live gauge. The tray is.
@@ -2110,14 +2320,11 @@ fn main() -> ExitCode {
         window_title(pace_demo),
         native_options,
         Box::new(move |_cc| {
-            // A run-only flag beats the saved preference; otherwise the saved
-            // preference, which itself defaults to Cipher Pine. Every other
-            // preference comes from the file only — there is no flag for them.
+            // `config` was resolved above — the window cannot be the one to read
+            // it, because `history=on` had to be answered before the panes were
+            // built. `theme_overridden` records that a flag, not the file, chose
+            // the look, so a tray toggle during this run does not rewrite it.
             let theme_overridden = theme_override.is_some();
-            let mut config = config::load();
-            if let Some(theme) = theme_override {
-                config.theme = theme;
-            }
             let theme = config.theme;
 
             // Installed before the first frame. The test layout harness
@@ -3132,7 +3339,7 @@ mod tests {
             &[model_window_at("GPT-5.3-Codex-Max", Some(0.42))],
             None,
         );
-        let pane = ProviderPane::demo(ProviderId::CodexSubscription, series);
+        let pane = ProviderPane::demo(ProviderId::CodexSubscription, series, Vec::new());
 
         let labels: Vec<&str> = pane.rings.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(labels, vec!["5h", "7d"]);
@@ -3163,7 +3370,7 @@ mod tests {
         for snapshot in &mut series {
             snapshot.windows[0].used_fraction = None;
         }
-        let pane = ProviderPane::demo(ProviderId::ClaudeSubscription, series);
+        let pane = ProviderPane::demo(ProviderId::ClaudeSubscription, series, Vec::new());
         assert!(pane.rings.is_empty());
         assert!(pane.pace_warning.is_none());
     }
@@ -3185,7 +3392,7 @@ mod tests {
             &[],
             None,
         );
-        let before = ProviderPane::demo(ProviderId::CodexSubscription, series.clone());
+        let before = ProviderPane::demo(ProviderId::CodexSubscription, series.clone(), Vec::new());
         assert!(
             before.pace_warning.is_some(),
             "the pre-reset pane must be warning, or this test proves nothing"
@@ -3198,12 +3405,317 @@ mod tests {
         rolled_over.windows[0].resets_in_secs = Some(18_000);
         series.push(rolled_over);
 
-        let after = ProviderPane::demo(ProviderId::CodexSubscription, series);
+        let after = ProviderPane::demo(ProviderId::CodexSubscription, series, Vec::new());
         assert_eq!(after.rings[0].1.len(), 1, "the old trail must be gone");
         assert!(
             after.pace_warning.is_none(),
             "one post-reset sample cannot support a forecast"
         );
+    }
+
+    // --- M13: disk history and pace rehydration ---
+
+    /// A pane in exactly the state `ProviderPane::new` leaves a live provider
+    /// in — no poller, no history. Built by hand because `new` spawns a real
+    /// poller thread, which a unit test must not do.
+    fn bare_pane(id: ProviderId) -> ProviderPane {
+        ProviderPane {
+            id,
+            handle: None,
+            latest_snapshot: None,
+            snapshot_received_at: None,
+            latest_failure: None,
+            startup_error: None,
+            expanded: false,
+            rings: Vec::new(),
+            history: Vec::new(),
+            history_enabled: false,
+            history_path: None,
+            pace_warning: None,
+        }
+    }
+
+    /// A private temp path for one test; removed when the guard drops.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> TempDir {
+            let mut dir = std::env::temp_dir();
+            dir.push(format!("quotapane-ui-hist-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            TempDir(dir)
+        }
+
+        fn file(&self) -> PathBuf {
+            self.0.join(history::FILE_NAME)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn history_entry(provider: ProviderId, at: u64, label: &str, used: f64) -> HistoryEntry {
+        HistoryEntry {
+            at_unix_secs: at,
+            provider,
+            label: label.to_string(),
+            used_fraction: used,
+            duration_secs: Some(18_000),
+        }
+    }
+
+    /// Six readings of a 5h window climbing 0.60 → 0.85 over the hour ending
+    /// ten minutes before `now`.
+    fn climbing_trail(provider: ProviderId, now: u64) -> Vec<HistoryEntry> {
+        (0..6)
+            .map(|i| {
+                history_entry(
+                    provider,
+                    now - 3_600 + i * 600,
+                    "5h",
+                    0.60 + 0.05 * i as f64,
+                )
+            })
+            .collect()
+    }
+
+    /// The snapshot that would land at `now`, continuing that climb.
+    fn climbing_snapshot(provider: ProviderId, now: u64) -> ProviderSnapshot {
+        ProviderSnapshot {
+            provider,
+            taken_at_unix_secs: now,
+            windows: vec![QuotaWindow {
+                label: "5h".to_string(),
+                used_fraction: Some(0.90),
+                resets_in_secs: Some(1_800),
+                duration_secs: Some(18_000),
+            }],
+            per_model: Vec::new(),
+            reset_credits: None,
+            source: usage_core::model::SnapshotSource::UsageEndpoint,
+        }
+    }
+
+    #[test]
+    fn a_forecast_survives_a_restart() {
+        // The whole point of P2, stated as a before/after: the same first poll
+        // says nothing to a cold pane and produces a forecast on a rehydrated
+        // one, because the trail behind it came back off disk.
+        let now = DEMO_BASE_UNIX_SECS;
+        let snapshot = climbing_snapshot(ProviderId::ClaudeSubscription, now);
+
+        let mut cold = bare_pane(ProviderId::ClaudeSubscription);
+        cold.ingest_pace(&snapshot);
+        assert!(
+            cold.pace_warning.is_none(),
+            "one sample cannot support a forecast — the M8 behaviour"
+        );
+
+        let tmp = TempDir::new("restart");
+        let mut warm = bare_pane(ProviderId::ClaudeSubscription);
+        warm.enable_history(
+            tmp.file(),
+            &climbing_trail(ProviderId::ClaudeSubscription, now),
+            now,
+        );
+        assert_eq!(warm.rings.len(), 1, "the ring should have been seeded");
+        assert_eq!(warm.rings[0].1.len(), 6);
+        warm.ingest_pace(&snapshot);
+        let warning = warm.pace_warning.expect("the replayed trail should fit");
+        assert_eq!(warning.label, "5h");
+        assert!(
+            warning.exhaust_in_secs < 1_800,
+            "0.10 left at 0.30/h fills inside the half hour to reset, got {}",
+            warning.exhaust_in_secs
+        );
+    }
+
+    #[test]
+    fn rehydration_takes_only_this_provider_and_only_the_trail() {
+        let now = DEMO_BASE_UNIX_SECS;
+        let mut entries = climbing_trail(ProviderId::ClaudeSubscription, now);
+        // The other provider's lines, and one older than the pace trail.
+        entries.push(history_entry(
+            ProviderId::CodexSubscription,
+            now - 300,
+            "5h",
+            0.4,
+        ));
+        entries.push(history_entry(
+            ProviderId::ClaudeSubscription,
+            now - pace::TRAIL_SECS - 1,
+            "5h",
+            0.1,
+        ));
+        // And one from the future, which no clock-forward run should replay.
+        entries.push(history_entry(
+            ProviderId::ClaudeSubscription,
+            now + 60,
+            "5h",
+            0.99,
+        ));
+
+        let tmp = TempDir::new("filter");
+        let mut pane = bare_pane(ProviderId::ClaudeSubscription);
+        pane.enable_history(tmp.file(), &entries, now);
+
+        assert_eq!(pane.rings.len(), 1);
+        assert_eq!(
+            pane.rings[0].1.len(),
+            6,
+            "only this provider's in-trail readings seed the ring"
+        );
+        // The day trail keeps this provider's readings inside 24 h — which
+        // includes the pre-trail one the ring dropped, since the sparkline
+        // draws a longer span than the fit uses.
+        assert_eq!(pane.history.len(), 7);
+        assert!(pane
+            .history
+            .iter()
+            .all(|e| e.provider == ProviderId::ClaudeSubscription));
+    }
+
+    #[test]
+    fn a_reset_inside_the_replayed_span_still_clears_the_trail() {
+        // Rehydration goes through `PaceRing::observe`, not a private back
+        // door, so the used-fraction reset signal works on replayed samples
+        // even though history stores no countdown to check.
+        let now = DEMO_BASE_UNIX_SECS;
+        let mut entries = climbing_trail(ProviderId::ClaudeSubscription, now);
+        entries.push(history_entry(
+            ProviderId::ClaudeSubscription,
+            now - 300,
+            "5h",
+            0.02,
+        ));
+
+        let tmp = TempDir::new("reset");
+        let mut pane = bare_pane(ProviderId::ClaudeSubscription);
+        pane.enable_history(tmp.file(), &entries, now);
+        assert_eq!(
+            pane.rings[0].1.len(),
+            1,
+            "the pre-reset trail must not survive replay"
+        );
+    }
+
+    #[test]
+    fn history_off_records_nothing_anywhere() {
+        let now = DEMO_BASE_UNIX_SECS;
+        let mut pane = bare_pane(ProviderId::ClaudeSubscription);
+        pane.record_history(&climbing_snapshot(ProviderId::ClaudeSubscription, now));
+        assert!(pane.history.is_empty(), "history=off must keep no trail");
+        assert!(pane.history_path.is_none(), "and must name no file");
+    }
+
+    #[test]
+    fn recording_appends_to_disk_and_survives_a_reopen() {
+        let now = DEMO_BASE_UNIX_SECS;
+        let tmp = TempDir::new("append");
+        let path = tmp.file();
+
+        let mut pane = bare_pane(ProviderId::CodexSubscription);
+        pane.enable_history(path.clone(), &[], now);
+        assert!(!path.exists(), "enabling history must not create the file");
+
+        pane.record_history(&climbing_snapshot(ProviderId::CodexSubscription, now));
+        pane.record_history(&climbing_snapshot(ProviderId::CodexSubscription, now + 600));
+        assert_eq!(
+            pane.history.len(),
+            2,
+            "the day trail tracks what was written"
+        );
+
+        // What a later run would read back.
+        let reread = history::read(&path);
+        assert_eq!(reread.len(), 2);
+        assert!(reread
+            .iter()
+            .all(|e| e.provider == ProviderId::CodexSubscription));
+        assert_eq!(reread[0].at_unix_secs, now);
+        assert_eq!(reread[1].at_unix_secs, now + 600);
+        assert_eq!(reread[1].used_fraction, 0.90);
+    }
+
+    #[test]
+    fn the_day_trail_forgets_readings_older_than_a_day() {
+        let now = DEMO_BASE_UNIX_SECS;
+        let tmp = TempDir::new("prune");
+        let mut pane = bare_pane(ProviderId::ClaudeSubscription);
+        pane.enable_history(
+            tmp.file(),
+            &[history_entry(
+                ProviderId::ClaudeSubscription,
+                now,
+                "5h",
+                0.5,
+            )],
+            now,
+        );
+        assert_eq!(pane.history.len(), 1);
+
+        // A poll a day and a minute later pushes the old reading out.
+        pane.record_history(&climbing_snapshot(
+            ProviderId::ClaudeSubscription,
+            now + HISTORY_WINDOW_SECS + 60,
+        ));
+        assert_eq!(pane.history.len(), 1);
+        assert_eq!(pane.history[0].at_unix_secs, now + HISTORY_WINDOW_SECS + 60);
+    }
+
+    #[test]
+    fn the_demo_fabricates_a_day_of_history_and_writes_none_of_it() {
+        for pane in demo_panes() {
+            assert!(
+                pane.history_path.is_none(),
+                "a demo pane must never name a real log file"
+            );
+            assert!(
+                pane.history_enabled,
+                "but it must still have a trail to draw"
+            );
+
+            let times: Vec<u64> = pane.history.iter().map(|e| e.at_unix_secs).collect();
+            let (first, last) = (
+                *times.iter().min().expect("history"),
+                *times.iter().max().expect("history"),
+            );
+            assert_eq!(
+                last,
+                DEMO_BASE_UNIX_SECS + (DEMO_STEPS - 1) * DEMO_STEP_SECS,
+                "the trail must end where the bars do"
+            );
+            assert_eq!(
+                last - first,
+                HISTORY_WINDOW_SECS,
+                "the trail must cover the sparkline's full span"
+            );
+            // Two labels per point, and every reading a real percentage.
+            for entry in &pane.history {
+                assert!(
+                    (0.0..=1.0).contains(&entry.used_fraction),
+                    "{entry:?} is not a percentage"
+                );
+                assert!(entry.label == "5h" || entry.label == "7d", "{entry:?}");
+            }
+            assert!(
+                pane.history.len() >= 2 * 24,
+                "{} points",
+                pane.history.len()
+            );
+        }
+    }
+
+    #[test]
+    fn the_demo_history_is_deterministic() {
+        // Same rule as the rest of the demo: two runs must draw the same strip,
+        // or a screenshot proves nothing.
+        let first: Vec<Vec<HistoryEntry>> = demo_panes().into_iter().map(|p| p.history).collect();
+        let second: Vec<Vec<HistoryEntry>> = demo_panes().into_iter().map(|p| p.history).collect();
+        assert_eq!(first, second);
     }
 
     // --- M8: --pace-demo ---
