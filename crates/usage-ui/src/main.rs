@@ -50,15 +50,17 @@
 //! `config.cfg` replaces the one-word `theme.cfg` (see [`config`]); with
 //! `history=on` each poll's headline readings are appended to `history.jsonl`
 //! and replayed into the pace rings at startup, so a forecast survives a
-//! restart, and the day's readings draw a 12px sparkline under each provider's
-//! bars. With `alerts=on` a window over `alert_at` — and, in the default
-//! `pace` mode, also being spent faster than it elapses — raises one banner,
-//! rings the tray icon, prefixes the tray tooltip, and asks the taskbar for
-//! attention once. All of it is off by default and dep-free: no notification
-//! crate, and every surface one the app already owned. `--pace-demo` fabricates
-//! a day of history in memory and forces the alert settings to on-at-the-
-//! defaults, so all of it can be seen without real data — and, having no
-//! history path, it writes none of that day to disk.
+//! restart, and the day's readings draw a 16px sparkline — filled body under a
+//! full-strength line, a bright dot on the newest reading, a `24h` tag — under
+//! each provider's bars. With `alerts=on` a window over `alert_at` — and, in
+//! the default `pace` mode, also being spent faster than it elapses — raises
+//! one banner, rings the tray icon, prefixes the tray tooltip, and asks the
+//! taskbar for attention once. All of it is off by default and dep-free: no
+//! notification crate, and every surface one the app already owned.
+//! `--pace-demo` fabricates a day of history in memory, forces the alert
+//! settings to on-at-the-defaults, and opens a taller window sized to the
+//! whole scenario, so all of it can be seen at once without real data — and,
+//! having no history path, it writes none of that day to disk.
 
 use eframe::egui;
 use std::path::PathBuf;
@@ -145,6 +147,44 @@ const PER_MODEL_CAPTION: &str = "per-model";
 const WINDOW_WIDTH: f32 = 320.0;
 const WINDOW_HEIGHT: f32 = 240.0;
 
+/// The inner height `--pace-demo` asks for instead of [`WINDOW_HEIGHT`]
+/// (M13-R1). **Demo only** — the production window is untouched.
+///
+/// The demo is the review path, and it shows every state at once: two panes,
+/// both with a 24 h strip, one raising an alert banner, one carrying a
+/// reset-credits line and a per-model disclosure. That is more than the
+/// 240px pane a real subscriber usually sees, and reviewing it through a
+/// scroll bar means reviewing it in pieces.
+///
+/// Derived, not chosen. `the_demo_scenario_fits_the_window` measures the demo
+/// body through the same layout harness the width assertions use, adds the
+/// titlebar and the central panel's own margins, and fails if this constant is
+/// under that or more than one row over it. As measured 2026-08-05:
+///
+/// | theme        | titlebar | panel chrome | demo body | needed  |
+/// |--------------|----------|--------------|-----------|---------|
+/// | Cipher Pine  | 24.0     | 16.0         | 323.8125  | 363.8125|
+/// | Plain        | 24.0     | 16.0         | 305.625   | 345.625 |
+///
+/// Cipher Pine binds — its monospace is taller per row, the same reason it
+/// binds the width assertions — so this is its 363.8125 rounded up to a whole
+/// pixel. Plain then opens with ~18px of slack, which is the correct direction
+/// to be wrong in: a little empty ground, never a scroll bar.
+const DEMO_WINDOW_HEIGHT: f32 = 364.0;
+
+/// The inner height the window asks the OS for at startup.
+///
+/// A function of one flag so the production default has exactly one value and
+/// `only_the_demo_gets_the_taller_window` can pin it: every non-demo launch
+/// gets [`WINDOW_HEIGHT`], the size accepted through every milestone to date.
+fn initial_inner_height(pace_demo: bool) -> f32 {
+    if pace_demo {
+        DEMO_WINDOW_HEIGHT
+    } else {
+        WINDOW_HEIGHT
+    }
+}
+
 /// How far a per-model row's bar line is inset under its model label.
 const PER_MODEL_ROW_INDENT: f32 = 8.0;
 
@@ -176,19 +216,42 @@ const PACE_CARDINAL_UNDER_SECS: u64 = 21_600;
 /// a 120px strip.
 const HISTORY_WINDOW_SECS: u64 = 86_400;
 
-/// Height of the history sparkline strip, in px (M13).
+/// Height of the history sparkline strip, in px (M13; raised in M13-R1).
 ///
-/// Twelve: tall enough that a day's shape is legible, short enough that a pane
-/// which grows one costs less than a text row. The strip is drawn, never
-/// labelled — a 120px-wide day has no room for an axis, and the bars directly
-/// above it already carry the number.
-const SPARK_HEIGHT: f32 = 12.0;
+/// Sixteen. Twelve shipped first and the owner's round-1 verdict on it was
+/// "hard to tell what it is and what it means": a day whose fraction moves by
+/// a third moves four pixels at that height, which reads as a wobble rather
+/// than a trend. A third more vertical range for the same horizontal day, and
+/// still cheaper than the text row it replaces the need for.
+const SPARK_HEIGHT: f32 = 16.0;
 
-/// Sparkline stroke alpha, out of 255.
+/// Sparkline stroke width, in px (M13-R1; was 1.0).
 ///
-/// Below the pace tick's [`PACE_TICK_ALPHA`] on purpose: the tick is a fact
-/// about *now* that the eye should find, and the strip is context behind it.
-const SPARK_ALPHA: u8 = 140;
+/// A hairline is what a 1px line renders as on a HiDPI panel — technically
+/// present, visually a smudge. One and a half is the narrowest width that
+/// still resolves as a drawn line rather than an artifact.
+const SPARK_STROKE_WIDTH: f32 = 1.5;
+
+/// Alpha of the fill under the sparkline curve, out of 255 (M13-R1).
+///
+/// Eighteen is deliberately near the floor: the fill's job is to give the
+/// line a *body* so the eye reads a shape, not to carry any value of its own.
+/// Any darker and the strip would compete with the quota bars directly above
+/// it, which are the thing the pane is actually about.
+const SPARK_FILL_ALPHA: u8 = 18;
+
+/// Radius of the "now" dot at the strip's newest reading, in px (M13-R1).
+///
+/// The one bright mark on the strip, and the reason the line reads as flowing
+/// toward the present rather than as an anonymous squiggle.
+const SPARK_NOW_RADIUS: f32 = 2.5;
+
+/// The strip's self-describing tag, above its right edge (M13-R1).
+///
+/// The strip was unlabelled in M13 on the theory that a 120px day has no room
+/// for an axis. It has room for three characters, and three characters are the
+/// difference between a line and a line that says what its width means.
+const SPARK_TAG: &str = "24h";
 
 /// The current unix second.
 ///
@@ -1871,14 +1934,7 @@ impl eframe::App for QuotaPaneApp {
                     drag: egui::containers::scroll_area::DragScroll::Never,
                     ..Default::default()
                 })
-                .show(ui, |ui| {
-                    for (i, pane) in self.panes.iter_mut().enumerate() {
-                        if i > 0 {
-                            ui.separator();
-                        }
-                        render_pane(ui, pane, theme);
-                    }
-                });
+                .show(ui, |ui| render_panes(ui, &mut self.panes, theme));
         });
     }
 
@@ -1937,6 +1993,21 @@ fn render_provider_header(ui: &mut egui::Ui, id: ProviderId, theme: Theme) {
                 .color(TEXT_DIM),
         );
     });
+}
+
+/// The whole scrollable body: every provider's pane, ruled apart.
+///
+/// Extracted from `App::ui` so the layout harness can measure the *window's*
+/// content rather than one pane at a time — which is what
+/// [`DEMO_WINDOW_HEIGHT`] is derived from. A test that summed pane heights
+/// would silently miss the separators and the spacing between them.
+fn render_panes(ui: &mut egui::Ui, panes: &mut [ProviderPane], theme: Theme) {
+    for (i, pane) in panes.iter_mut().enumerate() {
+        if i > 0 {
+            ui.separator();
+        }
+        render_pane(ui, pane, theme);
+    }
 }
 
 /// Render one provider's titled section.
@@ -2304,13 +2375,64 @@ fn spark_points(series: &[(u64, f64)], now_unix_secs: u64, rect: egui::Rect) -> 
         .collect()
 }
 
-/// The sparkline's colour: TEXT_DIM at [`SPARK_ALPHA`], in both themes.
+/// The sparkline's stroke colour: TEXT_DIM at full alpha, in both themes.
+///
+/// M13 drew this at alpha 140 so the strip would sit *behind* the pace tick.
+/// The owner's round-1 verdict retired that ordering: a mark nobody can
+/// identify is not deferring to anything, it is just faint. The hierarchy is
+/// now carried by hue — TEXT_DIM for the day, TEXT for the [`SPARK_NOW_RADIUS`]
+/// dot on the present — rather than by transparency.
 ///
 /// Takes no [`Theme`], for the same reason [`pace_tick_color`] does not: a
 /// history strip is information, and how a day of usage looks does not depend
 /// on which look is installed.
 fn spark_color() -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(TEXT_DIM.r(), TEXT_DIM.g(), TEXT_DIM.b(), SPARK_ALPHA)
+    TEXT_DIM
+}
+
+/// The fill under the sparkline curve: [`spark_color`] at [`SPARK_FILL_ALPHA`].
+fn spark_fill_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(
+        TEXT_DIM.r(),
+        TEXT_DIM.g(),
+        TEXT_DIM.b(),
+        SPARK_FILL_ALPHA,
+    )
+}
+
+/// The area between the curve and `baseline`, as a triangle mesh (M13-R1).
+///
+/// A mesh rather than a filled path because the region under a usage curve is
+/// concave in general, and egui's polygon fill is a *convex* one — a concave
+/// series would fill across its own bays. Two triangles per segment, each
+/// spanning one pair of adjacent readings down to the baseline, is exactly the
+/// region under the polyline for any series, convex or not.
+///
+/// Sharing the vertices between adjacent segments matters as much as the
+/// triangles do: a per-segment quad would double-blend its seams, and at alpha
+/// 18 that would draw a faint vertical stripe at every reading — the "wobble
+/// never lines up into a visible stripe" rule the demo history already follows.
+///
+/// Pure, like [`spark_points`]: everything the painter does with the result is
+/// `Shape::mesh`.
+fn spark_fill_mesh(points: &[egui::Pos2], baseline: f32) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    if points.len() < 2 {
+        return mesh;
+    }
+    let color = spark_fill_color();
+    for point in points {
+        mesh.colored_vertex(*point, color);
+        mesh.colored_vertex(egui::pos2(point.x, baseline), color);
+    }
+    // Vertices come in (curve, baseline) pairs, so segment `i` owns 2i..2i+4.
+    for segment in 0..points.len() as u32 - 1 {
+        let (top, bottom) = (2 * segment, 2 * segment + 1);
+        let (next_top, next_bottom) = (top + 2, bottom + 2);
+        mesh.add_triangle(top, bottom, next_bottom);
+        mesh.add_triangle(top, next_bottom, next_top);
+    }
+    mesh
 }
 
 /// Draw the 24 h history strip, or nothing at all.
@@ -2323,6 +2445,12 @@ fn spark_color() -> egui::Color32 {
 ///
 /// One reading is not a line, and drawing a single dot would assert a trend
 /// from one number.
+///
+/// M13-R1 gives the strip the three things that make it read as an instrument
+/// rather than a scribble: a filled body under a full-strength line, a bright
+/// dot on the newest reading, and a [`SPARK_TAG`] naming the span it covers.
+/// The tag and the strip are one unit with no row spacing between them, so the
+/// label belongs to the line rather than to the bars above it.
 fn render_sparkline(ui: &mut egui::Ui, series: &[(u64, f64)]) {
     let Some(now) = series.iter().map(|(at, _)| *at).max() else {
         return;
@@ -2330,13 +2458,43 @@ fn render_sparkline(ui: &mut egui::Ui, series: &[(u64, f64)]) {
     if spark_window(series, now).len() < 2 {
         return;
     }
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(BAR_WIDTH, SPARK_HEIGHT), egui::Sense::hover());
-    let points = spark_points(series, now, rect);
-    ui.painter().add(egui::Shape::line(
-        points,
-        egui::Stroke::new(1.0, spark_color()),
-    ));
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+
+        // `24h`, right-aligned over the strip's right edge — the end the line
+        // runs *to*, and the end the eye starts from.
+        let font = egui::TextStyle::Small.resolve(ui.style());
+        let (tag_rect, _) = ui.allocate_exact_size(
+            egui::vec2(BAR_WIDTH, ui.text_style_height(&egui::TextStyle::Small)),
+            egui::Sense::hover(),
+        );
+        ui.painter().text(
+            tag_rect.right_top(),
+            egui::Align2::RIGHT_TOP,
+            SPARK_TAG,
+            font,
+            TEXT_FAINT,
+        );
+
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(BAR_WIDTH, SPARK_HEIGHT), egui::Sense::hover());
+        let points = spark_points(series, now, rect);
+        // The newest reading is the last point: `spark_window` keeps the series
+        // oldest-first and `now` is its maximum.
+        let newest = points.last().copied();
+
+        // Body first, then the line over its own top edge, then the anchor —
+        // painted back to front so nothing is half-covered by what follows.
+        ui.painter()
+            .add(egui::Shape::mesh(spark_fill_mesh(&points, rect.bottom())));
+        ui.painter().add(egui::Shape::line(
+            points,
+            egui::Stroke::new(SPARK_STROKE_WIDTH, spark_color()),
+        ));
+        if let Some(newest) = newest {
+            ui.painter().circle_filled(newest, SPARK_NOW_RADIUS, TEXT);
+        }
+    });
 }
 
 /// The elapsed-time pace tick's colour: TEXT_DIM at [`PACE_TICK_ALPHA`].
@@ -2781,7 +2939,7 @@ fn main() -> ExitCode {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([WINDOW_WIDTH, WINDOW_HEIGHT])
+            .with_inner_size([WINDOW_WIDTH, initial_inner_height(pace_demo)])
             .with_decorations(false)
             .with_resizable(false)
             .with_icon(window_icon)
@@ -3058,6 +3216,9 @@ mod tests {
         /// Width available inside the real window's panel — measured, not
         /// assumed, so the assertions self-calibrate if a margin changes.
         available_width: f32,
+        /// Vertical space the `CentralPanel`'s own frame costs, on top of the
+        /// content — measured for the same reason `available_width` is.
+        panel_chrome_height: f32,
     }
 
     /// Lay `add_contents` out in a headless replica of the real window: same
@@ -3076,7 +3237,19 @@ mod tests {
         lay_out_themed(Theme::CipherPine, add_contents)
     }
 
-    fn lay_out_themed(theme: Theme, mut add_contents: impl FnMut(&mut egui::Ui)) -> Laid {
+    fn lay_out_themed(theme: Theme, add_contents: impl FnMut(&mut egui::Ui)) -> Laid {
+        lay_out_sized(theme, WINDOW_HEIGHT, add_contents)
+    }
+
+    /// [`lay_out_themed`] against a window of `screen_height` rather than the
+    /// production [`WINDOW_HEIGHT`] — how the demo's own taller window is
+    /// measured. Also returns the central panel's chrome, so a caller sizing a
+    /// window can add it rather than guess it.
+    fn lay_out_sized(
+        theme: Theme,
+        screen_height: f32,
+        mut add_contents: impl FnMut(&mut egui::Ui),
+    ) -> Laid {
         let ctx = egui::Context::default();
         // The shipped theme, not egui's default. A harness without this would
         // happily pass a row that clips in the real window — precisely the
@@ -3085,16 +3258,24 @@ mod tests {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
-                egui::vec2(WINDOW_WIDTH, WINDOW_HEIGHT),
+                egui::vec2(WINDOW_WIDTH, screen_height),
             )),
             ..Default::default()
         };
         let (mut width, mut height, mut available_width) = (0.0, 0.0, 0.0);
+        let mut panel_chrome_height = 0.0;
         // Two frames: the first warms the font atlas and the id-keyed state
         // the indent and scroll area allocate, so the second measures a
         // settled layout.
         for _ in 0..2 {
             let _ = ctx.run_ui(input.clone(), |ui| {
+                // The panel's own margins, read from the style the window
+                // installed rather than assumed — the same self-calibration
+                // `available_width` gets.
+                panel_chrome_height = egui::Frame::central_panel(ui.style())
+                    .total_margin()
+                    .sum()
+                    .y;
                 egui::CentralPanel::default().show(ui, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         available_width = ui.max_rect().width();
@@ -3109,6 +3290,7 @@ mod tests {
             width,
             height,
             available_width,
+            panel_chrome_height,
         }
     }
 
@@ -4419,19 +4601,273 @@ mod tests {
     fn the_strip_is_the_same_colour_in_both_themes() {
         // A history strip is information, not styling — the same rule the pace
         // tick follows.
-        let expected = egui::Color32::from_rgba_unmultiplied(
-            TEXT_DIM.r(),
-            TEXT_DIM.g(),
-            TEXT_DIM.b(),
-            SPARK_ALPHA,
+        assert_eq!(spark_color(), TEXT_DIM);
+        assert_eq!(spark_color().a(), 255, "the line draws at full strength");
+        assert_eq!(
+            spark_fill_color(),
+            egui::Color32::from_rgba_unmultiplied(
+                TEXT_DIM.r(),
+                TEXT_DIM.g(),
+                TEXT_DIM.b(),
+                SPARK_FILL_ALPHA,
+            )
         );
-        assert_eq!(spark_color(), expected);
-        assert_eq!(SPARK_ALPHA, 140);
-        // The strip must sit behind the pace tick, not compete with it. A
-        // const block, because both sides are consts and a plain `assert!`
-        // over them is a compile-time fact clippy rightly refuses to see
-        // deferred to runtime.
-        const { assert!(SPARK_ALPHA < PACE_TICK_ALPHA) };
+        assert_eq!(SPARK_FILL_ALPHA, 18);
+    }
+
+    #[test]
+    fn the_strips_hierarchy_is_hue_not_transparency() {
+        // M13-R1 replaced M13's "the strip is dimmer than the pace tick" rule,
+        // which produced a mark the owner could not identify. Everything the
+        // strip draws is now opaque, and the ranking is TEXT (now) over
+        // TEXT_DIM (the day) over the near-invisible fill — the same ladder the
+        // rest of the pane's text uses. A const block because these are consts:
+        // a runtime `assert!` over them is a compile-time fact deferred.
+        const { assert!(SPARK_FILL_ALPHA < PACE_TICK_ALPHA) };
+        fn luma(c: egui::Color32) -> u32 {
+            c.r() as u32 + c.g() as u32 + c.b() as u32
+        }
+        assert!(
+            luma(TEXT) > luma(TEXT_DIM),
+            "the now dot must be brighter than the line it terminates"
+        );
+        // And the tag is the faintest — it names the axis, it is not the data.
+        assert!(
+            luma(TEXT_FAINT) < luma(TEXT_DIM),
+            "the tag must sit under the line it labels"
+        );
+    }
+
+    #[test]
+    fn the_strip_is_drawn_at_the_sizes_the_spec_names() {
+        // Byte-and-number pins for the round-2 look. These are the four values
+        // the owner's verdict turned on, and a "tidy-up" that quietly restores
+        // any of them puts the strip back to the state that was rejected.
+        assert_eq!(SPARK_HEIGHT, 16.0);
+        assert_eq!(SPARK_STROKE_WIDTH, 1.5);
+        assert_eq!(SPARK_NOW_RADIUS, 2.5);
+        assert_eq!(SPARK_TAG, "24h");
+    }
+
+    #[test]
+    fn the_fill_spans_every_segment_down_to_the_baseline() {
+        let rect = strip_rect();
+        let points = vec![
+            egui::pos2(rect.left(), rect.center().y),
+            egui::pos2(rect.center().x, rect.top()),
+            egui::pos2(rect.right(), rect.center().y),
+        ];
+        let mesh = spark_fill_mesh(&points, rect.bottom());
+        assert!(mesh.is_valid(), "every index must address a vertex");
+        // One curve vertex and one baseline vertex per reading…
+        assert_eq!(mesh.vertices.len(), points.len() * 2);
+        // …and two triangles per segment, sharing the vertices between them:
+        // a per-segment quad would double-blend its seams into visible stripes.
+        assert_eq!(mesh.indices.len(), (points.len() - 1) * 6);
+
+        for (i, point) in points.iter().enumerate() {
+            assert_eq!(mesh.vertices[i * 2].pos, *point);
+            assert_eq!(
+                mesh.vertices[i * 2 + 1].pos,
+                egui::pos2(point.x, rect.bottom()),
+                "the fill must reach the strip's floor, not the curve's low point"
+            );
+        }
+        assert!(
+            mesh.vertices.iter().all(|v| v.color == spark_fill_color()),
+            "the whole body is one flat wash — no gradient to read a value off"
+        );
+        // The concave case is why this is a mesh and not a convex polygon: a
+        // convex fill over these points would flood across the valley.
+        let valley = vec![
+            egui::pos2(rect.left(), rect.top()),
+            egui::pos2(rect.center().x, rect.bottom()),
+            egui::pos2(rect.right(), rect.top()),
+        ];
+        assert!(spark_fill_mesh(&valley, rect.bottom()).is_valid());
+    }
+
+    #[test]
+    fn a_fill_needs_a_segment() {
+        // The same "one reading is not a line" rule the strip itself follows —
+        // and `render_sparkline` never gets here with fewer than two, so this
+        // is the belt to that braces.
+        assert!(spark_fill_mesh(&[], 0.0).is_empty());
+        assert!(spark_fill_mesh(&[egui::pos2(1.0, 2.0)], 0.0).is_empty());
+    }
+
+    /// Every shape a render actually emitted, flattened out of egui's nesting.
+    ///
+    /// The strip's marks are *painted*, not laid out, so no width or height
+    /// assertion can see them — the M13 strip would have passed every layout
+    /// test in this file while drawing nothing at all. This is how the round-2
+    /// spec gets checked against what reaches the screen rather than against
+    /// the constants feeding it.
+    fn painted_shapes(mut add_contents: impl FnMut(&mut egui::Ui)) -> Vec<egui::Shape> {
+        let ctx = egui::Context::default();
+        install_theme(&ctx, Theme::CipherPine);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(WINDOW_WIDTH, WINDOW_HEIGHT),
+            )),
+            ..Default::default()
+        };
+        // Two frames, for the reason `lay_out_sized` runs two: the first warms
+        // the font atlas, and a galley laid out against a cold one measures
+        // nothing.
+        let _warm = ctx.run_ui(input.clone(), &mut add_contents);
+        let output = ctx.run_ui(input, &mut add_contents);
+
+        fn flatten(shape: egui::Shape, out: &mut Vec<egui::Shape>) {
+            match shape {
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        flatten(shape, out);
+                    }
+                }
+                other => out.push(other),
+            }
+        }
+        let mut flat = Vec::new();
+        for clipped in output.shapes {
+            flatten(clipped.shape, &mut flat);
+        }
+        flat
+    }
+
+    #[test]
+    fn the_strip_paints_a_body_a_line_a_now_dot_and_its_tag() {
+        // Eight half-hourly readings climbing gently — enough segments that a
+        // fill spanning only the first or last one would show up here. The
+        // oldest is the lowest, and deliberately well clear of empty: a series
+        // that touched 0.0 could not tell the strip's floor from the curve's.
+        const LOWEST: f64 = 0.2;
+        let now = DEMO_BASE_UNIX_SECS;
+        let series: Vec<(u64, f64)> = (0..8)
+            .map(|i| (now - (7 - i) * 1_800, LOWEST + 0.05 * i as f64))
+            .collect();
+        let shapes = painted_shapes(|ui| render_sparkline(ui, &series));
+
+        // The body: one mesh, one flat wash, reaching every reading.
+        let meshes: Vec<_> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Mesh(mesh) => Some(mesh),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(meshes.len(), 1, "expected exactly one filled body");
+        assert_eq!(meshes[0].vertices.len(), series.len() * 2);
+        assert!(meshes[0]
+            .vertices
+            .iter()
+            .all(|v| v.color == spark_fill_color()));
+
+        // The line: one open path, at the spec's width and full-strength ink.
+        let paths: Vec<_> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Path(path) => Some(path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths.len(), 1, "expected exactly one history line");
+        assert_eq!(paths[0].stroke.width, SPARK_STROKE_WIDTH);
+        let egui::epaint::ColorMode::Solid(ink) = paths[0].stroke.color else {
+            panic!("the strip's line must be one solid colour");
+        };
+        assert_eq!(ink, spark_color());
+        assert_eq!(paths[0].points.len(), series.len());
+        assert!(!paths[0].closed, "a day of history is not a loop");
+
+        // The body belongs to *this* line, and hangs from it to the strip's
+        // own floor. Checked here rather than only in the mesh's own unit test,
+        // because the floor is chosen at the call site: a body stopping at the
+        // curve's low point would leave the trough hollow and pass every
+        // assertion above.
+        let curve: Vec<egui::Pos2> = meshes[0]
+            .vertices
+            .iter()
+            .step_by(2)
+            .map(|v| v.pos)
+            .collect();
+        assert_eq!(curve, paths[0].points, "the body must hang from the line");
+        let floor = meshes[0].vertices[1].pos.y;
+        assert!(
+            meshes[0]
+                .vertices
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .all(|v| v.pos.y == floor),
+            "the body has one flat floor, not a per-segment one"
+        );
+        let lowest = paths[0].points[0].y;
+        assert!(
+            (floor - lowest - SPARK_HEIGHT * LOWEST as f32).abs() < 0.01,
+            "the floor sits {}px under the lowest reading; the strip's own floor \
+             is {}px under it",
+            floor - lowest,
+            SPARK_HEIGHT * LOWEST as f32
+        );
+
+        // The anchor: one dot, on the newest reading — which is the line's
+        // right-hand end, not merely somewhere near it.
+        let circles: Vec<_> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Circle(circle) => Some(circle),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(circles.len(), 1, "one anchor, and it is on the present");
+        assert_eq!(circles[0].radius, SPARK_NOW_RADIUS);
+        assert_eq!(circles[0].fill, TEXT);
+        assert_eq!(
+            circles[0].center,
+            *paths[0].points.last().expect("a line has ends")
+        );
+
+        // The tag: the byte-exact string, faint, right-aligned over the same
+        // edge the dot sits on rather than floating loose in the pane.
+        let texts: Vec<_> = shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 1, "the strip labels itself exactly once");
+        assert_eq!(texts[0].galley.text(), SPARK_TAG);
+        assert_eq!(texts[0].fallback_color, TEXT_FAINT);
+        let tag_right = texts[0].pos.x + texts[0].galley.size().x;
+        assert!(
+            (tag_right - circles[0].center.x).abs() < 1.0,
+            "the {SPARK_TAG} tag ends at {tag_right}, not over the strip's right \
+             edge at {}",
+            circles[0].center.x
+        );
+        assert!(
+            texts[0].pos.y < circles[0].center.y,
+            "the tag belongs above the strip, not inside it"
+        );
+    }
+
+    #[test]
+    fn the_strip_costs_its_tag_row_on_top_of_its_height() {
+        // The tag is a real row, not paint inside the strip: it has to be, or
+        // it would sit on top of the line's left half. Pinned because the demo
+        // window's height is derived from measurements that include it.
+        let now = DEMO_BASE_UNIX_SECS;
+        let bare = lay_out(|ui| render_sparkline(ui, &[])).height;
+        let drawn = lay_out(|ui| render_sparkline(ui, &[(now - 600, 0.4), (now, 0.5)])).height;
+        assert!(
+            drawn > bare + SPARK_HEIGHT,
+            "the strip drew {}px of extra height, which is the strip alone — \
+             the {SPARK_TAG} tag row is missing",
+            drawn - bare
+        );
     }
 
     #[test]
@@ -5003,84 +5439,77 @@ mod tests {
         );
     }
 
+    /// What the demo's window has to be, per theme, for the whole scenario to
+    /// render unscrolled: the body as the harness measures it, plus the chrome
+    /// the body sits inside.
+    ///
+    /// The body is measured through `render_panes` — the same function
+    /// `App::ui` calls — so the separator between the two panes and the spacing
+    /// around it are in the number rather than estimated around it. Measured at
+    /// [`DEMO_WINDOW_HEIGHT`] rather than [`WINDOW_HEIGHT`], because that is
+    /// the window the demo actually opens.
+    fn demo_window_height_needed(theme: Theme) -> f32 {
+        let mut panes = demo_test_panes();
+        for pane in &mut panes {
+            // The state `--pace-demo` launches in. Expanding a disclosure is a
+            // click, and the ScrollArea remains the escape hatch for it (the
+            // expanded-state cutoff is accepted and queued post-1.0).
+            pane.expanded = false;
+        }
+        let laid = lay_out_sized(theme, DEMO_WINDOW_HEIGHT, |ui| {
+            render_panes(ui, &mut panes, theme)
+        });
+        assert!(
+            laid.width <= laid.available_width,
+            "{theme:?} demo body wanted {}px inside {}px",
+            laid.width,
+            laid.available_width
+        );
+        TITLEBAR_HEIGHT + laid.panel_chrome_height + laid.height
+    }
+
     #[test]
     fn the_demo_scenario_fits_the_window() {
         // This *is* the review path: if the demo clips, the owner reviews a
-        // clipped window and learns nothing about the feature.
-        let mut panes = demo_test_panes();
-        let pane_count = panes.len() as f32;
+        // clipped window and learns nothing about the feature. Through M13 this
+        // test *recorded* an overflow — the demo wanted more than the 240px
+        // window and every row was merely reachable by scrolling. M13-R1 gives
+        // the demo its own taller window instead, so the claim becomes an
+        // equality: DEMO_WINDOW_HEIGHT is what the scenario measures, not a
+        // number someone liked.
+        //
+        // Both directions are asserted. Under-size and the owner reviews
+        // through a scroll bar again; over-size by more than a row and the
+        // constant has stopped being derived from anything.
+        let one_row = 24.0; // a bar row with its spacing
         for theme in [Theme::CipherPine, Theme::Plain] {
-            let mut collapsed_height = 0.0;
-            let mut without_m13 = 0.0;
-            for pane in &mut panes {
-                pane.expanded = false;
-                let laid = lay_out_themed(theme, |ui| render_pane(ui, pane, theme));
-                assert!(
-                    laid.width <= laid.available_width,
-                    "{theme:?} demo pane wanted {}px inside {}px",
-                    laid.width,
-                    laid.available_width
-                );
-                collapsed_height += laid.height;
-
-                // The same pane with everything M13 added taken away — no
-                // trail, no alert lines: the layout already visually accepted.
-                let trail = std::mem::take(&mut pane.history);
-                let alert = pane.alert_line.take();
-                let refill = pane.refill_line.take();
-                let bare = lay_out_themed(theme, |ui| render_pane(ui, pane, theme));
-                pane.history = trail;
-                pane.alert_line = alert;
-                pane.refill_line = refill;
-                without_m13 += bare.height;
-            }
-
-            // Height is the honest part. Stripped of everything M13 added, the
-            // collapsed demo — two panes, both warning, Codex also reporting a
-            // reset credit — comes to 231px against the 216px the central panel
-            // can offer. Every row is *reachable* (the ScrollArea, accepted
-            // since the M5a fix), but the default view does not fit, and that is
-            // a real finding about the 240px window rather than a demo artifact:
-            // it is the state a subscriber sees whenever both providers are at
-            // risk at once. Flagged at the M8 gate; the window's size is the
-            // owner's call.
-            //
-            // Asserted as "within one row of fitting", so unbounded growth
-            // still fails here while the known, reported overflow does not get
-            // to read as green.
-            let usable = WINDOW_HEIGHT - TITLEBAR_HEIGHT;
-            let one_row = 24.0; // a bar row with its spacing
+            let needed = demo_window_height_needed(theme);
             assert!(
-                without_m13 <= usable + one_row,
-                "{theme:?} collapsed demo wanted {without_m13}px before M13 added \
-                 anything, more than one row past the {usable}px the panel offers \
-                 — something outside this milestone grew the pane"
+                DEMO_WINDOW_HEIGHT >= needed,
+                "{theme:?} demo needs {needed}px of window and --pace-demo asks \
+                 for {DEMO_WINDOW_HEIGHT}px — the scenario would open scrolled"
             );
-
-            // M13's own cost, measured rather than assumed: one 12px strip per
-            // pane, plus one small banner row for the single alert the demo
-            // raises (`the_demo_raises_exactly_one_alert`). This is what keeps
-            // "the sparkline is 12px" from quietly becoming "the sparkline
-            // reflowed the pane".
-            let m13_cost = collapsed_height - without_m13;
-            let small_row = 20.0;
-            let m13_budget = pane_count * (SPARK_HEIGHT + 6.0) + small_row;
             assert!(
-                m13_cost > 0.0 && m13_cost <= m13_budget,
-                "{theme:?} M13 cost {m13_cost}px across {pane_count} panes, outside \
-                 the {m13_budget}px its strip and one banner account for"
-            );
-
-            // And the total, so the pane cannot grow past that budget by some
-            // other route. History and alerts therefore deepen the known,
-            // already-reported overflow — reported to the owner at the M13 gate,
-            // not decided here (§4.5).
-            assert!(
-                collapsed_height <= usable + one_row + m13_budget,
-                "{theme:?} collapsed demo wanted {collapsed_height}px, past the \
-                 {usable}px panel by more than one row plus M13's own budget"
+                DEMO_WINDOW_HEIGHT <= needed + one_row,
+                "{theme:?} demo needs {needed}px but --pace-demo asks for \
+                 {DEMO_WINDOW_HEIGHT}px — more than a row of window nothing fills"
             );
         }
+    }
+
+    #[test]
+    fn only_the_demo_gets_the_taller_window() {
+        // The production default is untouched by M13-R1, and that is the whole
+        // safety of point 4: every visual acceptance to date was given against
+        // a 320x240 window, and a synthetic review scenario does not get to
+        // resize the app real subscribers run.
+        assert_eq!(initial_inner_height(false), WINDOW_HEIGHT);
+        assert_eq!(WINDOW_HEIGHT, 240.0);
+        assert_eq!(initial_inner_height(true), DEMO_WINDOW_HEIGHT);
+        // The demo window exists to be taller than the default one. A const
+        // block, because both sides are consts and a runtime `assert!` over
+        // them is a compile-time fact deferred.
+        const { assert!(DEMO_WINDOW_HEIGHT > WINDOW_HEIGHT) };
     }
 
     // --- M7a2: the reset-credits line ---
