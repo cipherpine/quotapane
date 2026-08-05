@@ -162,6 +162,20 @@ const PACE_CARDINAL_UNDER_SECS: u64 = 21_600;
 /// a 120px strip.
 const HISTORY_WINDOW_SECS: u64 = 86_400;
 
+/// Height of the history sparkline strip, in px (M13).
+///
+/// Twelve: tall enough that a day's shape is legible, short enough that a pane
+/// which grows one costs less than a text row. The strip is drawn, never
+/// labelled — a 120px-wide day has no room for an axis, and the bars directly
+/// above it already carry the number.
+const SPARK_HEIGHT: f32 = 12.0;
+
+/// Sparkline stroke alpha, out of 255.
+///
+/// Below the pace tick's [`PACE_TICK_ALPHA`] on purpose: the tick is a fact
+/// about *now* that the eye should find, and the strip is context behind it.
+const SPARK_ALPHA: u8 = 140;
+
 /// The current unix second.
 ///
 /// The one clock read in the history path, and it lives here rather than in
@@ -841,7 +855,10 @@ enum TrayMessage {
 /// The window that best represents a provider at a glance: the one closest to
 /// its limit (highest used fraction). Ties and unknown fractions resolve to the
 /// earliest such window. `None` when the snapshot has no windows.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+///
+/// Not tray-gated since M13: the sparkline draws this same window's history, so
+/// the strip, the tray miniature and the tooltip all speak about one window per
+/// provider rather than each picking its own.
 fn representative_window(snapshot: &ProviderSnapshot) -> Option<&QuotaWindow> {
     let mut best: Option<&QuotaWindow> = None;
     for window in &snapshot.windows {
@@ -1744,6 +1761,14 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
     let mut toggled = false;
     if let Some(snapshot) = &pane.latest_snapshot {
         let age = pane.snapshot_received_at.map(|t| t.elapsed());
+        // The strip follows the same window the tray miniature does, so the two
+        // never describe different quotas. Selected here rather than stored
+        // because it is a filter over a few dozen readings, not the kind of
+        // arithmetic (a least-squares fit) that earns being cached off the poll.
+        // `history` is empty unless history is on, so this is a no-op by default.
+        let spark = representative_window(snapshot)
+            .map(|window| spark_series(&pane.history, &window.label))
+            .unwrap_or_default();
         toggled = render_windows(
             ui,
             snapshot,
@@ -1751,6 +1776,7 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
             pane.expanded,
             theme,
             pane.pace_warning.as_ref(),
+            &spark,
         );
     }
     if toggled {
@@ -1799,10 +1825,16 @@ fn render_windows(
     expanded: bool,
     theme: Theme,
     pace: Option<&PaceWarning>,
+    spark: &[(u64, f64)],
 ) -> bool {
     for window in &snapshot.windows {
         render_window_row(ui, window, theme);
     }
+
+    // The 24 h history strip, directly under the bars it is about. Draws only
+    // when history is on and there are at least two readings in the day;
+    // otherwise it takes no space at all (M13).
+    render_sparkline(ui, spark);
 
     // The at-risk forecast, directly under the bars it is about — one line at
     // most, and absent entirely when nothing is at risk. Calm is silent: a pane
@@ -1987,6 +2019,95 @@ fn pace_warning_color(exhaust_in_secs: u64) -> egui::Color32 {
     } else {
         AMBER
     }
+}
+
+/// The `(observed_at, used_fraction)` series the sparkline draws: this pane's
+/// history for one window label, oldest first.
+///
+/// Pure over the trail the pane already holds, so the strip cannot show a
+/// window the bars above it are not about.
+fn spark_series(history: &[HistoryEntry], label: &str) -> Vec<(u64, f64)> {
+    let mut series: Vec<(u64, f64)> = history
+        .iter()
+        .filter(|entry| entry.label == label)
+        .map(|entry| (entry.at_unix_secs, entry.used_fraction))
+        .collect();
+    // A polyline over unsorted points draws a zigzag, and nothing upstream
+    // promises order: the trail is a replayed file followed by live appends.
+    series.sort_by_key(|(at, _)| *at);
+    series
+}
+
+/// The readings inside the strip's window: everything from the last
+/// [`HISTORY_WINDOW_SECS`] up to `now_unix_secs`, oldest first.
+///
+/// `now` is the newest reading rather than the wall clock, so the line always
+/// ends at the strip's right edge and two runs of the same data draw the same
+/// picture. Anything older than the window, and anything stamped after `now`,
+/// is clipped out rather than squeezed into an edge pixel where it would read
+/// as a spike that never happened.
+fn spark_window(series: &[(u64, f64)], now_unix_secs: u64) -> Vec<(u64, f64)> {
+    series
+        .iter()
+        .copied()
+        .filter(|(at, _)| *at <= now_unix_secs && now_unix_secs - at <= HISTORY_WINDOW_SECS)
+        .collect()
+}
+
+/// Map the in-window readings onto strip coordinates inside `rect`.
+///
+/// Time runs left (a day ago) to right (now); a full window is the top edge and
+/// an empty one the bottom, matching the bars above, which fill rightward from
+/// an empty trough. The fraction is clamped to `0..=1` — a provider that
+/// transiently reports over 100% must not draw a line above the strip.
+///
+/// Pure, and the whole of the strip's geometry: everything the painter does
+/// with the result is `Shape::line`.
+fn spark_points(series: &[(u64, f64)], now_unix_secs: u64, rect: egui::Rect) -> Vec<egui::Pos2> {
+    spark_window(series, now_unix_secs)
+        .into_iter()
+        .map(|(at, used)| {
+            let age = (now_unix_secs - at) as f32 / HISTORY_WINDOW_SECS as f32;
+            let x = rect.right() - rect.width() * age;
+            let y = rect.bottom() - rect.height() * used.clamp(0.0, 1.0) as f32;
+            egui::pos2(x, y)
+        })
+        .collect()
+}
+
+/// The sparkline's colour: TEXT_DIM at [`SPARK_ALPHA`], in both themes.
+///
+/// Takes no [`Theme`], for the same reason [`pace_tick_color`] does not: a
+/// history strip is information, and how a day of usage looks does not depend
+/// on which look is installed.
+fn spark_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(TEXT_DIM.r(), TEXT_DIM.g(), TEXT_DIM.b(), SPARK_ALPHA)
+}
+
+/// Draw the 24 h history strip, or nothing at all.
+///
+/// Nothing is the common case and the important one: with `history=off`, or
+/// with fewer than two readings in the window, this returns **before**
+/// allocating, so a pane without history has exactly the layout it had before
+/// M13 — no strip, no gap, no reserved space. Calm is silent, as with the
+/// at-risk line.
+///
+/// One reading is not a line, and drawing a single dot would assert a trend
+/// from one number.
+fn render_sparkline(ui: &mut egui::Ui, series: &[(u64, f64)]) {
+    let Some(now) = series.iter().map(|(at, _)| *at).max() else {
+        return;
+    };
+    if spark_window(series, now).len() < 2 {
+        return;
+    }
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(BAR_WIDTH, SPARK_HEIGHT), egui::Sense::hover());
+    let points = spark_points(series, now, rect);
+    ui.painter().add(egui::Shape::line(
+        points,
+        egui::Stroke::new(1.0, spark_color()),
+    ));
 }
 
 /// The elapsed-time pace tick's colour: TEXT_DIM at [`PACE_TICK_ALPHA`].
@@ -2764,6 +2885,7 @@ mod tests {
                 true,
                 Theme::CipherPine,
                 None,
+                &[],
             );
         });
         assert!(
@@ -2808,6 +2930,7 @@ mod tests {
                 true,
                 Theme::CipherPine,
                 None,
+                &[],
             );
         });
         assert!(
@@ -2862,6 +2985,7 @@ mod tests {
                 expanded,
                 Theme::CipherPine,
                 None,
+                &[],
             );
         })
     }
@@ -3239,6 +3363,7 @@ mod tests {
                     false,
                     Theme::CipherPine,
                     pace,
+                    &[],
                 );
             })
         };
@@ -3290,7 +3415,15 @@ mod tests {
         let snapshot = per_model_snapshot(vec![]);
         let render = |age: Duration, pace: Option<&PaceWarning>| {
             lay_out(|ui| {
-                render_windows(ui, &snapshot, Some(age), false, Theme::CipherPine, pace);
+                render_windows(
+                    ui,
+                    &snapshot,
+                    Some(age),
+                    false,
+                    Theme::CipherPine,
+                    pace,
+                    &[],
+                );
             })
         };
         let at_risk = warning("5h", 6_000);
@@ -3718,6 +3851,189 @@ mod tests {
         assert_eq!(first, second);
     }
 
+    // --- M13: the 24 h sparkline strip ---
+
+    /// A strip the size the pane allocates, at a convenient origin.
+    fn strip_rect() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(10.0, 100.0), egui::vec2(BAR_WIDTH, SPARK_HEIGHT))
+    }
+
+    #[test]
+    fn the_strip_runs_a_day_left_to_right_and_fills_upward() {
+        let now = DEMO_BASE_UNIX_SECS;
+        let rect = strip_rect();
+        let points = spark_points(
+            &[
+                (now - HISTORY_WINDOW_SECS, 0.0),
+                (now - HISTORY_WINDOW_SECS / 2, 0.5),
+                (now, 1.0),
+            ],
+            now,
+            rect,
+        );
+        assert_eq!(points.len(), 3);
+        // A day ago is the left edge, now is the right edge.
+        assert!((points[0].x - rect.left()).abs() < 0.01, "{:?}", points[0]);
+        assert!(
+            (points[1].x - rect.center().x).abs() < 0.01,
+            "{:?}",
+            points[1]
+        );
+        assert!((points[2].x - rect.right()).abs() < 0.01, "{:?}", points[2]);
+        // Empty is the bottom edge, full is the top — the same direction the
+        // bars above fill in.
+        assert!(
+            (points[0].y - rect.bottom()).abs() < 0.01,
+            "{:?}",
+            points[0]
+        );
+        assert!(
+            (points[1].y - rect.center().y).abs() < 0.01,
+            "{:?}",
+            points[1]
+        );
+        assert!((points[2].y - rect.top()).abs() < 0.01, "{:?}", points[2]);
+    }
+
+    #[test]
+    fn the_strip_clips_what_is_outside_its_day() {
+        let now = DEMO_BASE_UNIX_SECS;
+        let series = [
+            (now - HISTORY_WINDOW_SECS - 1, 0.9), // yesterday's yesterday
+            (now - HISTORY_WINDOW_SECS, 0.1),     // the edge is inside
+            (now, 0.2),
+            (now + 1, 0.99), // the future is not a reading
+        ];
+        assert_eq!(spark_window(&series, now).len(), 2);
+        let points = spark_points(&series, now, strip_rect());
+        assert_eq!(points.len(), 2);
+        assert!(points.iter().all(|p| strip_rect().x_range().contains(p.x)));
+    }
+
+    #[test]
+    fn a_fraction_outside_zero_to_one_is_clamped_into_the_strip() {
+        let now = DEMO_BASE_UNIX_SECS;
+        let rect = strip_rect();
+        let points = spark_points(&[(now - 600, -0.5), (now, 1.7)], now, rect);
+        assert!(
+            (points[0].y - rect.bottom()).abs() < 0.01,
+            "{:?}",
+            points[0]
+        );
+        assert!((points[1].y - rect.top()).abs() < 0.01, "{:?}", points[1]);
+    }
+
+    #[test]
+    fn an_empty_series_maps_to_no_points() {
+        let now = DEMO_BASE_UNIX_SECS;
+        assert!(spark_points(&[], now, strip_rect()).is_empty());
+        assert!(spark_window(&[], now).is_empty());
+    }
+
+    #[test]
+    fn the_series_is_this_windows_readings_in_time_order() {
+        let now = DEMO_BASE_UNIX_SECS;
+        let history = vec![
+            history_entry(ProviderId::ClaudeSubscription, now, "5h", 0.3),
+            history_entry(ProviderId::ClaudeSubscription, now - 600, "5h", 0.2),
+            history_entry(ProviderId::ClaudeSubscription, now - 300, "7d", 0.9),
+        ];
+        assert_eq!(
+            spark_series(&history, "5h"),
+            vec![(now - 600, 0.2), (now, 0.3)],
+            "only this window's readings, oldest first"
+        );
+        assert_eq!(spark_series(&history, "nothing"), vec![]);
+    }
+
+    #[test]
+    fn one_reading_or_none_draws_no_strip_and_costs_no_space() {
+        let now = DEMO_BASE_UNIX_SECS;
+        let bare = lay_out(|ui| render_sparkline(ui, &[])).height;
+        let single = lay_out(|ui| render_sparkline(ui, &[(now, 0.5)])).height;
+        let pair = lay_out(|ui| render_sparkline(ui, &[(now - 600, 0.4), (now, 0.5)])).height;
+
+        assert_eq!(
+            bare, single,
+            "one reading is not a line and must take no space"
+        );
+        assert!(
+            pair >= single + SPARK_HEIGHT,
+            "two readings should have drawn a {SPARK_HEIGHT}px strip: {single} -> {pair}"
+        );
+    }
+
+    #[test]
+    fn a_pane_without_history_renders_exactly_as_it_did_before() {
+        // The silence guarantee: history=off is the default, and a default pane
+        // must be pixel-identical to the accepted M8 layout.
+        let now = DEMO_BASE_UNIX_SECS;
+        let snapshot = climbing_snapshot(ProviderId::ClaudeSubscription, now);
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let off = lay_out_themed(theme, |ui| {
+                render_windows(ui, &snapshot, None, false, theme, None, &[]);
+            });
+            let on = lay_out_themed(theme, |ui| {
+                render_windows(
+                    ui,
+                    &snapshot,
+                    None,
+                    false,
+                    theme,
+                    None,
+                    &[(now - 600, 0.4), (now, 0.5)],
+                );
+            });
+            assert!(
+                on.height > off.height,
+                "{theme:?}: the strip should cost its own height"
+            );
+            assert_eq!(
+                on.width, off.width,
+                "{theme:?}: the strip must not widen the pane"
+            );
+        }
+    }
+
+    #[test]
+    fn the_strip_is_the_same_colour_in_both_themes() {
+        // A history strip is information, not styling — the same rule the pace
+        // tick follows.
+        let expected = egui::Color32::from_rgba_unmultiplied(
+            TEXT_DIM.r(),
+            TEXT_DIM.g(),
+            TEXT_DIM.b(),
+            SPARK_ALPHA,
+        );
+        assert_eq!(spark_color(), expected);
+        assert_eq!(SPARK_ALPHA, 140);
+        // The strip must sit behind the pace tick, not compete with it. A
+        // const block, because both sides are consts and a plain `assert!`
+        // over them is a compile-time fact clippy rightly refuses to see
+        // deferred to runtime.
+        const { assert!(SPARK_ALPHA < PACE_TICK_ALPHA) };
+    }
+
+    #[test]
+    fn the_demo_draws_a_strip_for_every_pane() {
+        // The review path: `--pace-demo` must show the feature, not an empty
+        // space where it would be.
+        for pane in demo_panes() {
+            let snapshot = pane.latest_snapshot.as_ref().expect("a demo snapshot");
+            let label = representative_window(snapshot)
+                .expect("a representative window")
+                .label
+                .clone();
+            let series = spark_series(&pane.history, &label);
+            let now = series.iter().map(|(at, _)| *at).max().expect("readings");
+            assert!(
+                spark_window(&series, now).len() >= 2,
+                "{label} had {} readings in the day",
+                spark_window(&series, now).len()
+            );
+        }
+    }
+
     // --- M8: --pace-demo ---
 
     #[test]
@@ -3848,8 +4164,10 @@ mod tests {
         // This *is* the review path: if the demo clips, the owner reviews a
         // clipped window and learns nothing about the feature.
         let mut panes = demo_panes();
+        let pane_count = panes.len() as f32;
         for theme in [Theme::CipherPine, Theme::Plain] {
             let mut collapsed_height = 0.0;
+            let mut without_history = 0.0;
             for pane in &mut panes {
                 pane.expanded = false;
                 let laid = lay_out_themed(theme, |ui| render_pane(ui, pane, theme));
@@ -3860,16 +4178,24 @@ mod tests {
                     laid.available_width
                 );
                 collapsed_height += laid.height;
+
+                // The same pane with its trail taken away: the pre-M13 layout,
+                // which is the one already visually accepted.
+                let trail = std::mem::take(&mut pane.history);
+                let bare = lay_out_themed(theme, |ui| render_pane(ui, pane, theme));
+                pane.history = trail;
+                without_history += bare.height;
             }
 
-            // Height is the honest part. The collapsed demo — two panes, both
-            // warning, Codex also reporting a reset credit — comes to 231px
-            // against the 216px the central panel can offer. Every row is
-            // *reachable* (the ScrollArea, accepted since the M5a fix), but the
-            // default view does not fit, and that is a real finding about the
-            // 240px window rather than a demo artifact: it is the state a
-            // subscriber sees whenever both providers are at risk at once.
-            // Flagged at the M8 gate; the window's size is the owner's call.
+            // Height is the honest part. Without history the collapsed demo —
+            // two panes, both warning, Codex also reporting a reset credit —
+            // comes to 231px against the 216px the central panel can offer.
+            // Every row is *reachable* (the ScrollArea, accepted since the M5a
+            // fix), but the default view does not fit, and that is a real
+            // finding about the 240px window rather than a demo artifact: it is
+            // the state a subscriber sees whenever both providers are at risk
+            // at once. Flagged at the M8 gate; the window's size is the owner's
+            // call.
             //
             // Asserted as "within one row of fitting", so unbounded growth
             // still fails here while the known, reported overflow does not get
@@ -3877,10 +4203,32 @@ mod tests {
             let usable = WINDOW_HEIGHT - TITLEBAR_HEIGHT;
             let one_row = 24.0; // a bar row with its spacing
             assert!(
-                collapsed_height <= usable + one_row,
-                "{theme:?} collapsed demo wanted {collapsed_height}px, more than one \
-                 row past the {usable}px the panel offers — the pane has grown \
-                 beyond what the scroll area was accepted to cover"
+                without_history <= usable + one_row,
+                "{theme:?} collapsed demo wanted {without_history}px before the \
+                 sparkline existed, more than one row past the {usable}px the \
+                 panel offers — something other than M13 grew the pane"
+            );
+
+            // M13's own cost, measured rather than assumed: the strip's height
+            // plus one item spacing, per pane, and not a pixel more. This is
+            // what keeps "the sparkline is 12px" from quietly becoming "the
+            // sparkline reflowed the pane".
+            let spark_cost = collapsed_height - without_history;
+            let spark_budget = pane_count * (SPARK_HEIGHT + 6.0);
+            assert!(
+                spark_cost > 0.0 && spark_cost <= spark_budget,
+                "{theme:?} sparkline cost {spark_cost}px across {pane_count} panes, \
+                 outside the {spark_budget}px the strip itself accounts for"
+            );
+
+            // And the total, so the pane cannot grow past the strip's budget by
+            // some other route. Turning history on therefore deepens the known
+            // overflow by one strip per pane — reported to the owner at the M13
+            // gate, not decided here (§4.5).
+            assert!(
+                collapsed_height <= usable + one_row + spark_budget,
+                "{theme:?} collapsed demo with history wanted {collapsed_height}px, \
+                 past the {usable}px panel by more than one row plus the strip"
             );
         }
     }
