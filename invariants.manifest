@@ -22,7 +22,7 @@
 # Editing rules: this file is a §4.1 protected path — top tier only. A new or changed
 # security claim lands with its manifest entry in the SAME commit (the same-change rule).
 
-invariant 1: No credential persistence — no code path writes a token; the only file ever written is theme.cfg (one word, preferences only).
+invariant 1: No credential persistence — no code path writes a token; the only files ever written are config.cfg (key=value preferences) and, when history=on, history.jsonl (timestamps, labels, and percentages only).
 kind: absence
 enforced-by: absence of any credential write path in the workspace; re-checked at every trust-boundary review (THREAT_MODEL §9 row 1, §11)
 test: crates/usage-core/src/credentials/mod.rs::loads_credential_readonly_and_redacted

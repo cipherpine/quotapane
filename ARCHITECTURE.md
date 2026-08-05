@@ -147,7 +147,7 @@ A reviewer validates the security posture by reading essentially two files. Ever
 
 `SECURITY.md` carries the authoritative wording. Invariants that assert a **behavior** are backed by named tests; the two that assert an **absence** are enforced by there being no code path at all — `THREAT_MODEL.md` §9 records which is which, row by row.
 
-- Tokens are **never persisted** — no code path serializes one. The only file the app writes is `theme.cfg` (one word: the theme preference, see §6); every other setting is a CLI flag held in memory.
+- Tokens are **never persisted** — no code path serializes one. The app writes at most two files: `config.cfg` (preferences) and, only when `history=on`, `history.jsonl` (timestamps, window labels and percentages) — see §6; every other setting is a CLI flag held in memory.
 - Tokens **never** appear in logs, telemetry, crash reports, or `Debug` output (redaction + `zeroize`).
 - Egress is **deny-by-default**; a unit test asserts that no host outside the two-host allowlist is reachable.
 - **No first-party telemetry/analytics.** The app phones home to nobody.
@@ -174,18 +174,25 @@ Independent, community project; **not affiliated with, endorsed, or supported by
 
 ## 6. Configuration & storage
 
-**As shipped: one file, one word.** Since v1.2.0 QuotaPane writes exactly one file: `theme.cfg` — a single word (`plain` or `cipherpine`) recording the theme choice, in the platform config dir (`%APPDATA%\quotapane\` on Windows, `$XDG_CONFIG_HOME`/`~/.config/quotapane/` on Linux, `~/Library/Application Support/quotapane/` on macOS). Absent, unreadable, or garbage content falls back to the default theme; write failures are silently ignored. No secrets, no state, no cache — every other setting is a command-line flag held in memory, and nothing else persists across runs (including window position). Invariant 1's core is unchanged: there is no credential write path of any kind.
+**As shipped: one preferences file, and one opt-in log of percentages.** From v1.2.0 to v1.5.1 this was one file holding one word — `theme.cfg`, either `plain` or `cipherpine`. v1.6.0 supersedes it with `config.cfg`, and adds a second file that only exists if you ask for it. Both live in the platform config dir (`%APPDATA%\quotapane\` on Windows, `$XDG_CONFIG_HOME`/`~/.config/quotapane/` on Linux, `~/Library/Application Support/quotapane/` on macOS).
+
+- **`config.cfg`** — one `key=value` per line, hand-parsed in `usage-ui::config` (no config crate, no TOML parser, no `dirs`). Five keys, all display choices: `theme`, `history`, `alerts`, `alert_at`, `alert_mode` — the README's "Theming and preferences" table is the reference. `#` comments and blank lines are ignored, unknown keys are ignored (so a newer build's file still loads in an older one), and every unparsable value falls back to that key's default. Absent or unreadable falls back to all defaults; write failures are silently ignored. When `config.cfg` is absent the legacy `theme.cfg` is still read for the theme, so an existing install keeps its look; it is never written again and never deleted.
+- **`history.jsonl`** — written only when `history=on`, which is off by default. One compact JSON object per line, carrying a unix timestamp, the provider id, the window label, the used fraction and the window duration. Nothing else can be in it: the entry type (`usage-core::history`) has no field that can hold anything but a number, a closed provider enum, or a window label the snapshot already publishes through `--json`. It is a rolling log capped at 256 KiB — past that, the newest half is kept. Deleting it loses nothing but the sparkline's memory.
+
+The one-word era's own rule was that a second preference would be "a design conversation, not a field to append". M13 was that conversation: three new stored choices at once (history, alerts, the alert threshold) made one boring grammar the smaller answer than four more one-word files.
+
+No secrets, no state, no cache, no credentials — every other setting is a command-line flag held in memory, and nothing else persists across runs (including window position). Invariant 1's core is unchanged: there is no credential write path of any kind, and neither file has a field one could be put in.
 
 ### Future (not implemented)
 
-If the preferences layer ever grows beyond that single word it stays preferences-only — **no secrets** — as JSON in the platform config dir (`%APPDATA%\QuotaPane\` / `~/.config/quotapane/` / `~/Library/Application Support/QuotaPane/`), plausibly covering:
+If the preferences layer ever needs more than a flat key=value list it stays preferences-only — **no secrets** — plausibly covering:
 
 - Window: position, size/zoom, always-on-top, monitor.
 - Providers: which are enabled; per-provider poll cadence overrides.
-- Display: theme, color thresholds (e.g. amber ≥ 80%, red ≥ 95%), which quota bars to show.
+- Display: color thresholds (e.g. amber ≥ 80%, red ≥ 95%), which quota bars to show.
 - Proxy: explicit opt-in flag (default off).
 
-Adding it would mean introducing the app's first write path, so it is a trust-boundary change: it would need a versioned, documented schema and a `SECURITY.md`/`THREAT_MODEL.md` update in the same change.
+Anything that widened what a written file *can hold* — a structured schema, a cache, anything provider-supplied beyond labels and percentages — would be a trust-boundary change needing a versioned, documented schema and a `SECURITY.md`/`THREAT_MODEL.md` update in the same change.
 
 ---
 

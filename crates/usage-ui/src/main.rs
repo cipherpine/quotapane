@@ -60,7 +60,7 @@ use usage_core::providers::{
 mod config;
 mod icon;
 
-use config::Theme;
+use config::{Config, Theme};
 
 /// Sent when `--client-version` is omitted. Mirrors `usage-cli`'s default —
 /// real Claude Code versions avoid the provider's aggressively rate-limited
@@ -1179,10 +1179,11 @@ struct QuotaPaneApp {
     /// Set once the user picks "Quit" from the tray, so the close interceptor
     /// lets the real exit through.
     quitting: bool,
-    /// The active look. Lives here — one field on the app — and is the single
-    /// value every render path branches on. Changed only by the tray toggle,
-    /// which also persists it.
-    theme: Theme,
+    /// The persisted preferences, as loaded at startup and mutated by the tray
+    /// toggle. One field on the app: `config.theme` is the single value every
+    /// render path branches on, and a save writes the whole struct back, so a
+    /// toggle can never drop a preference it did not touch.
+    config: Config,
     /// True when `--plain`/`--themed` picked the theme for this run, so the
     /// flag is not written back to disk.
     ///
@@ -1218,7 +1219,7 @@ impl QuotaPaneApp {
         let mut minimize = false;
         let mut close = false;
 
-        let theme = self.theme;
+        let theme = self.config.theme;
         let pace_demo = self.pace_demo;
 
         // Status cursor: computed before the panel closure so the pane borrow
@@ -1371,18 +1372,20 @@ impl QuotaPaneApp {
                     }
                 }
                 TrayMessage::ToggleTheme => {
-                    self.theme = self.theme.toggled();
+                    self.config.theme = self.config.theme.toggled();
                     // Live switch: restyle the context and repaint once.
-                    install_theme(ctx, self.theme);
+                    install_theme(ctx, self.config.theme);
                     ctx.request_repaint();
                     if let Some(tray) = self.tray.as_mut() {
-                        tray.set_theme_label(self.theme);
+                        tray.set_theme_label(self.config.theme);
                     }
                     // A `--plain`/`--themed` launch picked the theme for this
                     // run only, so a toggle during it must not rewrite the
-                    // stored default.
+                    // stored default. Everything else in `config` came off disk
+                    // unchanged, so writing the whole struct back is a no-op for
+                    // every key but the theme.
                     if !self.theme_overridden {
-                        config::save(self.theme);
+                        config::save(&self.config);
                     }
                 }
                 TrayMessage::Quit => {
@@ -1424,7 +1427,7 @@ impl eframe::App for QuotaPaneApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let theme = self.theme;
+        let theme = self.config.theme;
 
         // Slim custom titlebar first (a top panel): app name + minimize/close,
         // and a window-drag handle. Takes its ~24px; the CentralPanel fills the
@@ -2108,9 +2111,14 @@ fn main() -> ExitCode {
         native_options,
         Box::new(move |_cc| {
             // A run-only flag beats the saved preference; otherwise the saved
-            // preference, which itself defaults to Cipher Pine.
+            // preference, which itself defaults to Cipher Pine. Every other
+            // preference comes from the file only — there is no flag for them.
             let theme_overridden = theme_override.is_some();
-            let theme = theme_override.unwrap_or_else(config::load);
+            let mut config = config::load();
+            if let Some(theme) = theme_override {
+                config.theme = theme;
+            }
+            let theme = config.theme;
 
             // Installed before the first frame. The test layout harness
             // installs the same theme, so its width assertions measure the
@@ -2132,7 +2140,7 @@ fn main() -> ExitCode {
                 panes,
                 tray_active,
                 quitting: false,
-                theme,
+                config,
                 theme_overridden,
                 pace_demo,
                 #[cfg(any(target_os = "windows", target_os = "macos"))]

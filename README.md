@@ -27,16 +27,31 @@ The entire value proposition is a **small, auditable trust boundary**. Credentia
 
 Two binaries are produced: `quotapane` (the window) and `quotapane-cli` (headless).
 
-## Theming
+## Theming and preferences
 
 The window ships with the Cipher Pine terminal theme. A tray-menu
 item switches between it and a plain look, live; the choice is
-remembered as a single word (`plain` or `cipherpine`) in
-`theme.cfg` under your platform's config directory
+remembered in `config.cfg` under your platform's config directory
 (`%APPDATA%\quotapane\` on Windows, `~/.config/quotapane/` on
 Linux). No tray on your platform? Launch with `--plain` or
-`--themed` to pick per run. The file stores nothing but that word;
-deleting it restores the default.
+`--themed` to pick per run.
+
+`config.cfg` is one `key=value` per line — `#` comments and blank
+lines are ignored, unknown keys are ignored, and anything unparsable
+falls back to the default shown here. Deleting the file restores
+every default.
+
+| Key | Values | Default | Meaning |
+|---|---|---|---|
+| `theme` | `cipherpine` \| `plain` | `cipherpine` | Which look the window wears. |
+| `history` | `on` \| `off` | `off` | Append usage percentages to `history.jsonl` (next to this file) and draw a 24 h sparkline under each provider's bars. Timestamps, window labels and percentages only — never credentials. |
+| `alerts` | `on` \| `off` | `off` | Raise a quota alert: an in-window banner, a red ring on the tray icon, and one taskbar attention request. |
+| `alert_at` | `1`–`100` | `80` | Percent of a window at which an alert becomes a candidate. |
+| `alert_mode` | `pace` \| `threshold` | `pace` | `pace` only alerts when the window is *also* being spent faster than it is elapsing; `threshold` alerts on every crossing. |
+
+Pre-1.6 installs stored the theme as a single word in `theme.cfg`.
+That file is still read when `config.cfg` is absent, so your theme
+carries over; it is never written again, and never deleted.
 
 `--pace-demo` renders a fixed made-up scenario so the pace markers can
 be seen without waiting hours for real usage to produce one: it shows
@@ -68,7 +83,7 @@ Download the archive for your platform from [GitHub Releases](https://github.com
 | Linux (x86-64, glibc) | `quotapane-v<version>-x86_64-unknown-linux-gnu.tar.gz` |
 | macOS | Build from source — see below. |
 
-Each archive contains both binaries, both licenses, this README, and a `TOOLCHAIN.txt` recording the exact `rustc` / `cargo` that built it. There is no installer and nothing to uninstall: the binaries are self-contained. The only file QuotaPane ever writes is `theme.cfg` — one word recording your theme choice (see Theming); credentials are never written.
+Each archive contains both binaries, both licenses, this README, and a `TOOLCHAIN.txt` recording the exact `rustc` / `cargo` that built it. There is no installer and nothing to uninstall: the binaries are self-contained. QuotaPane writes at most two files, both under your config directory: `config.cfg` (your preferences) and, only if you turn `history=on`, `history.jsonl` (timestamps, window labels and percentages — see Theming and preferences). Credentials are never written.
 
 QuotaPane reads credentials your provider CLI already wrote, so sign in with `claude` and/or `codex` first.
 
