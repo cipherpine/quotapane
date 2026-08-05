@@ -44,8 +44,9 @@ on `3687e60` — **conclusion: success**. All 8 required checks:
 | gitleaks — full-history secret scan | success |
 | invariants — manifest, docs, and tests agree | success |
 
-A second run for this report follows; it must be green before the
-milestone is handed over.
+The report commit's own run —
+<https://github.com/cipherpine/quotapane/actions/runs/30971653421> on
+`8cb622c` — is likewise **success** on all 8.
 
 ### The one red run, and why
 
