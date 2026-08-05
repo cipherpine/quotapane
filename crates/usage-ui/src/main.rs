@@ -945,6 +945,13 @@ fn tray_tooltip(entries: &[(&str, Option<&ProviderSnapshot>)]) -> String {
 /// context — hovering the tray says nothing about which pane is which — so the
 /// word comes first, before the per-provider summary. The dash is U+2014, as
 /// everywhere else in the product's copy.
+///
+/// The tooltip is a tray surface, so on a platform without a tray (Linux) this
+/// is written and never read. Kept compiled everywhere rather than `cfg`-ed
+/// out, so the test that pins its exact bytes runs on every CI target — the
+/// same treatment `QuotaPaneApp::theme_overridden` gets, and for the same
+/// reason: it is code for a platform this build does not have, not dead code.
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 const ALERT_TOOLTIP_PREFIX: &str = "ALERT — ";
 
 /// Side length (px) of the square icon generated at runtime.
