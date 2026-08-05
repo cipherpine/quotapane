@@ -5,6 +5,45 @@ All notable changes to QuotaPane are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-08-05
+
+The memory release: QuotaPane learns to remember — and to speak up.
+
+### Added
+
+- **Quota history (opt-in).** Set `history=on` and QuotaPane keeps
+  `history.jsonl` next to its config — timestamps, window labels, and usage
+  percentages, nothing else. Burn-rate forecasts now survive restarts: the
+  pace ring reseeds from the last two hours on launch.
+- **24-hour sparklines.** With history on, each provider grows a small
+  painter-drawn strip under its bars — the last day of headline usage as a
+  quiet shape with a "now" dot and a `24h` tag. Silent when history is off
+  or there is nothing to draw.
+- **Alerts (opt-in, dep-free).** Set `alerts=on` and QuotaPane speaks when
+  it matters: a banner names the worst offender
+  (`alert: claude 7d at 85% >= 80% (pace)`), the tray miniature gains a
+  cardinal ring, its tooltip is prefixed `ALERT — `, and the taskbar asks
+  for attention once per crossing. The default `pace` mode is time-aware —
+  a healthy 85% late in the week stays quiet; the same number early in the
+  week alerts. `alert_mode=threshold` gives the simple version;
+  `alert_at=<1-100>` sets the line (default 80). A quiet `refilled:` note
+  re-arms each alert when its window resets.
+- **`config.cfg`.** The one-word `theme.cfg` grows into a small key=value
+  file (`theme`, `history`, `alerts`, `alert_at`, `alert_mode`) — still
+  hand-parsed, still boring on purpose, still incapable of holding a
+  secret. Legacy `theme.cfg` is read as a fallback, never written again.
+
+### Changed
+
+- SECURITY.md invariant 1 now names the two files QuotaPane may write —
+  `config.cfg`, and `history.jsonl` when history is on — with the same
+  machine-checked traceability as every other claim.
+- `--pace-demo` now demos everything: synthetic history, sparklines, and a
+  forced alert, in a window sized to show it all.
+
+Defaults ship OFF: a fresh install writes nothing new and renders exactly
+as v1.5.0 did. No JSON key changed in this release. Zero new dependencies.
+
 ## [1.5.0] - 2026-08-04
 
 The automation release: the CLI becomes a quota gate for scripts and
