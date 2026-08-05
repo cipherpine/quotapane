@@ -728,3 +728,17 @@ You are a headless floor release session for QuotaPane (C:\dev\QuotaPane\QuotaPa
 ```
 You are a headless floor release session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. The owner has published v1.5.0. Read CLAUDE.md, DECISIONS.md, then prompts/m12-release.md and execute LEG C ONLY: verify via gh that the v1.5.0 release has non-null publishedAt (else STOP); apply the spec's Patch A to DECISIONS.md under full §4a discipline (OLD/NEW extracted programmatically from the spec's bytes, unique before and after, DECISIONS.md the only protected file); write reports/m12-release-endgate.md with the full release ledger; commit both files ("docs: v1.5.0 published; M12 accepted (owner)"), push, CI green on all 8 required checks, EXIT. Nothing further is queued.
 ```
+
+## M13 — pace follow-ons (v1.6.0 slice; dispatched)
+
+```
+You are a headless floor session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. Read DECISIONS.md fully first — §3, §4, §4a, §4.4, §4.5, §4.7 govern. Then read prompts/m13-pace-followons.md and execute it exactly.
+
+Scope: four phases, four commits, in order. (1) config.cfg — hand-parsed key=value preferences (theme/history/alerts/alert_at/alert_mode) with theme.cfg migration, PLUS the spec's two §4a byte-exact patches to SECURITY.md and invariants.manifest in the SAME commit (extract OLD/NEW programmatically from the spec's bytes; unique before and after; check-invariants must pass in that commit). (2) usage-core history module — opt-in history.jsonl (timestamps/labels/percentages ONLY), 256 KiB keep-newest-half retention, PaceRing rehydration on startup, pace math untouched. (3) 12px painter sparkline strip per provider, history-fed, silent when absent. (4) dep-free time-aware alerts — pure decision fn with debounce and refill re-arm, byte-exact banner and refill lines, CARDINAL tray ring + `ALERT — ` tooltip prefix, RequestUserAttention(Informational), --pace-demo forces one alert.
+
+Hard limits: zero new dependencies; no --json key changes; no §4.1 bytes beyond the two authorized patches; no version bump or CHANGELOG (M13-RELEASE handles both); never read ~/.claude/** or ~/.codex/** (§4.4); §4.5 — you never accept visuals.
+
+The §3 bar before every commit: cargo fmt --all --check; cargo clippy --workspace --all-targets --locked -- -D warnings; cargo test --workspace --locked; python3 tools/check-invariants.py.
+
+End gate: push, CI green on all 8 required checks, write the full report to reports/m13-endgate.md (§4a proof for both patches included), commit it ("reports: M13 end-gate"), push, CI green, EXIT. The slice then waits on the owner's §4.5 visual pass and acceptance. Any ambiguity, denial, or conflict: record in the report and EXIT — never a workaround.
+```
