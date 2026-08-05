@@ -742,3 +742,9 @@ The §3 bar before every commit: cargo fmt --all --check; cargo clippy --workspa
 
 End gate: push, CI green on all 8 required checks, write the full report to reports/m13-endgate.md (§4a proof for both patches included), commit it ("reports: M13 end-gate"), push, CI green, EXIT. The slice then waits on the owner's §4.5 visual pass and acceptance. Any ambiguity, denial, or conflict: record in the report and EXIT — never a workaround.
 ```
+
+## M13-R1 — sparkline legibility iteration
+
+```
+You are a headless floor session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. Read DECISIONS.md fully — §3, §4, §4.4, §4.5, §4.7 govern. Then read prompts/m13-r1-sparkline-iteration.md and execute it exactly: sparkline strip 16px with TEXT_DIM full-alpha 1.5px stroke + alpha-18 fill, a TEXT full-alpha 2.5px "now" dot at the newest point, a TEXT_FAINT `24h` tag above the right edge, and a demo-only taller initial window sized from the layout harness so the full demo renders unscrolled — production default size untouched, the renders-as-v1.5.0 pins must stay green. Zero new dependencies, no §4.1 bytes, no --json changes, no version bump. §3 bar + check-invariants before the commit. End gate: push, CI 8/8, write reports/m13-r1-endgate.md, commit it, push, CI green, EXIT — then the owner looks again (§4.5); you never accept visuals.
+```
