@@ -347,9 +347,26 @@ DECISIONS §3 requires it for *every* push:
 ### CI for this leg's commits
 
 The stamp commit's own run —
-<https://github.com/cipherpine/quotapane/actions/runs/PENDING> on `PENDING` —
-is recorded in the follow-up commit, per the M13 pattern established by
-`aaa4b03`.
+<https://github.com/cipherpine/quotapane/actions/runs/31061029903> on
+`a9b4bdc` — is **success**, watched to completion in the foreground
+(`gh run watch --exit-status --interval 20` → exit 0). All 8 required checks,
+read back from the check-runs API (`total_count: 8`):
+
+```
+success  build & test (macos-latest)
+success  build & test (ubuntu-latest)
+success  build & test (windows-latest)
+success  cargo-audit (RustSec advisories)
+success  cargo-deny (licenses, bans, advisories, sources)
+success  gitleaks — full-history secret scan
+success  invariant 4 — no telemetry
+success  invariants — manifest, docs, and tests agree
+```
+
+Recorded here in the follow-up commit, per the M13 pattern established by
+`aaa4b03`. That follow-up commit is the pattern's terminus — it triggers a run
+of its own, which cannot be written into the file it would document; its result
+is reported in this session's handover instead.
 
 ---
 
