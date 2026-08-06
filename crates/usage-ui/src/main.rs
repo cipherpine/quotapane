@@ -90,7 +90,27 @@ const DEFAULT_CLIENT_VERSION: &str = "0.0.0";
 /// M7b lowered this from 15 minutes to 10: the stale treatment is now a
 /// whole-line CARDINAL flip rather than a single amber word, so it earns being
 /// reached sooner.
+///
+/// The **outer** of the two freshness thresholds — see [`AGING_AFTER`], which
+/// is always the nearer one. This one keeps every meaning it has ever had:
+/// [`is_stale`] and its callers, including M10's pace-line mute, are untouched
+/// by M14.
 const STALE_AFTER: Duration = Duration::from_secs(600);
+
+/// A snapshot is considered *aging* once it's this old — the inner of the two
+/// freshness thresholds, always shorter than [`STALE_AFTER`] (M14).
+///
+/// Aging is not a problem, it is a warning that one is approaching: the poll
+/// cadence means a healthy pane refreshes well inside five minutes, so five
+/// minutes without one is the first honest sign that something is wrong.
+/// Nothing but the freshness dot's colour reads this — it deliberately does
+/// **not** gate the forecast or anything else `is_stale` gates.
+const AGING_AFTER: Duration = Duration::from_secs(300);
+
+// Aging comes before stale, and the dot's three states depend on it: were the
+// order reversed the amber band would be empty and the dot would jump from
+// green to cardinal. A compile-time fact, so it is checked at compile time.
+const _: () = assert!(AGING_AFTER.as_secs() < STALE_AFTER.as_secs());
 
 // --------------------------------------------------------------------------
 // Cipher Pine palette (M7b). Every colour in the window comes from here — a
@@ -107,11 +127,11 @@ const HAIRLINE: egui::Color32 = egui::Color32::from_rgb(30, 36, 34);
 const TEXT: egui::Color32 = egui::Color32::from_rgb(222, 230, 225);
 /// Labels and reset countdowns. `#8a938e`
 const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(158, 168, 162);
-/// The "updated Ns ago" line while fresh. `#5c665f`
+/// The quietest ink in the window: the resize grip at rest. `#5c665f`
 const TEXT_FAINT: egui::Color32 = egui::Color32::from_rgb(118, 128, 121);
 /// Healthy bar fill. `#2d7a4f`
 const PINE: egui::Color32 = egui::Color32::from_rgb(45, 122, 79);
-/// The "operational" dot beside a fresh update line. `#3fae6a`
+/// The "operational" freshness dot. `#3fae6a`
 const OPER_GREEN: egui::Color32 = egui::Color32::from_rgb(63, 174, 106);
 /// Caution bar fill. `#d9a13b`
 const AMBER: egui::Color32 = egui::Color32::from_rgb(217, 161, 59);
@@ -141,6 +161,10 @@ const GRID_ALPHA: u8 = 6;
 
 /// Caption beside the per-model disclosure triangle.
 const PER_MODEL_CAPTION: &str = "per-model";
+
+/// The freshness dot's glyph — the same `•` the pre-M14 footer's status dot
+/// used, kept so the mark a user already reads did not change, only its place.
+const FRESHNESS_DOT: &str = "•";
 
 /// The window's inner **width**, and it is fixed forever: every row in this
 /// file is laid out against 320px, and the layout harness asserts against it.
@@ -212,18 +236,19 @@ const GRIP_GLYPH: char = '▞';
 /// body through the same layout harness the width assertions use, puts it
 /// through [`snapped_height`] — the very function the grip's double-click
 /// uses — and fails if this constant is under that or more than one row over
-/// it. As measured 2026-08-06 (M14 adds the 8px grip strip to the chrome):
+/// it. As measured 2026-08-06, after M14 added the 8px grip strip to the
+/// chrome and took the per-provider freshness footer out of the body:
 ///
 /// | theme        | titlebar | panel chrome | grip | demo body | needed  |
 /// |--------------|----------|--------------|------|-----------|---------|
-/// | Cipher Pine  | 24.0     | 16.0         | 8.0  | 323.8125  | 371.8125|
-/// | Plain        | 24.0     | 16.0         | 8.0  | 305.625   | 353.625 |
+/// | Cipher Pine  | 24.0     | 16.0         | 8.0  | 281.8125  | 329.8125|
+/// | Plain        | 24.0     | 16.0         | 8.0  | 269.625   | 317.625 |
 ///
 /// Cipher Pine binds — its monospace is taller per row, the same reason it
-/// binds the width assertions — so this is its 371.8125 rounded up to a whole
-/// pixel. Plain then opens with ~18px of slack, which is the correct direction
+/// binds the width assertions — so this is its 329.8125 rounded up to a whole
+/// pixel. Plain then opens with ~12px of slack, which is the correct direction
 /// to be wrong in: a little empty ground, never a scroll bar.
-const DEMO_WINDOW_HEIGHT: f32 = 372.0;
+const DEMO_WINDOW_HEIGHT: f32 = 330.0;
 
 /// The inner height the window asks the OS for at startup.
 ///
@@ -592,12 +617,92 @@ fn is_stale(age: Duration) -> bool {
     age >= STALE_AFTER
 }
 
+/// Everything the freshness dot says about a pane's last successful poll: how
+/// long ago it was, and when it was (M14).
+///
+/// Both are carried rather than the second derived from the first at the point
+/// of use, so the tooltip's producer is pure and its bytes are pinnable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Freshness {
+    /// Time since the poll landed.
+    age: Duration,
+    /// The Unix second the poll landed on.
+    polled_at_unix: u64,
+}
+
+/// The freshness dot's colour: green fresh, amber aging, cardinal stale (M14).
+///
+/// Shared by both themes, for the reason [`fraction_color`] is: how old the
+/// data is, is data truth rather than decoration, and a Plain window that
+/// disagreed with a Cipher Pine one about whether a pane had gone quiet would
+/// be reporting the look rather than the pane. Plain already wore this AMBER
+/// on its pre-M7b stale footer.
+fn freshness_color(age: Duration) -> egui::Color32 {
+    if age >= STALE_AFTER {
+        CARDINAL
+    } else if age >= AGING_AFTER {
+        AMBER
+    } else {
+        OPER_GREEN
+    }
+}
+
+/// The freshness dot's hover text — the exact age the footer used to print,
+/// plus the wall clock the dot alone cannot carry (M14).
+///
+/// `updated 5s ago at 09:14:22 UTC`, and past [`STALE_AFTER`]
+/// `updated 12m ago at 09:14:22 UTC — stale`.
+///
+/// **The clock is UTC, and says so.** The spec asked for local time, and that
+/// is the better tooltip; it is also not available here. `std` exposes no
+/// timezone, the milestone's hard limit is zero new dependencies, and the only
+/// dependency-free route to a local offset is per-platform FFI — raw `unsafe`
+/// in the window crate of a project whose thesis is a small auditable surface,
+/// for a hover string. Rendering a UTC clock *as if* it were local would be the
+/// one thing this codebase refuses more firmly than an ugly label: a number
+/// that is confidently wrong by the reader's own offset, exactly the failure
+/// `providers::time` rejects a bare local timestamp to avoid, and exactly why
+/// `quotapane-cli --watch` stamps `Z`. So the suffix is the honest version of
+/// the same information, and swapping it for a local clock later is this one
+/// function. Flagged for the owner in the M14 end-gate report.
+/// Pair an age with the wall-clock second it counts back to.
+///
+/// The pane stores an [`Instant`], which is monotonic and has no wall clock in
+/// it, so the poll's clock time is reconstructed here rather than stored a
+/// second time. Impure by nature (it reads the clock), which is exactly why it
+/// is one line, and why [`freshness_tooltip`] takes the result instead of
+/// calling this itself.
+fn freshness_at_now(age: Duration) -> Freshness {
+    Freshness {
+        age,
+        polled_at_unix: now_unix_secs().saturating_sub(age.as_secs()),
+    }
+}
+
+fn freshness_tooltip(freshness: Freshness) -> String {
+    let second_of_day = freshness.polled_at_unix % 86_400;
+    let (hour, minute, second) = (
+        second_of_day / 3600,
+        (second_of_day % 3600) / 60,
+        second_of_day % 60,
+    );
+    let mut text = format!(
+        "updated {} at {hour:02}:{minute:02}:{second:02} UTC",
+        format_age(freshness.age.as_secs())
+    );
+    if is_stale(freshness.age) {
+        text.push_str(" — stale");
+    }
+    text
+}
+
 /// Whether the at-risk pace line should be drawn for data of this age.
 ///
 /// A forecast is an extrapolation from the last couple of hours; extrapolating
-/// from data the footer is simultaneously calling stale is not a forecast, it
-/// is misinformation, and it is stated with more confidence than the rest of
-/// the pane. So the line goes quiet on exactly [`is_stale`]'s boundary — one
+/// from data the freshness dot is simultaneously calling stale is not a
+/// forecast, it is misinformation, and it is stated with more confidence than
+/// the rest of the pane. So the line goes quiet on exactly [`is_stale`]'s
+/// boundary — one
 /// predicate, deliberately adjacent to it, so the two cannot drift apart.
 ///
 /// An unknown age keeps drawing, consistent with how `None` is treated
@@ -1372,7 +1477,7 @@ struct ProviderPane {
     ///
     /// Recomputed **only** when a snapshot arrives, and stored rather than
     /// derived at render time. That is the repaint discipline: the window
-    /// already repaints about once a second for the age footer, and running a
+    /// already repaints about once a second for the freshness dot, and running a
     /// least-squares fit on each of those frames would be arithmetic in a hot
     /// loop to produce a value that cannot have changed since the last poll.
     pace_warning: Option<PaceWarning>,
@@ -1468,8 +1573,8 @@ impl ProviderPane {
             pane.update_alerts(&snapshot, config);
             pane.latest_snapshot = Some(snapshot);
         }
-        // The footer's age is the one thing the demo does not fake: it counts
-        // from now, so the pane reads "updated Ns ago" and goes stale on
+        // The dot's age is the one thing the demo does not fake: it counts
+        // from now, so the dot starts green, ages to amber and goes stale on
         // schedule exactly as a live one would.
         pane.snapshot_received_at = Some(Instant::now());
         pane
@@ -2262,25 +2367,63 @@ fn render_prompt(ui: &mut egui::Ui, theme: Theme, pace_demo: bool) {
 }
 
 /// A provider section header: `// CLAUDE` — comment slashes CARDINAL, name
-/// uppercase TEXT_DIM.
+/// uppercase TEXT_DIM — with the freshness dot pinned to its right edge.
 ///
 /// egui has no letter-spacing control, so plain uppercase mono is the
 /// approximation the spec accepts rather than faking tracking with padding.
-fn render_provider_header(ui: &mut egui::Ui, id: ProviderId, theme: Theme) {
-    if theme == Theme::Plain {
-        // The pre-M7b heading: the provider's name, title-cased.
-        ui.heading(provider_label(id));
-        return;
-    }
+///
+/// The dot is here, and not on a line of its own, because that is the density
+/// win of M14: `updated Ns ago` cost a full text row per provider to say what a
+/// coloured dot says at a glance, and the exact seconds — which nobody reads
+/// every second — moved to hover. `freshness` is `None` before the first poll
+/// lands, and the header then renders exactly as it always did.
+///
+/// Right-to-left outer layout with a left-to-right inner one: the shipped
+/// titlebar idiom, and the way to pin one widget to the right edge while the
+/// rest fills from the left.
+fn render_provider_header(
+    ui: &mut egui::Ui,
+    id: ProviderId,
+    theme: Theme,
+    freshness: Option<Freshness>,
+) {
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label(egui::RichText::new("// ").small().color(CARDINAL));
-        ui.label(
-            egui::RichText::new(provider_label(id).to_uppercase())
-                .small()
-                .color(TEXT_DIM),
-        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(freshness) = freshness {
+                render_freshness_dot(ui, freshness);
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                if theme == Theme::Plain {
+                    // The pre-M7b heading: the provider's name, title-cased.
+                    ui.heading(provider_label(id));
+                    return;
+                }
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.label(egui::RichText::new("// ").small().color(CARDINAL));
+                ui.label(
+                    egui::RichText::new(provider_label(id).to_uppercase())
+                        .small()
+                        .color(TEXT_DIM),
+                );
+            });
+        });
     });
+}
+
+/// The freshness dot itself: one small glyph, coloured by age, whose hover
+/// carries the age and the wall clock the row no longer spends a line on.
+///
+/// The same `•` the footer's status dot used since M7b, so the mark a user
+/// already reads as "this pane's data" is the mark that survived; only its
+/// position and what it says on hover are new. Identical in both themes —
+/// [`freshness_color`] is shared, and no theme branch reaches this far.
+fn render_freshness_dot(ui: &mut egui::Ui, freshness: Freshness) {
+    ui.label(
+        egui::RichText::new(FRESHNESS_DOT)
+            .small()
+            .color(freshness_color(freshness.age)),
+    )
+    .on_hover_text(freshness_tooltip(freshness));
 }
 
 /// The whole scrollable body: every provider's pane, ruled apart.
@@ -2300,7 +2443,11 @@ fn render_panes(ui: &mut egui::Ui, panes: &mut [ProviderPane], theme: Theme) {
 
 /// Render one provider's titled section.
 fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
-    render_provider_header(ui, pane.id, theme);
+    // Measured once, before anything draws: the header's dot and the pace
+    // line's stale gate are then answering from the same reading rather than
+    // from two `elapsed()` calls a few microseconds apart.
+    let age = pane.snapshot_received_at.map(|t| t.elapsed());
+    render_provider_header(ui, pane.id, theme, age.map(freshness_at_now));
 
     if let Some(err) = &pane.startup_error {
         ui.colored_label(CARDINAL, err);
@@ -2311,7 +2458,6 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
     // borrowed; the flip happens after, mirroring the titlebar buttons.
     let mut toggled = false;
     if let Some(snapshot) = &pane.latest_snapshot {
-        let age = pane.snapshot_received_at.map(|t| t.elapsed());
         // The strip follows the same window the tray miniature does, so the two
         // never describe different quotas. Selected here rather than stored
         // because it is a filter over a few dozen readings, not the kind of
@@ -2411,8 +2557,8 @@ fn render_windows(
     // The at-risk forecast, directly under the bars it is about — one line at
     // most, and absent entirely when nothing is at risk. Calm is silent: a pane
     // that is fine looks exactly as it did before this milestone. Stale is
-    // silent too (see `show_pace_warning`): the footer already says the data is
-    // dead, and a projection drawn off dead data would contradict it.
+    // silent too (see `show_pace_warning`): the header's dot already says the
+    // data is dead, and a projection drawn off dead data would contradict it.
     if let Some(warning) = lines.pace.filter(|_| show_pace_warning(age)) {
         ui.label(
             egui::RichText::new(pace_warning_line(warning))
@@ -2432,7 +2578,7 @@ fn render_windows(
         );
     }
 
-    // Per-model disclosure, between the headline rows and the age footer.
+    // Per-model disclosure, under the headline rows.
     // Suppressed entirely when there is nothing to disclose — no affordance
     // that opens onto an empty list. "Nothing to disclose" counts *visible*
     // rows, so a provider whose per-model buckets are all untouched shows no
@@ -2456,7 +2602,7 @@ fn render_windows(
         }
     }
 
-    // The alert surfaces, immediately above the freshness footer (M13). Both
+    // The alert surfaces, the last rows in the pane (M13). Both
     // are absent by default — alerts are opt-in, and a pane with nothing to
     // alert about renders exactly as it did before. The banner is CARDINAL
     // because it is the same class of thing as the stale line; the refill
@@ -2472,52 +2618,7 @@ fn render_windows(
         );
     }
 
-    if let Some(age) = age {
-        render_age_line(ui, age, theme);
-    }
-
     toggled
-}
-
-/// The freshness footer: a status dot then `updated Ns ago`.
-///
-/// Fresh reads quietly — OPER_GREEN dot, TEXT_FAINT text. Stale turns the
-/// **whole** line CARDINAL, dot included, so staleness is legible from the
-/// colour alone without reading the words.
-fn render_age_line(ui: &mut egui::Ui, age: Duration, theme: Theme) {
-    let stale = is_stale(age);
-
-    if theme == Theme::Plain {
-        // The pre-M7b footer: one line, amber when stale.
-        let mut text = format!("updated {}", format_age(age.as_secs()));
-        if stale {
-            text.push_str("  •  stale");
-        }
-        let color = if stale {
-            AMBER
-        } else {
-            ui.visuals().weak_text_color()
-        };
-        ui.colored_label(color, text);
-        return;
-    }
-
-    let (dot, ink) = if stale {
-        (CARDINAL, CARDINAL)
-    } else {
-        (OPER_GREEN, TEXT_FAINT)
-    };
-
-    let mut text = format!("updated {}", format_age(age.as_secs()));
-    if stale {
-        text.push_str("  ·  stale");
-    }
-
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
-        ui.label(egui::RichText::new("•").small().color(dot));
-        ui.label(egui::RichText::new(text).small().color(ink));
-    });
 }
 
 /// The reset-credits line, e.g. `resets available: 1`.
@@ -3750,7 +3851,7 @@ mod tests {
         // still). One provider expanding six models already exceeds that, and
         // the real window splits this budget across *two* panes, so the true
         // threshold is lower again. Without the scroll area, overflow silently
-        // eats the age footer with no way to reach it.
+        // eats the last row with no way to reach it.
         let usable_height = WINDOW_HEIGHT - TITLEBAR_HEIGHT;
         let snapshot = ProviderSnapshot {
             provider: ProviderId::CodexSubscription,
@@ -4248,7 +4349,7 @@ mod tests {
     // --- M10: the at-risk line goes quiet on stale data ---
 
     #[test]
-    fn the_at_risk_line_is_suppressed_exactly_when_the_footer_says_stale() {
+    fn the_at_risk_line_is_suppressed_exactly_when_the_dot_says_stale() {
         // Fresh forecasts.
         assert!(show_pace_warning(Some(Duration::from_secs(1))));
         assert!(show_pace_warning(Some(
@@ -5003,9 +5104,18 @@ mod tests {
     /// test in this file while drawing nothing at all. This is how the round-2
     /// spec gets checked against what reaches the screen rather than against
     /// the constants feeding it.
-    fn painted_shapes(mut add_contents: impl FnMut(&mut egui::Ui)) -> Vec<egui::Shape> {
+    fn painted_shapes(add_contents: impl FnMut(&mut egui::Ui)) -> Vec<egui::Shape> {
+        painted_shapes_themed(Theme::CipherPine, add_contents)
+    }
+
+    /// [`painted_shapes`] against a chosen theme — how the M14 dot is checked
+    /// in Plain as well, since it is deliberately the same dot in both.
+    fn painted_shapes_themed(
+        theme: Theme,
+        mut add_contents: impl FnMut(&mut egui::Ui),
+    ) -> Vec<egui::Shape> {
         let ctx = egui::Context::default();
-        install_theme(&ctx, Theme::CipherPine);
+        install_theme(&ctx, theme);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -6073,6 +6183,267 @@ mod tests {
         ProviderSnapshot {
             reset_credits,
             ..per_model_snapshot(vec![])
+        }
+    }
+
+    // --- M14 Phase 2: the freshness dot ---
+
+    /// A poll at 09:14:22 UTC, chosen so every field of the clock is distinct
+    /// and none is zero — a formatter that transposed two of them, or dropped
+    /// a zero pad, has nowhere to hide.
+    const POLL_UNIX: u64 = 1_754_471_662;
+
+    #[test]
+    fn aging_comes_before_stale() {
+        const { assert!(AGING_AFTER.as_secs() < STALE_AFTER.as_secs()) };
+        // And the band between them is not a rounding artefact.
+        assert!(STALE_AFTER - AGING_AFTER >= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn the_dot_goes_green_amber_cardinal_on_the_two_thresholds() {
+        let second = Duration::from_secs(1);
+        // Every case named against the consts, never against 300 or 600: the
+        // thresholds are allowed to move, the *table* is not.
+        assert_eq!(freshness_color(Duration::ZERO), OPER_GREEN);
+        assert_eq!(freshness_color(AGING_AFTER - second), OPER_GREEN);
+        assert_eq!(freshness_color(AGING_AFTER), AMBER);
+        assert_eq!(freshness_color(STALE_AFTER - second), AMBER);
+        assert_eq!(freshness_color(STALE_AFTER), CARDINAL);
+        assert_eq!(freshness_color(STALE_AFTER + second), CARDINAL);
+        // Far past stale stays stale rather than wrapping into another state.
+        assert_eq!(freshness_color(STALE_AFTER * 100), CARDINAL);
+    }
+
+    #[test]
+    fn the_dots_cardinal_is_exactly_the_stale_predicate() {
+        // M10 welded the pace-line mute to `is_stale`. The dot must agree with
+        // it at every age, or the pane would show a green dot beside a muted
+        // forecast — two surfaces disagreeing about the same fact.
+        for age in [
+            Duration::ZERO,
+            AGING_AFTER,
+            STALE_AFTER - Duration::from_secs(1),
+            STALE_AFTER,
+            STALE_AFTER + Duration::from_secs(1),
+        ] {
+            assert_eq!(
+                freshness_color(age) == CARDINAL,
+                is_stale(age),
+                "the dot and `is_stale` disagree at {age:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tooltip_is_byte_exact_fresh_and_stale() {
+        // Fresh: age straight from `format_age`, then the wall clock.
+        assert_eq!(
+            freshness_tooltip(Freshness {
+                age: Duration::from_secs(5),
+                polled_at_unix: POLL_UNIX,
+            }),
+            "updated 5s ago at 09:14:22 UTC"
+        );
+        // Aging is not stale — the amber dot changes no bytes here.
+        assert_eq!(
+            freshness_tooltip(Freshness {
+                age: AGING_AFTER,
+                polled_at_unix: POLL_UNIX,
+            }),
+            "updated 5m ago at 09:14:22 UTC"
+        );
+        // Stale appends the marker, em dash and all, after the clock.
+        assert_eq!(
+            freshness_tooltip(Freshness {
+                age: STALE_AFTER,
+                polled_at_unix: POLL_UNIX,
+            }),
+            "updated 10m ago at 09:14:22 UTC — stale"
+        );
+        // The clock is zero-padded on every field, and midnight is 00:00:00
+        // rather than 24:00:00.
+        assert_eq!(
+            freshness_tooltip(Freshness {
+                age: Duration::from_secs(1),
+                polled_at_unix: 1_754_438_401,
+            }),
+            "updated 1s ago at 00:00:01 UTC"
+        );
+        // And the last second of the day is 23:59:59, not a rollover.
+        assert_eq!(
+            freshness_tooltip(Freshness {
+                age: Duration::from_secs(1),
+                polled_at_unix: 1_754_438_399,
+            }),
+            "updated 1s ago at 23:59:59 UTC"
+        );
+    }
+
+    #[test]
+    fn the_tooltips_age_is_format_ages_output_unchanged() {
+        // No second opinion about how an age reads: the tooltip embeds the
+        // same string the pane has printed since M2.
+        for secs in [0, 1, 59, 60, 61, 600, 3_600, 86_399] {
+            let text = freshness_tooltip(Freshness {
+                age: Duration::from_secs(secs),
+                polled_at_unix: POLL_UNIX,
+            });
+            assert!(
+                text.starts_with(&format!("updated {} at ", format_age(secs))),
+                "{text:?} does not open with format_age({secs})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_poll_clock_counts_back_from_the_age() {
+        // `freshness_at_now` is the only impure part of the dot, and all it
+        // does is subtract: a poll N seconds ago happened N seconds before now.
+        let now = now_unix_secs();
+        let fresh = freshness_at_now(Duration::from_secs(30));
+        assert!(
+            (now.saturating_sub(30)..=now_unix_secs().saturating_sub(30))
+                .contains(&fresh.polled_at_unix),
+            "polled_at_unix {} is not 30s behind now",
+            fresh.polled_at_unix
+        );
+        assert_eq!(fresh.age, Duration::from_secs(30));
+        // An age longer than the epoch saturates rather than panicking.
+        assert_eq!(
+            freshness_at_now(Duration::from_secs(u64::MAX)).polled_at_unix,
+            0
+        );
+    }
+
+    /// A pane with one headline window and a known age, laid out whole.
+    fn dot_pane(age: Option<Duration>) -> ProviderPane {
+        let mut pane = bare_pane(ProviderId::ClaudeSubscription);
+        pane.latest_snapshot = Some(per_model_snapshot(vec![]));
+        pane.snapshot_received_at = age.map(|age| Instant::now() - age);
+        pane
+    }
+
+    /// Every string a render actually painted.
+    fn painted_text(theme: Theme, mut add_contents: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+        painted_shapes_themed(theme, &mut add_contents)
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_pane_prints_no_age_row_at_any_age_in_either_theme() {
+        // The density win, asserted where it happens: the words are gone from
+        // the pane entirely, not merely moved down or shortened.
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            for age in [Duration::ZERO, AGING_AFTER, STALE_AFTER, STALE_AFTER * 10] {
+                let mut panes = vec![dot_pane(Some(age))];
+                let painted = painted_text(theme, |ui| render_panes(ui, &mut panes, theme));
+                assert!(
+                    painted.iter().all(|text| !text.contains("updated")),
+                    "{theme:?} at {age:?} still prints an age row: {painted:?}"
+                );
+                assert!(
+                    painted.iter().all(|text| !text.contains("stale")),
+                    "{theme:?} at {age:?} still prints a stale word: {painted:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_header_carries_the_dot_at_every_age_in_either_theme() {
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            for (age, expected) in [
+                (Duration::ZERO, OPER_GREEN),
+                (AGING_AFTER - Duration::from_secs(1), OPER_GREEN),
+                (AGING_AFTER, AMBER),
+                (STALE_AFTER - Duration::from_secs(1), AMBER),
+                (STALE_AFTER, CARDINAL),
+                (STALE_AFTER + Duration::from_secs(1), CARDINAL),
+            ] {
+                let mut panes = vec![dot_pane(Some(age))];
+                let dots: Vec<egui::Color32> =
+                    painted_shapes_themed(theme, |ui| render_panes(ui, &mut panes, theme))
+                        .into_iter()
+                        .filter_map(|shape| match shape {
+                            // The colour a `RichText` sets lives in the
+                            // galley's own section format; `fallback_color` is
+                            // only what an uncoloured run would have used.
+                            egui::Shape::Text(text) if text.galley.text() == FRESHNESS_DOT => {
+                                Some(text.galley.job.sections[0].format.color)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                assert_eq!(
+                    dots,
+                    vec![expected],
+                    "{theme:?} at {age:?} painted {dots:?} dots"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pane_with_no_poll_yet_has_no_dot() {
+        // Nothing has been measured, so there is nothing to report the age of.
+        // The header then renders exactly as it did before M14.
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let mut panes = vec![dot_pane(None)];
+            let painted = painted_text(theme, |ui| render_panes(ui, &mut panes, theme));
+            assert!(
+                !painted.iter().any(|text| text == FRESHNESS_DOT),
+                "{theme:?} drew a freshness dot before the first poll: {painted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_dot_costs_the_pane_no_row_at_all() {
+        // The whole point: a dot on a row that already exists. A pane with a
+        // dot must be exactly as tall as one without.
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let mut with = vec![dot_pane(Some(Duration::from_secs(5)))];
+            let mut without = vec![dot_pane(None)];
+            let a = lay_out_themed(theme, |ui| render_panes(ui, &mut with, theme));
+            let b = lay_out_themed(theme, |ui| render_panes(ui, &mut without, theme));
+            assert_eq!(
+                a.height, b.height,
+                "{theme:?}: the dot changed the pane's height"
+            );
+            assert!(
+                a.width <= a.available_width,
+                "{theme:?}: the header wanted {}px inside {}px",
+                a.width,
+                a.available_width
+            );
+        }
+    }
+
+    #[test]
+    fn the_error_lines_are_untouched_by_the_dot() {
+        // The dot reports data AGE, never an error. An expired token still
+        // renders M10's exact copy, and it still renders in CARDINAL.
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let mut pane = dot_pane(Some(STALE_AFTER));
+            pane.latest_failure = Some("OAuth token expired at 2026-08-06T09:14:22Z".to_string());
+            let mut panes = vec![pane];
+            let painted = painted_text(theme, |ui| render_panes(ui, &mut panes, theme));
+            assert!(
+                painted
+                    .iter()
+                    .any(|text| text == token_expired_line(ProviderId::ClaudeSubscription)),
+                "{theme:?} lost the expired-token copy: {painted:?}"
+            );
+            assert!(
+                painted.iter().any(|text| text == FRESHNESS_DOT),
+                "{theme:?}: the dot still reports the age beside an error"
+            );
         }
     }
 
