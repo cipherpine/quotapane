@@ -4,7 +4,7 @@
 //! QuotaPane's whole thesis is a tiny credential-touching surface. A settings
 //! file is a place where scope accretes — a window position here, a token cache
 //! there — so this one stays deliberately incapable of holding anything but the
-//! five preferences named in [`Config`]. Parsing is a `split_once('=')`, a
+//! six preferences named in [`Config`]. Parsing is a `split_once('=')`, a
 //! `trim`, a lowercase, and a `match` on a closed key list; every value is a
 //! word or a small integer, and an unrecognized key is *ignored* rather than
 //! stored. There is no place to put a token, no nesting, no escapes, and no
@@ -126,13 +126,35 @@ impl AlertMode {
 /// nothing usable.
 pub const DEFAULT_ALERT_AT: u8 = 80;
 
-/// Every preference QuotaPane persists. Five values, all of them a user's
+/// The window's inner height when the file says nothing usable — the fixed
+/// height every release through v1.6.0 opened at, so an install that never
+/// touches the grip is byte-for-byte the pre-M14 window.
+pub const DEFAULT_HEIGHT: u32 = 240;
+
+/// Smallest height a stored preference may name (M14).
+///
+/// Enough for the titlebar plus one provider header: a hand-edited `height=1`
+/// must not restore a window to a sliver the user cannot grab back.
+pub const MIN_HEIGHT: u32 = 160;
+
+/// Largest height a stored preference may name (M14).
+///
+/// Far beyond any monitor's work area in logical points, so it never binds on
+/// real hardware; it is here so a corrupted file cannot ask the OS for a
+/// window measured in millions of pixels.
+pub const MAX_HEIGHT: u32 = 4096;
+
+/// Every preference QuotaPane persists. Six values, all of them a user's
 /// display choice — there is deliberately no field here that could hold
 /// account state, a cached response, or credential material of any kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     /// Which look the window wears.
     pub theme: Theme,
+    /// The window's inner height in logical pixels, `MIN_HEIGHT..=MAX_HEIGHT`
+    /// (M14). Width is not here and never will be: the window is 320 wide by
+    /// design, and the only thing the user resizes is the height.
+    pub height: u32,
     /// Whether usage percentages are appended to `history.jsonl` (opt-in, off).
     pub history: bool,
     /// Whether quota alerts are raised at all (opt-in, off).
@@ -147,6 +169,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             theme: Theme::default(),
+            height: DEFAULT_HEIGHT,
             // Both features are off until asked for: history is the app's first
             // rolling write path, and an alert is an interruption. Neither is
             // something to hand a user who never opted in.
@@ -177,6 +200,20 @@ fn alert_at(value: &str) -> u8 {
     }
 }
 
+/// Parse the stored window height, exactly the [`alert_at`] idiom: out of
+/// `MIN_HEIGHT..=MAX_HEIGHT`, or unparsable, is [`DEFAULT_HEIGHT`].
+///
+/// A rejected value falls back rather than clamping, on purpose. Clamping a
+/// hand-edited `height=9999` to 4096 would hand back a window nobody asked
+/// for; the honest reading of a value this module does not understand is that
+/// the file said nothing.
+fn height(value: &str) -> u32 {
+    match value.parse::<u32>() {
+        Ok(n) if (MIN_HEIGHT..=MAX_HEIGHT).contains(&n) => n,
+        _ => DEFAULT_HEIGHT,
+    }
+}
+
 /// Parse the whole file.
 ///
 /// The grammar in full: one `key=value` per line; blank lines and `#`-prefixed
@@ -198,6 +235,7 @@ fn parse(text: &str) -> Config {
         let value = value.trim().to_ascii_lowercase();
         match key.as_str() {
             "theme" => config.theme = Theme::from_word(&value),
+            "height" => config.height = height(&value),
             "history" => config.history = switch(&value, Config::default().history),
             "alerts" => config.alerts = switch(&value, Config::default().alerts),
             "alert_at" => config.alert_at = alert_at(&value),
@@ -217,11 +255,13 @@ fn render(config: &Config) -> String {
         "# QuotaPane preferences — display choices only, written by the app.\n\
          # Never credentials: this file cannot hold a token (SECURITY.md invariant 1).\n\
          theme={}\n\
+         height={}\n\
          history={}\n\
          alerts={}\n\
          alert_at={}\n\
          alert_mode={}\n",
         config.theme.as_word(),
+        config.height,
         if config.history { "on" } else { "off" },
         if config.alerts { "on" } else { "off" },
         config.alert_at,
@@ -393,6 +433,9 @@ mod tests {
         assert!(!config.alerts, "alerts must be opt-in");
         assert_eq!(config.alert_at, 80);
         assert_eq!(config.alert_mode, AlertMode::Pace);
+        // The pre-M14 fixed height, so an install that never grabs the grip
+        // opens exactly the window every release to date opened.
+        assert_eq!(config.height, 240);
     }
 
     #[test]
@@ -430,12 +473,14 @@ mod tests {
 
     #[test]
     fn every_key_parses() {
-        let config =
-            parse("theme=plain\nhistory=on\nalerts=on\nalert_at=42\nalert_mode=threshold\n");
+        let config = parse(
+            "theme=plain\nheight=612\nhistory=on\nalerts=on\nalert_at=42\nalert_mode=threshold\n",
+        );
         assert_eq!(
             config,
             Config {
                 theme: Theme::Plain,
+                height: 612,
                 history: true,
                 alerts: true,
                 alert_at: 42,
@@ -476,8 +521,59 @@ mod tests {
 
     #[test]
     fn a_garbage_value_keeps_that_key_at_its_default() {
-        let config = parse("theme=neon\nhistory=maybe\nalerts=yes\nalert_mode=whenever\n");
+        let config =
+            parse("theme=neon\nheight=tall\nhistory=maybe\nalerts=yes\nalert_mode=whenever\n");
         assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn height_out_of_range_or_garbage_is_the_default() {
+        // Each case its own line, because each is its own way for the file to
+        // be wrong: under the floor, over the ceiling, negative, absurd,
+        // empty, unit-suffixed, spelled out, fractional.
+        for value in [
+            "80",
+            "159",
+            "4097",
+            "9999",
+            "0",
+            "-1",
+            "999999999999999999999",
+            "",
+            "612px",
+            "twelve",
+            "612.5",
+        ] {
+            assert_eq!(
+                parse(&format!("height={value}")).height,
+                DEFAULT_HEIGHT,
+                "height={value:?} should fall back to {DEFAULT_HEIGHT}"
+            );
+        }
+        // The ends of the range are in it.
+        assert_eq!(parse("height=160").height, MIN_HEIGHT);
+        assert_eq!(parse("height=4096").height, MAX_HEIGHT);
+        // And the value the grip actually produces survives.
+        assert_eq!(parse("height=612").height, 612);
+    }
+
+    #[test]
+    fn an_absent_height_key_is_the_pre_m14_window() {
+        // The whole compatibility promise of M14 in one assertion: a config
+        // file written by any earlier build names no height, and that must
+        // reopen the 240px window it was written against.
+        assert_eq!(
+            parse("theme=plain\nhistory=on\n").height,
+            DEFAULT_HEIGHT,
+            "a pre-M14 file must not move the window"
+        );
+        assert_eq!(DEFAULT_HEIGHT, 240);
+    }
+
+    #[test]
+    fn the_height_bounds_are_ordered_and_contain_the_default() {
+        const { assert!(MIN_HEIGHT < DEFAULT_HEIGHT) };
+        const { assert!(DEFAULT_HEIGHT < MAX_HEIGHT) };
     }
 
     #[test]
@@ -517,19 +613,21 @@ mod tests {
     fn render_emits_every_key_under_a_two_line_header() {
         let text = render(&Config {
             theme: Theme::Plain,
+            height: 612,
             history: true,
             alerts: true,
             alert_at: 65,
             alert_mode: AlertMode::Threshold,
         });
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 7, "two header lines plus five keys: {text:?}");
+        assert_eq!(lines.len(), 8, "two header lines plus six keys: {text:?}");
         assert!(lines[0].starts_with('#'));
         assert!(lines[1].starts_with('#'));
         assert_eq!(
             &lines[2..],
             [
                 "theme=plain",
+                "height=612",
                 "history=on",
                 "alerts=on",
                 "alert_at=65",
@@ -546,6 +644,7 @@ mod tests {
             Config::default(),
             Config {
                 theme: Theme::Plain,
+                height: MIN_HEIGHT,
                 history: true,
                 alerts: true,
                 alert_at: 1,
@@ -553,6 +652,7 @@ mod tests {
             },
             Config {
                 theme: Theme::CipherPine,
+                height: MAX_HEIGHT,
                 history: false,
                 alerts: true,
                 alert_at: 100,
@@ -579,6 +679,9 @@ mod tests {
                 Config::default(),
                 Config {
                     theme: Theme::Plain,
+                    // The height the grip produces, through the real save/load
+                    // path rather than through `parse` alone.
+                    height: 612,
                     history: true,
                     alerts: true,
                     alert_at: 55,

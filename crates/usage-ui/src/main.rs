@@ -142,10 +142,62 @@ const GRID_ALPHA: u8 = 6;
 /// Caption beside the per-model disclosure triangle.
 const PER_MODEL_CAPTION: &str = "per-model";
 
-/// The window's fixed inner size. It is **not resizable**, so every layout has
-/// to fit inside this — there is no user escape hatch when content overflows.
+/// The window's inner **width**, and it is fixed forever: every row in this
+/// file is laid out against 320px, and the layout harness asserts against it.
+/// The viewport is built with the same value as its minimum *and* its maximum
+/// width, so even an OS-provided borderless edge-drag cannot move it.
 const WINDOW_WIDTH: f32 = 320.0;
+
+/// The inner height a window opens at when nothing is stored — the height the
+/// window was hard-fixed at from M0 through v1.6.0.
+///
+/// Since M14 the height is the user's: the bottom grip resizes it and
+/// `config.cfg`'s `height` key remembers it. This constant is what an install
+/// that never touches the grip gets, so that window is byte-for-byte the one
+/// every visual acceptance to date was given against.
 const WINDOW_HEIGHT: f32 = 240.0;
+
+/// The smallest inner height the OS will let the user drag to (M14).
+///
+/// Preserves the titlebar plus one provider header — enough that the window is
+/// always recognisably itself and always has a grip to grab. Without a floor,
+/// winit would happily let a drag collapse the window to a zero-height sliver
+/// with no way back short of editing the config file.
+const MIN_WINDOW_HEIGHT: f32 = 160.0;
+
+/// The largest inner height the OS will let the user drag to (M14).
+///
+/// **Finite on purpose.** The natural expression of "no ceiling" is
+/// `f32::INFINITY`, and egui guards against exactly that on the
+/// `ViewportCommand::MaxInnerSize` path — but the *builder* path hands the
+/// value straight to winit, where `LogicalSize::to_physical` saturates
+/// infinity to `u32::MAX` and Windows' `WM_GETMINMAXINFO` handler then casts
+/// it to `-1`, producing a maximum track size of a few pixels: a window that
+/// cannot be resized at all, which is the opposite of this milestone. A finite
+/// ceiling beyond any real monitor's work area says the same thing safely, and
+/// is the same number the config parser accepts up to.
+const MAX_WINDOW_HEIGHT: f32 = 4096.0;
+
+// The stored bounds and the viewport's bounds are the same bounds. Welded at
+// compile time so a change to one is a build failure rather than a window that
+// can be dragged to a size it cannot remember.
+const _: () = {
+    assert!(MIN_WINDOW_HEIGHT == config::MIN_HEIGHT as f32);
+    assert!(MAX_WINDOW_HEIGHT == config::MAX_HEIGHT as f32);
+    assert!(WINDOW_HEIGHT == config::DEFAULT_HEIGHT as f32);
+    assert!(MIN_WINDOW_HEIGHT < WINDOW_HEIGHT);
+};
+
+/// Height of the bottom resize grip strip (M14).
+///
+/// Chrome, exactly like [`TITLEBAR_HEIGHT`]: it is carved out of the window
+/// before the `CentralPanel` is shown, so it never overlaps the scrollable
+/// content it sits under.
+const GRIP_HEIGHT: f32 = 8.0;
+
+/// The grip's mark: a right-aligned quadrant fill, the terminal voice's answer
+/// to a resize handle.
+const GRIP_GLYPH: char = '▞';
 
 /// The inner height `--pace-demo` asks for instead of [`WINDOW_HEIGHT`]
 /// (M13-R1). **Demo only** — the production window is untouched.
@@ -157,31 +209,104 @@ const WINDOW_HEIGHT: f32 = 240.0;
 /// scroll bar means reviewing it in pieces.
 ///
 /// Derived, not chosen. `the_demo_scenario_fits_the_window` measures the demo
-/// body through the same layout harness the width assertions use, adds the
-/// titlebar and the central panel's own margins, and fails if this constant is
-/// under that or more than one row over it. As measured 2026-08-05:
+/// body through the same layout harness the width assertions use, puts it
+/// through [`snapped_height`] — the very function the grip's double-click
+/// uses — and fails if this constant is under that or more than one row over
+/// it. As measured 2026-08-06 (M14 adds the 8px grip strip to the chrome):
 ///
-/// | theme        | titlebar | panel chrome | demo body | needed  |
-/// |--------------|----------|--------------|-----------|---------|
-/// | Cipher Pine  | 24.0     | 16.0         | 323.8125  | 363.8125|
-/// | Plain        | 24.0     | 16.0         | 305.625   | 345.625 |
+/// | theme        | titlebar | panel chrome | grip | demo body | needed  |
+/// |--------------|----------|--------------|------|-----------|---------|
+/// | Cipher Pine  | 24.0     | 16.0         | 8.0  | 323.8125  | 371.8125|
+/// | Plain        | 24.0     | 16.0         | 8.0  | 305.625   | 353.625 |
 ///
 /// Cipher Pine binds — its monospace is taller per row, the same reason it
-/// binds the width assertions — so this is its 363.8125 rounded up to a whole
+/// binds the width assertions — so this is its 371.8125 rounded up to a whole
 /// pixel. Plain then opens with ~18px of slack, which is the correct direction
 /// to be wrong in: a little empty ground, never a scroll bar.
-const DEMO_WINDOW_HEIGHT: f32 = 364.0;
+const DEMO_WINDOW_HEIGHT: f32 = 372.0;
 
 /// The inner height the window asks the OS for at startup.
 ///
-/// A function of one flag so the production default has exactly one value and
-/// `only_the_demo_gets_the_taller_window` can pin it: every non-demo launch
-/// gets [`WINDOW_HEIGHT`], the size accepted through every milestone to date.
-fn initial_inner_height(pace_demo: bool) -> f32 {
+/// Two inputs so each answer has exactly one source. `--pace-demo` gets
+/// [`DEMO_WINDOW_HEIGHT`] and ignores `saved_height` entirely — the demo is a
+/// fixture, not a session, and it neither reads nor writes the user's height.
+/// Every other launch gets whatever the config file remembered, which is
+/// [`WINDOW_HEIGHT`] until the user first drags the grip.
+///
+/// `saved_height` arrives already range-checked by `config::height`; the clamp
+/// here is the second lock on the same door, so no path can ask the OS for a
+/// window outside the bounds the viewport declares.
+fn initial_inner_height(pace_demo: bool, saved_height: u32) -> f32 {
     if pace_demo {
         DEMO_WINDOW_HEIGHT
     } else {
-        WINDOW_HEIGHT
+        (saved_height as f32).clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT)
+    }
+}
+
+/// The inner height that exactly fits `content_height` — what the grip's
+/// double-click snaps to (M14).
+///
+/// Everything the content does *not* get is added here: the titlebar above it,
+/// the grip strip below it, and the `CentralPanel`'s own margins around it.
+/// `panel_chrome_height` is measured by the caller from the live style rather
+/// than assumed, exactly as the layout harness measures it, so a margin change
+/// moves the snap without anyone having to remember to update a number.
+///
+/// Only the floor is clamped. egui already clamps a requested inner size to the
+/// monitor's work area, and fighting it here would mean this file guessing at a
+/// monitor size it cannot see.
+fn snapped_height(content_height: f32, panel_chrome_height: f32) -> f32 {
+    (TITLEBAR_HEIGHT + panel_chrome_height + content_height + GRIP_HEIGHT).max(MIN_WINDOW_HEIGHT)
+}
+
+/// The viewport command the grip's double-click sends.
+///
+/// The width component is [`WINDOW_WIDTH`], literally and unconditionally, and
+/// this is the **only** place in the window that ever names an inner size at
+/// runtime — `no_resize_path_can_emit_a_width_other_than_the_fixed_one` scans
+/// the source to keep it that way.
+fn snap_command(content_height: f32, panel_chrome_height: f32) -> egui::ViewportCommand {
+    egui::ViewportCommand::InnerSize(egui::vec2(
+        WINDOW_WIDTH,
+        snapped_height(content_height, panel_chrome_height),
+    ))
+}
+
+/// How long an observed window height must hold still before it is written to
+/// disk (M14).
+///
+/// A resize is driven by the OS, not by egui, so there is no "drag ended"
+/// event to hang the save on — the window simply repaints at a new size, many
+/// times a second, for as long as the user holds the edge. Writing on each of
+/// those frames would be dozens of `config.cfg` rewrites for one decision, so
+/// the height is written once the dragging stops.
+const HEIGHT_SETTLE: Duration = Duration::from_millis(500);
+
+/// What to do about the height observed this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeightAction {
+    /// The window is at the stored height: nothing to remember.
+    Nothing,
+    /// A different height, but not yet still enough to be the user's answer.
+    Wait,
+    /// Settled on a new height — write it.
+    Write,
+}
+
+/// Decide whether a newly observed height should be persisted.
+///
+/// Pure, so the debounce is unit-testable without a window: `pending` is the
+/// height seen on a previous frame and how long ago it was first seen.
+fn height_action(saved: u32, current: u32, pending: Option<(u32, Duration)>) -> HeightAction {
+    if current == saved {
+        return HeightAction::Nothing;
+    }
+    match pending {
+        Some((height, elapsed)) if height == current && elapsed >= HEIGHT_SETTLE => {
+            HeightAction::Write
+        }
+        _ => HeightAction::Wait,
     }
 }
 
@@ -1622,18 +1747,154 @@ struct QuotaPaneApp {
     /// True when `--plain`/`--themed` picked the theme for this run, so the
     /// flag is not written back to disk.
     ///
-    /// Read only by the tray toggle, which is the sole runtime way to change
-    /// the theme — so on a platform without a tray it is written and never
-    /// read, which is correct rather than dead.
-    #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
+    /// Read by [`Self::persist_preferences`], the app's single writer: a save
+    /// triggered by anything else (a grip resize) must not smuggle a run-only
+    /// look into the file on its way past.
     theme_overridden: bool,
+    /// The theme as the file names it, captured before `--plain`/`--themed`
+    /// was applied. Written back verbatim whenever `theme_overridden` is set.
+    disk_theme: Theme,
     /// True under `--pace-demo`, so the titlebar can say the pane is synthetic.
     pace_demo: bool,
+    /// A height seen on an earlier frame that has not settled yet: the height
+    /// itself and when it was first observed (M14). `None` means the window is
+    /// sitting at the height already stored.
+    pending_height: Option<(u32, Instant)>,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     tray: Option<tray::Tray>,
 }
 
 impl QuotaPaneApp {
+    /// Write the preferences to disk. The app's **single** writer.
+    ///
+    /// Two things it refuses to do, both of which a naive `config::save` at
+    /// each call site would get wrong:
+    ///
+    /// - **Never under `--pace-demo`.** `demo_config` forces alerts on for the
+    ///   fixture; persisting that would hand a real user settings they never
+    ///   chose, and a demo height they never asked for.
+    /// - **Never a run-only theme.** `--plain`/`--themed` picks a look for one
+    ///   run, so the stored word is written back untouched.
+    fn persist_preferences(&self) {
+        if self.pace_demo {
+            return;
+        }
+        let mut on_disk = self.config;
+        if self.theme_overridden {
+            on_disk.theme = self.disk_theme;
+        }
+        config::save(&on_disk);
+    }
+
+    /// Notice that the user has resized the window, and remember the new height
+    /// once they stop (M14).
+    ///
+    /// There is no drag-ended event to hang this on: `BeginResize` hands the
+    /// drag to the OS, which simply resizes the window under egui. So the size
+    /// is *observed* each frame and written once it has held still for
+    /// [`HEIGHT_SETTLE`] — see [`height_action`] for the decision itself.
+    fn track_height(&mut self, ctx: &egui::Context) {
+        // The demo neither reads nor writes the saved height.
+        if self.pace_demo {
+            return;
+        }
+        let current = ctx
+            .viewport_rect()
+            .height()
+            .round()
+            .clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT) as u32;
+        let pending = self
+            .pending_height
+            .map(|(height, since)| (height, since.elapsed()));
+        match height_action(self.config.height, current, pending) {
+            HeightAction::Nothing => self.pending_height = None,
+            HeightAction::Wait => {
+                if self.pending_height.map(|(height, _)| height) != Some(current) {
+                    self.pending_height = Some((current, Instant::now()));
+                }
+                // The 1s tick in `logic` would get here eventually; this makes
+                // the write land promptly after the user lets go.
+                ctx.request_repaint_after(HEIGHT_SETTLE);
+            }
+            HeightAction::Write => {
+                self.config.height = current;
+                self.pending_height = None;
+                self.persist_preferences();
+            }
+        }
+    }
+
+    /// Draw the bottom resize grip: an 8px strip carrying a right-aligned
+    /// [`GRIP_GLYPH`], faint at rest and full-strength under the pointer.
+    ///
+    /// Returns `true` when it was double-clicked, which the caller turns into a
+    /// snap-to-fit *after* the content has been laid out — the fit is measured
+    /// from this frame's content, not last frame's.
+    ///
+    /// Dragging it does not resize the window here: it asks the OS to take over
+    /// the drag ([`egui::ViewportCommand::BeginResize`] southwards), which is
+    /// what makes the resize feel native and keeps the width pinned by the
+    /// viewport's own min/max rather than by arithmetic in this file.
+    fn render_grip(&self, root_ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
+        let theme = self.config.theme;
+        let mut snap = false;
+
+        // The pane's own fill, so the strip reads as the bottom of the window
+        // rather than as a band of a different colour under it. Taken from the
+        // installed visuals, so Plain gets Plain's panel and Cipher Pine gets
+        // GROUND without either being named here.
+        let frame = egui::Frame::new()
+            .fill(root_ui.visuals().panel_fill)
+            .inner_margin(egui::Margin {
+                left: 0,
+                right: 4,
+                top: 0,
+                bottom: 0,
+            });
+
+        egui::Panel::bottom("resize_grip")
+            .exact_size(GRIP_HEIGHT)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(frame)
+            .show(root_ui, |ui| {
+                let rect = ui.max_rect();
+                let response = ui.interact(
+                    rect,
+                    ui.id().with("resize_grip"),
+                    egui::Sense::click_and_drag(),
+                );
+
+                let ink = match (theme, response.hovered()) {
+                    (Theme::CipherPine, false) => TEXT_FAINT,
+                    (Theme::CipherPine, true) => TEXT,
+                    (Theme::Plain, false) => ui.visuals().weak_text_color(),
+                    (Theme::Plain, true) => ui.visuals().text_color(),
+                };
+                ui.painter().text(
+                    rect.right_center(),
+                    egui::Align2::RIGHT_CENTER,
+                    GRIP_GLYPH,
+                    egui::FontId::monospace(GRIP_HEIGHT),
+                    ink,
+                );
+
+                if response.hovered() {
+                    ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                }
+                if response.drag_started() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(
+                        egui::ResizeDirection::South,
+                    ));
+                }
+                if response.double_clicked() {
+                    snap = true;
+                }
+            });
+
+        snap
+    }
+
     /// Hide the window (minimize-to-tray). On Windows/macOS the app lives on in
     /// the tray; on Linux (no tray) it simply hides. Keeps the tray's toggle
     /// state in sync so a later Show/Hide behaves correctly.
@@ -1827,12 +2088,11 @@ impl QuotaPaneApp {
                     }
                     // A `--plain`/`--themed` launch picked the theme for this
                     // run only, so a toggle during it must not rewrite the
-                    // stored default. Everything else in `config` came off disk
+                    // stored default — `persist_preferences` is what knows
+                    // that. Everything else in `config` came off disk
                     // unchanged, so writing the whole struct back is a no-op for
                     // every key but the theme.
-                    if !self.theme_overridden {
-                        config::save(&self.config);
-                    }
+                    self.persist_preferences();
                 }
                 TrayMessage::Quit => {
                     self.quitting = true;
@@ -1888,10 +2148,27 @@ impl eframe::App for QuotaPaneApp {
         let ctx = ui.ctx().clone();
         let theme = self.config.theme;
 
+        // A resize the OS performed is noticed here, before anything draws, so
+        // a settled height is written the moment the user lets go of the edge.
+        self.track_height(&ctx);
+
         // Slim custom titlebar first (a top panel): app name + minimize/close,
         // and a window-drag handle. Takes its ~24px; the CentralPanel fills the
         // rest below it.
         self.render_titlebar(ui, &ctx);
+
+        // The grip, second: also chrome, also carved out before the content, so
+        // the 8px it takes is never 8px the ScrollArea thinks it has.
+        let snap_requested = self.render_grip(ui, &ctx);
+
+        // The `CentralPanel`'s own frame, measured from the live style — the
+        // snap has to add back everything the content is not given, and the
+        // layout harness measures it exactly this way.
+        let panel_chrome_height = egui::Frame::central_panel(ui.style())
+            .total_margin()
+            .sum()
+            .y;
+        let mut content_height = 0.0;
 
         // The root `Ui` eframe hands to `App::ui` has no margin or background
         // (see `eframe::App::ui` docs) — a `CentralPanel` supplies both.
@@ -1914,12 +2191,14 @@ impl eframe::App for QuotaPaneApp {
                 paint_grid(ui, bg_rect);
             }
 
-            // Vertical safety net. The window is a fixed 240px with no resize,
-            // so content that outgrows it has nowhere to go: expanding several
-            // per-model rows (two lines each), or Claude also reporting
-            // per-model windows, would push the age footer out of the window
-            // with no way to reach it. This converts that silent truncation
-            // into a scroll.
+            // Vertical safety net. The window opens at 240px and the user is
+            // free to leave it there, so content that outgrows it still needs
+            // somewhere to go: expanding several per-model rows (two lines
+            // each), or Claude also reporting per-model windows, would push the
+            // last row out of the window with no way to reach it. This converts
+            // that silent truncation into a scroll — and since M14 the grip's
+            // double-click is the other answer, resizing the window to the
+            // content instead of scrolling the content inside the window.
             //
             // Deliberately invisible until needed: egui shows no scroll bar
             // while the content fits, which is every state accepted so far, so
@@ -1929,13 +2208,22 @@ impl eframe::App for QuotaPaneApp {
             // touch-capable Windows machine that would turn a drag on the pane
             // background into a scroll, stealing the only gesture that moves
             // this decoration-less window. Wheel and scroll bar stay enabled.
-            egui::ScrollArea::vertical()
+            content_height = egui::ScrollArea::vertical()
                 .scroll_source(egui::containers::scroll_area::ScrollSource {
                     drag: egui::containers::scroll_area::DragScroll::Never,
                     ..Default::default()
                 })
-                .show(ui, |ui| render_panes(ui, &mut self.panes, theme));
+                .show(ui, |ui| render_panes(ui, &mut self.panes, theme))
+                .content_size
+                .y;
         });
+
+        // Snap-to-fit, acted on after the layout so the fit is measured from
+        // the content this frame actually produced. The width component is
+        // [`WINDOW_WIDTH`] and nothing else — see [`snap_command`].
+        if snap_requested {
+            ctx.send_viewport_cmd(snap_command(content_height, panel_chrome_height));
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -2246,8 +2534,8 @@ fn reset_credits_line(credits: &ResetCredits) -> String {
 ///
 /// Hidden when usage is `0.0` or unknown. Both providers enumerate every model
 /// bucket on the plan, so a subscriber who has never touched one still gets a
-/// row for it — two lines of "0% · resets in 7d" in a 320px window that cannot
-/// be resized. Anything actually used, however little, still shows.
+/// row for it — two lines of "0% · resets in 7d" in a window whose width is
+/// fixed at 320px. Anything actually used, however little, still shows.
 ///
 /// Display-only, and deliberately not pushed down into `usage-core`: the
 /// snapshot stays the full truth for `--json` and any future consumer. A
@@ -2890,6 +3178,9 @@ fn main() -> ExitCode {
     // the alert settings both have to be answered before the first poll can be
     // folded in.
     let mut config = config::load();
+    // The look the file names, before any flag touches it — what a save
+    // triggered by something other than the tray toggle must write back.
+    let disk_theme = config.theme;
     // A run-only flag beats the saved preference; every other preference comes
     // from the file only, since there is no flag for them.
     if let Some(theme) = theme_override {
@@ -2937,11 +3228,18 @@ fn main() -> ExitCode {
         height: ICON_SIZE,
     };
 
+    // Resizable in one axis only (M14). The min and max inner sizes carry the
+    // *same* width, which is what pins it: winit enforces both, so the
+    // OS-provided edge-drag a borderless resizable window gets on Windows can
+    // only ever move the bottom edge. The window has no left/right handle to
+    // fight over, and this file never computes a width but [`WINDOW_WIDTH`].
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([WINDOW_WIDTH, initial_inner_height(pace_demo)])
+            .with_inner_size([WINDOW_WIDTH, initial_inner_height(pace_demo, config.height)])
             .with_decorations(false)
-            .with_resizable(false)
+            .with_resizable(true)
+            .with_min_inner_size([WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
+            .with_max_inner_size([WINDOW_WIDTH, MAX_WINDOW_HEIGHT])
             .with_icon(window_icon)
             .with_always_on_top(),
         ..Default::default()
@@ -2980,7 +3278,9 @@ fn main() -> ExitCode {
                 quitting: false,
                 config,
                 theme_overridden,
+                disk_theme,
                 pace_demo,
+                pending_height: None,
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
                 tray,
             };
@@ -5301,6 +5601,7 @@ mod tests {
         // see the feature — and must still see their own theme.
         let theirs = Config {
             theme: Theme::Plain,
+            height: 612,
             history: true,
             alerts: false,
             alert_at: 95,
@@ -5312,6 +5613,11 @@ mod tests {
         assert_eq!(forced.alert_mode, AlertMode::Pace);
         assert_eq!(forced.theme, Theme::Plain, "the look is the reviewer's");
         assert!(forced.history, "and so is everything else");
+        assert_eq!(
+            forced.height, 612,
+            "demo_config carries the height through untouched — the demo's own \
+             window comes from initial_inner_height, not from the config"
+        );
     }
 
     // --- M8: --pace-demo ---
@@ -5465,7 +5771,11 @@ mod tests {
             laid.width,
             laid.available_width
         );
-        TITLEBAR_HEIGHT + laid.panel_chrome_height + laid.height
+        // Through the shipped snap function, not a retyped sum (M14): the
+        // demo's constant and the grip's double-click are then answering the
+        // same question with the same arithmetic, and a change to one is a
+        // failure in the other.
+        snapped_height(laid.height, laid.panel_chrome_height)
     }
 
     #[test]
@@ -5503,13 +5813,256 @@ mod tests {
         // safety of point 4: every visual acceptance to date was given against
         // a 320x240 window, and a synthetic review scenario does not get to
         // resize the app real subscribers run.
-        assert_eq!(initial_inner_height(false), WINDOW_HEIGHT);
+        assert_eq!(
+            initial_inner_height(false, config::DEFAULT_HEIGHT),
+            WINDOW_HEIGHT
+        );
         assert_eq!(WINDOW_HEIGHT, 240.0);
-        assert_eq!(initial_inner_height(true), DEMO_WINDOW_HEIGHT);
+        assert_eq!(
+            initial_inner_height(true, config::DEFAULT_HEIGHT),
+            DEMO_WINDOW_HEIGHT
+        );
         // The demo window exists to be taller than the default one. A const
         // block, because both sides are consts and a runtime `assert!` over
         // them is a compile-time fact deferred.
         const { assert!(DEMO_WINDOW_HEIGHT > WINDOW_HEIGHT) };
+    }
+
+    // --- M14 Phase 1: the height is the user's ---
+
+    #[test]
+    fn a_saved_height_is_what_the_window_opens_at() {
+        for saved in [config::MIN_HEIGHT, 240, 612, config::MAX_HEIGHT] {
+            assert_eq!(
+                initial_inner_height(false, saved),
+                saved as f32,
+                "a stored height={saved} must be the height asked for"
+            );
+        }
+    }
+
+    #[test]
+    fn the_demo_ignores_the_saved_height_entirely() {
+        // The demo is a fixture, not a session: whatever the user's window is,
+        // `--pace-demo` opens the scenario's own window.
+        for saved in [config::MIN_HEIGHT, 240, 612, config::MAX_HEIGHT] {
+            assert_eq!(initial_inner_height(true, saved), DEMO_WINDOW_HEIGHT);
+        }
+    }
+
+    #[test]
+    fn the_opening_height_is_clamped_to_the_viewport_bounds() {
+        // `config::height` rejects out-of-range values already; this is the
+        // second lock, so no path can ask the OS for a size the viewport's own
+        // min/max would refuse.
+        assert_eq!(initial_inner_height(false, 0), MIN_WINDOW_HEIGHT);
+        assert_eq!(initial_inner_height(false, 1), MIN_WINDOW_HEIGHT);
+        assert_eq!(initial_inner_height(false, u32::MAX), MAX_WINDOW_HEIGHT);
+    }
+
+    #[test]
+    fn snapping_adds_exactly_the_chrome_the_content_does_not_get() {
+        // Titlebar above, grip below, panel margins around — and nothing else.
+        assert_eq!(
+            snapped_height(300.0, 16.0),
+            TITLEBAR_HEIGHT + 16.0 + 300.0 + GRIP_HEIGHT
+        );
+        // A boundary mutant that drops the grip from the sum lands here.
+        assert_eq!(snapped_height(300.0, 16.0), 348.0);
+    }
+
+    #[test]
+    fn snapping_never_goes_under_the_minimum() {
+        // An empty window (no provider signed in, nothing to draw) must not
+        // snap to a sliver with no grip left to grab.
+        assert_eq!(snapped_height(0.0, 0.0), MIN_WINDOW_HEIGHT);
+        assert_eq!(snapped_height(1.0, 1.0), MIN_WINDOW_HEIGHT);
+        // One pixel of content over the floor and the clamp lets go.
+        let just_over = MIN_WINDOW_HEIGHT - TITLEBAR_HEIGHT - GRIP_HEIGHT + 1.0;
+        assert_eq!(snapped_height(just_over, 0.0), MIN_WINDOW_HEIGHT + 1.0);
+    }
+
+    #[test]
+    fn the_snap_command_can_only_name_the_fixed_width() {
+        for (content, chrome) in [(0.0, 0.0), (300.0, 16.0), (5000.0, 16.0)] {
+            match snap_command(content, chrome) {
+                egui::ViewportCommand::InnerSize(size) => {
+                    assert_eq!(
+                        size.x, WINDOW_WIDTH,
+                        "the snap must never move the width, content={content}"
+                    );
+                    assert_eq!(size.y, snapped_height(content, chrome));
+                }
+                other => panic!("snap must be an InnerSize command, got {other:?}"),
+            }
+        }
+    }
+
+    /// The width claim, made against the source rather than a value: a runtime
+    /// test can only check the paths it calls, and the claim is that **no**
+    /// path exists that names another width. Same technique, and same reason,
+    /// as `the_window_exposes_no_proxy_opt_in`.
+    #[test]
+    fn no_resize_path_can_emit_a_width_other_than_the_fixed_one() {
+        const SRC: &str = include_str!("main.rs");
+        let code: String = SRC[..SRC
+            .find("#[cfg(test)]")
+            .expect("test module marker not found")]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Exactly one place names an inner size at runtime, and it is
+        // `snap_command`.
+        assert_eq!(
+            code.matches("ViewportCommand::InnerSize").count(),
+            1,
+            "exactly one runtime inner-size command in the window"
+        );
+        // Every viewport size the window declares carries WINDOW_WIDTH.
+        for call in [
+            "with_inner_size([WINDOW_WIDTH,",
+            "with_min_inner_size([WINDOW_WIDTH,",
+            "with_max_inner_size([WINDOW_WIDTH,",
+        ] {
+            assert!(
+                code.contains(call),
+                "the viewport must declare `{call}` — the width is pinned by \
+                 the builder, not by arithmetic"
+            );
+        }
+        // And nothing may re-enable a free-floating window by dropping the
+        // width bounds again.
+        assert!(
+            !code.contains("with_resizable(false)"),
+            "M14 makes the window resizable; the width is pinned by min/max \
+             inner size instead"
+        );
+    }
+
+    /// The grip's mark has to be a mark, not a replacement box.
+    ///
+    /// Measured, because the answer is not obvious and it is not the same in
+    /// both bundled fonts: Hack (the monospace family) has U+259E, and
+    /// Ubuntu-Light (the proportional family egui's Plain default uses) does
+    /// not — nor do egui's emoji fallbacks. That is exactly why `render_grip`
+    /// paints with an explicit monospace `FontId` in **both** themes rather
+    /// than inheriting the style's family, and this test is what keeps that
+    /// from being quietly undone.
+    ///
+    /// `Fonts::has_glyph` cannot answer this: for the monospace family its
+    /// "is this the replacement face" check compares Hack against itself and
+    /// reports `false` for every character, ASCII included. So the comparison
+    /// is made where the truth actually shows up — the atlas rectangle a laid
+    /// out glyph points at. A character no face owns is drawn as the
+    /// replacement glyph, so it lands on the replacement's rectangle; a
+    /// character Hack owns lands somewhere else.
+    #[test]
+    fn the_grip_glyph_is_a_glyph_and_not_a_replacement_box() {
+        let ctx = egui::Context::default();
+        install_theme(&ctx, Theme::CipherPine);
+        // Fonts do not exist until a frame has run.
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+
+        let font = egui::FontId::monospace(GRIP_HEIGHT);
+        let uv_rect = |c: char| {
+            let galley = ctx.fonts_mut(|fonts| {
+                fonts.layout_no_wrap(c.to_string(), font.clone(), egui::Color32::WHITE)
+            });
+            galley.rows[0].glyphs[0].uv_rect
+        };
+
+        // U+E000 is Private Use: no bundled font can claim it, so whatever it
+        // renders as *is* the replacement box.
+        let replacement = uv_rect('\u{E000}');
+        assert_ne!(
+            uv_rect(GRIP_GLYPH),
+            replacement,
+            "{GRIP_GLYPH:?} is not in the monospace family — the grip would \
+             draw a replacement box"
+        );
+        // The probe itself has to be honest: a character that *is* present
+        // must not compare equal to the replacement either way round.
+        assert_ne!(uv_rect('='), replacement, "the probe is not discriminating");
+    }
+
+    /// The grip's mark is painted in the monospace family whatever the theme,
+    /// because the proportional one does not have it (see the test above).
+    #[test]
+    fn the_grip_paints_its_mark_in_the_monospace_family() {
+        const SRC: &str = include_str!("main.rs");
+        let code: String = SRC[..SRC
+            .find("#[cfg(test)]")
+            .expect("test module marker not found")]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let grip = code
+            .split("fn render_grip")
+            .nth(1)
+            .expect("render_grip not found");
+        assert!(
+            grip.contains("FontId::monospace("),
+            "the grip must name the monospace family explicitly — Plain's \
+             proportional default has no U+259E to draw"
+        );
+    }
+
+    #[test]
+    fn the_grip_is_carved_out_of_the_window_not_out_of_the_content() {
+        // Chrome, like the titlebar: the height it costs is the height the
+        // snap adds back, so a window snapped to fit shows every row *and* a
+        // grip to grab.
+        const { assert!(GRIP_HEIGHT > 0.0) };
+        // Well clear of the MIN_WINDOW_HEIGHT clamp, which would otherwise
+        // flatten both sides of the subtraction to the floor.
+        let content = 300.0;
+        assert_eq!(
+            snapped_height(content, 0.0) - snapped_height(content - GRIP_HEIGHT, 0.0),
+            GRIP_HEIGHT,
+            "the grip's strip must be part of the window, not part of the body"
+        );
+    }
+
+    #[test]
+    fn a_height_is_written_only_once_the_user_stops_dragging() {
+        let settled = HEIGHT_SETTLE;
+        let mid_drag = HEIGHT_SETTLE - Duration::from_millis(1);
+
+        // Sitting at the stored height: nothing to do, ever.
+        assert_eq!(height_action(240, 240, None), HeightAction::Nothing);
+        assert_eq!(
+            height_action(240, 240, Some((240, settled))),
+            HeightAction::Nothing
+        );
+
+        // A height seen for the first time is never written on sight.
+        assert_eq!(height_action(240, 320, None), HeightAction::Wait);
+
+        // Still moving: each new size restarts the clock.
+        assert_eq!(
+            height_action(240, 320, Some((300, settled))),
+            HeightAction::Wait,
+            "a different pending height must not hand its settled clock over"
+        );
+
+        // Held, but not long enough.
+        assert_eq!(
+            height_action(240, 320, Some((320, mid_drag))),
+            HeightAction::Wait
+        );
+
+        // Held long enough — exactly on the boundary, and past it.
+        assert_eq!(
+            height_action(240, 320, Some((320, settled))),
+            HeightAction::Write
+        );
+        assert_eq!(
+            height_action(240, 320, Some((320, settled * 4))),
+            HeightAction::Write
+        );
     }
 
     // --- M7a2: the reset-credits line ---
