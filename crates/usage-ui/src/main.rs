@@ -61,11 +61,21 @@
 //! settings to on-at-the-defaults, and opens a taller window sized to the
 //! whole scenario, so all of it can be seen at once without real data — and,
 //! having no history path, it writes none of that day to disk.
+//!
+//! M15 gives the titlebar a second view. `usage // agents` switches the pane
+//! between the quota bars and a list of the Claude Code / Codex CLI sessions
+//! running on this machine, read by [`usage_core::agents`] — content-free by
+//! construction: a state dot, `project · branch · id8`, and an age. The scan
+//! runs only while that view is showing, on switch and every [`SCAN_EVERY`]
+//! after, so a window left on `usage` touches no session log at all.
+//! `--agents-demo` opens straight onto a synthetic fixture set covering every
+//! state, the `--pace-demo` idiom, and it never looks at a real root.
 
 use eframe::egui;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use usage_core::agents::{self, AgentSession, AgentState, SessionRoots};
 use usage_core::egress::Egress;
 use usage_core::history::{self, HistoryEntry};
 use usage_core::model::{ProviderId, ProviderSnapshot, QuotaWindow, ResetCredits};
@@ -145,6 +155,15 @@ const PLAIN_TITLEBAR_BG: egui::Color32 = egui::Color32::from_rgb(24, 27, 33);
 /// so it draws its own. ~24px tall.
 const TITLEBAR_HEIGHT: f32 = 24.0;
 
+/// The titlebar frame's left inset: the prompt does not start flush.
+const TITLEBAR_MARGIN_LEFT: i8 = 8;
+/// The titlebar frame's right inset — small, because the close button's own
+/// hover square already supplies the visual gap.
+///
+/// Named (M15) so the width budget the switcher has to live inside is derived
+/// from the same numbers the frame uses rather than copied beside them.
+const TITLEBAR_MARGIN_RIGHT: i8 = 2;
+
 /// Status-cursor blink period. Steps, not a fade — a terminal cursor is on or
 /// off.
 const CURSOR_BLINK_PERIOD: Duration = Duration::from_millis(1100);
@@ -165,6 +184,80 @@ const PER_MODEL_CAPTION: &str = "per-model";
 /// The freshness dot's glyph — the same `•` the pre-M14 footer's status dot
 /// used, kept so the mark a user already reads did not change, only its place.
 const FRESHNESS_DOT: &str = "•";
+
+// --------------------------------------------------------------------------
+// M15: the agents view.
+// --------------------------------------------------------------------------
+
+/// How often the agents list rescans **while its view is showing**.
+///
+/// Two seconds. A scan is a `read_dir` plus a `stat` per file plus two bounded
+/// reads of the handful inside the lookback, and the thing it reports — is that
+/// session still working — changes on the order of seconds. Slower would make
+/// the pane lag the terminal beside it; faster would spend I/O on a question
+/// whose answer has not moved.
+const SCAN_EVERY: Duration = Duration::from_secs(2);
+
+/// The view switcher's two words, and the separator between them.
+///
+/// `usage // agents` in the M7b terminal voice: the `//` is the same comment
+/// mark the provider headers wear, so the switcher reads as part of the same
+/// language rather than as a tab bar borrowed from somewhere else.
+const VIEW_LABEL_USAGE: &str = "usage";
+/// The other half of the switcher — see [`VIEW_LABEL_USAGE`].
+const VIEW_LABEL_AGENTS: &str = "agents";
+/// The switcher's separator, spaced so each word keeps its own click target.
+const VIEW_SEPARATOR: &str = " // ";
+
+/// What the agents view says when nothing has run today.
+///
+/// Names the lookback, because "nothing here" and "nothing here *in the last
+/// day*" are different claims and only the second one is true.
+const NO_AGENTS_LINE: &str = "// no agent sessions in the last 24h";
+
+/// The mark on a row the log flagged as a subagent (`isSidechain`).
+const SUBAGENT_PREFIX: &str = "· sub";
+
+/// Between the parts of a row's identity: `project · branch · id8`.
+const AGENT_ROW_SEPARATOR: &str = " · ";
+
+/// Which of the two panes the window is showing (M15).
+///
+/// Deliberately **not** persisted: a view is where you are looking right now,
+/// not a preference, and a window that reopened on `agents` would start
+/// scanning session logs before its owner asked to see them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum View {
+    /// The quota bars — everything through M14.
+    #[default]
+    Usage,
+    /// The local agent sessions.
+    Agents,
+}
+
+/// Whether this frame should rescan the session logs.
+///
+/// The **whole** scanning policy, as one pure decision, so the promise "no
+/// scanning at all while the usage view shows" is a thing a test can hold
+/// rather than a thing to be read off a call site. [`QuotaPaneApp::refresh_agents`]
+/// is the only caller and the only place [`agents::scan`] is named, and it asks
+/// this first.
+///
+/// `since_last` is `None` before the first scan of a viewing — which is what
+/// makes switching to the view scan immediately rather than up to
+/// [`SCAN_EVERY`] later.
+fn should_scan(view: View, agents_demo: bool, since_last: Option<Duration>) -> bool {
+    // The demo's rows are a fixture built at startup. Scanning would replace
+    // them with the reviewer's own sessions, which is precisely the thing a
+    // demo flag exists to avoid.
+    if view != View::Agents || agents_demo {
+        return false;
+    }
+    match since_last {
+        None => true,
+        Some(elapsed) => elapsed >= SCAN_EVERY,
+    }
+}
 
 /// The window's inner **width**, and it is fixed forever: every row in this
 /// file is laid out against 320px, and the layout harness asserts against it.
@@ -439,6 +532,15 @@ struct Args {
     /// [`Egress`], no poller thread. The pace markers only become visible after
     /// hours of real usage, so this is how they get reviewed and screenshotted.
     pace_demo: bool,
+    /// Open on the agents view with a synthetic session list instead of the
+    /// real one (M15).
+    ///
+    /// The same bargain `--pace-demo` strikes, for the same reason: the states
+    /// worth reviewing (a subagent, an idle session, one that finished hours
+    /// ago) cannot be conjured on demand, and the alternative to a fixture is
+    /// pointing a reviewer's window at his own transcripts. Nothing under this
+    /// flag reads a session root at all.
+    agents_demo: bool,
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
@@ -447,6 +549,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
     let mut no_tray = false;
     let mut theme_override: Option<Theme> = None;
     let mut pace_demo = false;
+    let mut agents_demo = false;
 
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
@@ -480,6 +583,10 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
             "--pace-demo" => {
                 pace_demo = true;
             }
+            // Synthetic agent sessions; no session root is read at all.
+            "--agents-demo" => {
+                agents_demo = true;
+            }
             other => return Err(format!("unrecognized argument: {other}")),
         }
     }
@@ -492,6 +599,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
         no_tray,
         theme_override,
         pace_demo,
+        agents_demo,
     })
 }
 
@@ -1158,10 +1266,76 @@ fn demo_panes(config: &Config) -> Vec<ProviderPane> {
     ]
 }
 
+/// The synthetic session list `--agents-demo` shows (M15).
+///
+/// Four rows, chosen so one look reviews the whole feature: every state, both
+/// providers, a subagent, a row with no branch, and an age in each of
+/// [`format_age`]'s two shapes.
+///
+/// - **Claude, working** — `QuotaPane · main`, seconds old: the green dot.
+/// - **Claude, working, subagent** — the same project, marked `· sub`, which is
+///   what a fan-out looks like from outside.
+/// - **Codex, idle** — a session open on a branch, quiet for a quarter of an
+///   hour: amber.
+/// - **Codex, recent** — finished hours ago, and carrying *no* branch, so the
+///   row proves the separator collapses rather than leaving a gap.
+///
+/// Ages are frozen at the moment the window opens, exactly as `--pace-demo`'s
+/// numbers are: the demo is a fixture, not a clock.
+fn demo_agents(now: SystemTime) -> Vec<AgentSession> {
+    let row = |provider, short_id: &str, project: &str, branch: Option<&str>, secs, is_subagent| {
+        let age = Duration::from_secs(secs);
+        AgentSession {
+            provider,
+            short_id: short_id.to_string(),
+            project: project.to_string(),
+            branch: branch.map(str::to_string),
+            state: agents::state_for_age(age).unwrap_or(AgentState::Recent),
+            last_write: now - age,
+            age,
+            is_subagent,
+        }
+    };
+    vec![
+        row(
+            ProviderId::ClaudeSubscription,
+            "a1b2c3d4",
+            "QuotaPane",
+            Some("main"),
+            12,
+            false,
+        ),
+        row(
+            ProviderId::ClaudeSubscription,
+            "7e5c91f0",
+            "QuotaPane",
+            Some("main"),
+            41,
+            true,
+        ),
+        row(
+            ProviderId::CodexSubscription,
+            "9f8e7d6c",
+            "payments-api",
+            Some("feat/idempotency"),
+            14 * 60,
+            false,
+        ),
+        row(
+            ProviderId::CodexSubscription,
+            "4b2a10de",
+            "notes",
+            None,
+            3 * 3600 + 600,
+            false,
+        ),
+    ]
+}
+
 /// The OS window title. Demo mode says so, since the pane is showing numbers
-/// that describe no real account.
-fn window_title(pace_demo: bool) -> &'static str {
-    if pace_demo {
+/// — or sessions — that describe nothing real.
+fn window_title(demo: bool) -> &'static str {
+    if demo {
         "QuotaPane — demo"
     } else {
         "QuotaPane"
@@ -1861,6 +2035,18 @@ struct QuotaPaneApp {
     disk_theme: Theme,
     /// True under `--pace-demo`, so the titlebar can say the pane is synthetic.
     pace_demo: bool,
+    /// Which pane the switcher is showing (M15). Runtime state, never saved.
+    view: View,
+    /// True under `--agents-demo`: [`agents`] is a fixture and no scan may run.
+    agents_demo: bool,
+    /// Where a scan looks. [`SessionRoots::default`] — nowhere — under
+    /// `--agents-demo`, so the demo cannot reach a real log even by mistake.
+    agent_roots: SessionRoots,
+    /// The most recent scan's rows, or the demo fixture.
+    agents: Vec<AgentSession>,
+    /// When the last scan ran. `None` means "not since this view was opened",
+    /// which is what makes a switch scan on the very next frame.
+    last_agent_scan: Option<Instant>,
     /// A height seen on an earlier frame that has not settled yet: the height
     /// itself and when it was first observed (M14). `None` means the window is
     /// sitting at the height already stored.
@@ -1889,6 +2075,37 @@ impl QuotaPaneApp {
             on_disk.theme = self.disk_theme;
         }
         config::save(&on_disk);
+    }
+
+    /// Rescan the local session logs, if this frame is one that may (M15).
+    ///
+    /// **The only place in this crate that names [`agents::scan`]**, and the
+    /// gate is [`should_scan`], which answers `false` for every frame the usage
+    /// view is showing and for every frame at all under `--agents-demo`. A
+    /// window sitting on `usage` therefore does not read a session log, does
+    /// not `read_dir` a session root, and does not so much as `stat` one.
+    fn refresh_agents(&mut self) {
+        if !should_scan(
+            self.view,
+            self.agents_demo,
+            self.last_agent_scan.map(|at| at.elapsed()),
+        ) {
+            return;
+        }
+        self.last_agent_scan = Some(Instant::now());
+        self.agents = agents::scan(&self.agent_roots, SystemTime::now());
+    }
+
+    /// Switch views, and arm the next frame to scan when the destination is the
+    /// agents pane.
+    fn switch_to(&mut self, view: View) {
+        if self.view == view {
+            return;
+        }
+        self.view = view;
+        // Clearing the stamp is what "a scan on switch" means: the list a user
+        // is shown is gathered after they ask for it, never before.
+        self.last_agent_scan = None;
     }
 
     /// Notice that the user has resized the window, and remember the new height
@@ -2019,9 +2236,15 @@ impl QuotaPaneApp {
     fn render_titlebar(&mut self, root_ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut minimize = false;
         let mut close = false;
+        let mut switch_to = None;
 
         let theme = self.config.theme;
-        let pace_demo = self.pace_demo;
+        // Either demo marks the prompt: M13's reason for the marker was that a
+        // decoration-less window shows its OS title only in the taskbar, so a
+        // pane of invented data has to say so where the data is. A pane of
+        // invented *sessions* is the same claim.
+        let demo = self.pace_demo || self.agents_demo;
+        let view = self.view;
 
         // Status cursor: computed before the panel closure so the pane borrow
         // ends before the closure takes `&mut self` state. Plain has no cursor
@@ -2037,8 +2260,8 @@ impl QuotaPaneApp {
         let frame = egui::Frame::new()
             .fill(titlebar_fill)
             .inner_margin(egui::Margin {
-                left: 8,
-                right: 2,
+                left: TITLEBAR_MARGIN_LEFT,
+                right: TITLEBAR_MARGIN_RIGHT,
                 top: 0,
                 bottom: 0,
             });
@@ -2071,10 +2294,14 @@ impl QuotaPaneApp {
                         minimize = true;
                     }
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        render_prompt(ui, theme, pace_demo);
+                        render_prompt(ui, theme, demo);
                         if theme == Theme::CipherPine {
                             render_cursor(ui, cursor_visible);
                         }
+                        // Drawn after the strip's drag handle, so its labels
+                        // keep their own clicks (the same ordering the buttons
+                        // above rely on).
+                        switch_to = render_view_switcher(ui, theme, view);
                     });
                 });
             });
@@ -2097,6 +2324,9 @@ impl QuotaPaneApp {
             );
         }
 
+        if let Some(view) = switch_to {
+            self.switch_to(view);
+        }
         if minimize {
             self.hide_window(ctx);
         }
@@ -2244,6 +2474,13 @@ impl eframe::App for QuotaPaneApp {
             }
         }
 
+        // The agents list, and only while its view is showing — see
+        // [`Self::refresh_agents`] and [`should_scan`].
+        self.refresh_agents();
+        if self.view == View::Agents && !self.agents_demo {
+            ctx.request_repaint_after(SCAN_EVERY);
+        }
+
         // Keep polling for updates (and tray events) about once a second, even
         // when the window is hidden.
         ctx.request_repaint_after(Duration::from_secs(1));
@@ -2313,12 +2550,16 @@ impl eframe::App for QuotaPaneApp {
             // touch-capable Windows machine that would turn a drag on the pane
             // background into a scroll, stealing the only gesture that moves
             // this decoration-less window. Wheel and scroll bar stay enabled.
+            let view = self.view;
             content_height = egui::ScrollArea::vertical()
                 .scroll_source(egui::containers::scroll_area::ScrollSource {
                     drag: egui::containers::scroll_area::DragScroll::Never,
                     ..Default::default()
                 })
-                .show(ui, |ui| render_panes(ui, &mut self.panes, theme))
+                .show(ui, |ui| match view {
+                    View::Usage => render_panes(ui, &mut self.panes, theme),
+                    View::Agents => render_agents(ui, &self.agents, theme),
+                })
                 .content_size
                 .y;
         });
@@ -2345,15 +2586,15 @@ impl eframe::App for QuotaPaneApp {
 /// egui colours a `RichText` as a unit, and the caret is the only cardinal
 /// part. The leading space lives in the second label so the caret keeps tight
 /// bounds — which matters once the status cursor sits after the name.
-/// Under `--pace-demo` the prompt carries a `demo` marker in AMBER, in both
+/// Under either demo flag the prompt carries a `demo` marker in AMBER, in both
 /// themes: this window is decoration-less, so its OS title shows only in the
-/// taskbar, and a pane full of invented numbers has to say so where the numbers
-/// are.
-fn render_prompt(ui: &mut egui::Ui, theme: Theme, pace_demo: bool) {
+/// taskbar, and a pane full of invented numbers — or invented sessions — has
+/// to say so where they are.
+fn render_prompt(ui: &mut egui::Ui, theme: Theme, demo: bool) {
     if theme == Theme::Plain {
         // The pre-M7b titlebar: just the product name.
         ui.label(egui::RichText::new("QuotaPane").strong());
-        if pace_demo {
+        if demo {
             ui.label(egui::RichText::new("demo").small().color(AMBER));
         }
         return;
@@ -2361,7 +2602,7 @@ fn render_prompt(ui: &mut egui::Ui, theme: Theme, pace_demo: bool) {
     ui.spacing_mut().item_spacing.x = 0.0;
     ui.label(egui::RichText::new(">").color(CARDINAL).strong());
     ui.label(egui::RichText::new(" quotapane").color(TEXT));
-    if pace_demo {
+    if demo {
         ui.label(egui::RichText::new(" demo").color(AMBER));
     }
 }
@@ -2505,6 +2746,181 @@ fn render_pane(ui: &mut egui::Ui, pane: &mut ProviderPane, theme: Theme) {
             if let Some(message) = &pane.latest_failure {
                 ui.colored_label(CARDINAL, message);
             }
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// M15: the agents view.
+// --------------------------------------------------------------------------
+
+/// The titlebar's view switcher: `usage // agents`, the current view in [`TEXT`]
+/// and the other in [`TEXT_FAINT`]. Returns the view the user clicked, if any.
+///
+/// Two separately-sensing labels rather than one string, for the reason
+/// [`render_prompt`] uses two: egui colours a `RichText` as a unit, and here the
+/// two halves also need their own hit targets. The separator between them
+/// senses nothing at all, so the gap belongs to the titlebar's drag handle.
+///
+/// **Click, never drag.** `selectable(false)` is doing real work here, not
+/// tidying: a selectable label — egui's default, and what every other label in
+/// this window is — ORs `Sense::click_and_drag` into whatever it was given, so
+/// a press-and-drag starting on the word would be swallowed as a text
+/// selection. Turned off, the labels sense [`egui::Sense::click`] and nothing
+/// else, and a drag falls through to the whole-strip handle installed before
+/// them and moves the window — the interaction a decoration-less window cannot
+/// afford to lose to a tab bar.
+fn render_view_switcher(ui: &mut egui::Ui, theme: Theme, current: View) -> Option<View> {
+    let mut clicked = None;
+    ui.spacing_mut().item_spacing.x = 0.0;
+
+    // Read off the style once, before anything borrows `ui` mutably.
+    let (here, elsewhere) = match theme {
+        Theme::CipherPine => (TEXT, TEXT_FAINT),
+        Theme::Plain => (ui.visuals().text_color(), ui.visuals().weak_text_color()),
+    };
+    let ink = |view: View| if view == current { here } else { elsewhere };
+
+    for (view, label, leading) in [
+        (View::Usage, VIEW_LABEL_USAGE, true),
+        (View::Agents, VIEW_LABEL_AGENTS, false),
+    ] {
+        if leading {
+            // One space of breathing room after the prompt's cursor, so the
+            // switcher is not read as part of the command line.
+            ui.label(egui::RichText::new(" ").small());
+        } else {
+            ui.label(egui::RichText::new(VIEW_SEPARATOR).small().color(HAIRLINE));
+        }
+        let response = ui.add(
+            egui::Label::new(egui::RichText::new(label).small().color(ink(view)))
+                .selectable(false)
+                .sense(egui::Sense::click()),
+        );
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked() {
+            clicked = Some(view);
+        }
+    }
+    clicked
+}
+
+/// The dot beside an agent row, in the M14 freshness palette's own terms.
+///
+/// Deliberately rhymed rather than merely reused: green means "this is live",
+/// amber "this has gone quiet", faint "this is history" in both views, so a
+/// reader who has learned the usage pane's dot has already learned this one.
+/// Shared by both themes for the reason [`freshness_color`] is — it reports a
+/// fact, not a look.
+fn agent_state_color(state: AgentState) -> egui::Color32 {
+    match state {
+        AgentState::Working => OPER_GREEN,
+        AgentState::Idle => AMBER,
+        AgentState::Recent => TEXT_FAINT,
+    }
+}
+
+/// A row's identity: `project · branch · id8`, with any part the scan could not
+/// name simply absent rather than left as an empty gap.
+fn agent_identity(session: &AgentSession) -> String {
+    let mut parts: Vec<&str> = Vec::with_capacity(3);
+    if !session.project.is_empty() {
+        parts.push(&session.project);
+    }
+    if let Some(branch) = &session.branch {
+        parts.push(branch);
+    }
+    if !session.short_id.is_empty() {
+        parts.push(&session.short_id);
+    }
+    parts.join(AGENT_ROW_SEPARATOR)
+}
+
+/// One session: state dot, identity, and a right-aligned age.
+///
+/// The age is placed first under a right-to-left layout — the titlebar and
+/// provider-header idiom — so the identity gets whatever width is left and
+/// elides into it. Elision matters here in a way it does not elsewhere in this
+/// window: a branch name is user-supplied text of no bounded length, and the
+/// alternative to eliding it is a row that overflows a 320px pane.
+fn render_agent_row(ui: &mut egui::Ui, session: &AgentSession, theme: Theme) {
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let age_ink = match theme {
+                Theme::CipherPine => TEXT_DIM,
+                Theme::Plain => ui.visuals().weak_text_color(),
+            };
+            ui.label(
+                egui::RichText::new(format_age(session.age.as_secs()))
+                    .small()
+                    .color(age_ink),
+            );
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(
+                    egui::RichText::new(FRESHNESS_DOT)
+                        .small()
+                        .color(agent_state_color(session.state)),
+                );
+                if session.is_subagent {
+                    ui.label(
+                        egui::RichText::new(SUBAGENT_PREFIX)
+                            .small()
+                            .color(TEXT_FAINT),
+                    );
+                }
+                let identity_ink = match theme {
+                    Theme::CipherPine => TEXT,
+                    Theme::Plain => ui.visuals().text_color(),
+                };
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(agent_identity(session))
+                            .small()
+                            .color(identity_ink),
+                    )
+                    .truncate(),
+                );
+            });
+        });
+    });
+}
+
+/// The whole agents pane: each provider's sessions under the header style the
+/// usage pane already uses, or one quiet line when nothing has run today.
+///
+/// A provider with no sessions gets no header at all. Two headers over two
+/// empty lists would spend a third of a 240px window saying nothing twice.
+fn render_agents(ui: &mut egui::Ui, sessions: &[AgentSession], theme: Theme) {
+    if sessions.is_empty() {
+        let ink = match theme {
+            Theme::CipherPine => TEXT_FAINT,
+            Theme::Plain => ui.visuals().weak_text_color(),
+        };
+        ui.label(egui::RichText::new(NO_AGENTS_LINE).small().color(ink));
+        return;
+    }
+
+    let mut drawn = 0;
+    for id in [
+        ProviderId::ClaudeSubscription,
+        ProviderId::CodexSubscription,
+    ] {
+        let rows: Vec<&AgentSession> = sessions.iter().filter(|s| s.provider == id).collect();
+        if rows.is_empty() {
+            continue;
+        }
+        if drawn > 0 {
+            ui.separator();
+        }
+        drawn += 1;
+        // No freshness dot: that dot reports a *poll's* age, and this view
+        // polls nothing. Each row carries its own age instead.
+        render_provider_header(ui, id, theme, None);
+        for session in rows {
+            render_agent_row(ui, session, theme);
         }
     }
 }
@@ -3241,7 +3657,7 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             eprintln!(
                 "usage: quotapane [--client-version <VER>] [--codex-user-agent <UA>] [--no-tray]\n\
-                 \x20                [--plain | --themed] [--pace-demo]"
+                 \x20                [--plain | --themed] [--pace-demo] [--agents-demo]"
             );
             return ExitCode::from(2);
         }
@@ -3259,6 +3675,11 @@ fn main() -> ExitCode {
             "note: --pace-demo — the window shows a fixed synthetic scenario. No polling, no credentials read, no network requests."
         );
     }
+    if args.agents_demo {
+        eprintln!(
+            "note: --agents-demo — the agents view shows a fixed synthetic session list. No session log is read."
+        );
+    }
 
     // `--no-tray` disables the tray; on platforms without one (Linux) the flag
     // is accepted and ignored. Reading it via `cfg!` keeps the field live on
@@ -3266,6 +3687,23 @@ fn main() -> ExitCode {
     let tray_active = !args.no_tray && cfg!(any(target_os = "windows", target_os = "macos"));
     let theme_override = args.theme_override;
     let pace_demo = args.pace_demo;
+    let agents_demo = args.agents_demo;
+
+    // The demo opens *on* the agents view — a fixture nobody is looking at
+    // reviews nothing — while every ordinary launch opens on usage.
+    let view = if agents_demo {
+        View::Agents
+    } else {
+        View::default()
+    };
+    // A fixture built once, at launch; and under the flag the roots are
+    // nowhere, so no code path can reach a real session log even if the scan
+    // gate were wrong.
+    let (agent_roots, agents) = if agents_demo {
+        (SessionRoots::default(), demo_agents(SystemTime::now()))
+    } else {
+        (SessionRoots::from_env(), Vec::new())
+    };
 
     // One pane per provider. A missing home directory becomes a per-pane
     // startup error; a missing credential file surfaces later as a quiet
@@ -3347,7 +3785,7 @@ fn main() -> ExitCode {
     };
 
     let result = eframe::run_native(
-        window_title(pace_demo),
+        window_title(pace_demo || agents_demo),
         native_options,
         Box::new(move |_cc| {
             // `config` was resolved above — the window cannot be the one to read
@@ -3381,6 +3819,11 @@ fn main() -> ExitCode {
                 theme_overridden,
                 disk_theme,
                 pace_demo,
+                view,
+                agents_demo,
+                agent_roots,
+                agents,
+                last_agent_scan: None,
                 pending_height: None,
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
                 tray,
@@ -5129,21 +5572,23 @@ mod tests {
         let _warm = ctx.run_ui(input.clone(), &mut add_contents);
         let output = ctx.run_ui(input, &mut add_contents);
 
-        fn flatten(shape: egui::Shape, out: &mut Vec<egui::Shape>) {
-            match shape {
-                egui::Shape::Vec(shapes) => {
-                    for shape in shapes {
-                        flatten(shape, out);
-                    }
-                }
-                other => out.push(other),
-            }
-        }
         let mut flat = Vec::new();
         for clipped in output.shapes {
-            flatten(clipped.shape, &mut flat);
+            flatten_shape(clipped.shape, &mut flat);
         }
         flat
+    }
+
+    /// egui nests shapes; every assertion here wants them flat.
+    fn flatten_shape(shape: egui::Shape, out: &mut Vec<egui::Shape>) {
+        match shape {
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    flatten_shape(shape, out);
+                }
+            }
+            other => out.push(other),
+        }
     }
 
     #[test]
@@ -6983,6 +7428,615 @@ mod tests {
         // guards; 12/255 is the accepted value.
         assert_eq!(GRID_ALPHA, 6);
         assert_eq!(GRID_PITCH, 64.0);
+    }
+    // --- M15: the agents view ---
+
+    /// Planted in every session-log fixture below, in exactly the fields a
+    /// conversation occupies. The same sentinel `usage_core::agents` uses.
+    const AGENT_SENTINEL: &str = "SENTINEL-DO-NOT-SURFACE";
+
+    /// A synthetic agent session, ages and states supplied by the caller.
+    fn agent_row(
+        provider: ProviderId,
+        short_id: &str,
+        project: &str,
+        branch: Option<&str>,
+        age: Duration,
+        is_subagent: bool,
+    ) -> AgentSession {
+        AgentSession {
+            provider,
+            short_id: short_id.to_string(),
+            project: project.to_string(),
+            branch: branch.map(str::to_string),
+            state: agents::state_for_age(age).expect("fixture must be inside the lookback"),
+            last_write: SystemTime::now() - age,
+            age,
+            is_subagent,
+        }
+    }
+
+    /// Every colour the row dots were painted in, in paint order.
+    fn agent_dot_colors(theme: Theme, sessions: &[AgentSession]) -> Vec<egui::Color32> {
+        painted_shapes_themed(theme, |ui| render_agents(ui, sessions, theme))
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == FRESHNESS_DOT => {
+                    Some(text.galley.job.sections[0].format.color)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What a pointer gesture aimed at a switcher label actually did.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Gesture {
+        /// The view the switcher reported, if any.
+        switched: Option<View>,
+        /// Whether the whole-strip drag handle *behind* the switcher began a
+        /// window drag — the titlebar's real arrangement, replicated here.
+        moved_window: bool,
+    }
+
+    /// Drive a real pointer gesture at a switcher label, through the titlebar's
+    /// own ordering: the strip's drag handle first, the switcher on top of it.
+    ///
+    /// The label's position is discovered from the shapes the switcher actually
+    /// painted, so this clicks where a user would rather than at a coordinate
+    /// written down here and left to rot.
+    fn gesture_on_switcher(current: View, label: &str, drag: bool) -> Gesture {
+        let ctx = egui::Context::default();
+        install_theme(&ctx, Theme::CipherPine);
+        let input = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(WINDOW_WIDTH, TITLEBAR_HEIGHT),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut clicked = Gesture::default();
+        let run = |raw: egui::RawInput, clicked: &mut Gesture| {
+            let out = ctx.run_ui(raw, |ui| {
+                // Exactly `render_titlebar`'s order and sense.
+                let strip = ui.interact(
+                    ui.max_rect(),
+                    ui.id().with("titlebar_drag"),
+                    egui::Sense::click_and_drag(),
+                );
+                if strip.drag_started() {
+                    clicked.moved_window = true;
+                }
+                ui.horizontal(|ui| {
+                    if let Some(view) = render_view_switcher(ui, Theme::CipherPine, current) {
+                        clicked.switched = Some(view);
+                    }
+                });
+            });
+            let mut flat = Vec::new();
+            for shape in out.shapes {
+                flatten_shape(shape.shape, &mut flat);
+            }
+            flat
+        };
+
+        // Two quiet frames: the first warms the font atlas, the second settles
+        // the widget rects egui resolves the next frame's pointer against.
+        run(input(vec![]), &mut clicked);
+        let shapes = run(input(vec![]), &mut clicked);
+
+        let target = shapes
+            .into_iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the switcher never painted {label:?}"));
+
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        if drag {
+            // Press on the label, travel, release far away: a window drag that
+            // happened to start on a word, which must not be read as a click.
+            let away = target + egui::vec2(60.0, 0.0);
+            run(
+                input(vec![
+                    egui::Event::PointerMoved(target),
+                    button(target, true),
+                ]),
+                &mut clicked,
+            );
+            run(input(vec![egui::Event::PointerMoved(away)]), &mut clicked);
+            run(input(vec![button(away, false)]), &mut clicked);
+        } else {
+            run(input(vec![egui::Event::PointerMoved(target)]), &mut clicked);
+            run(input(vec![button(target, true)]), &mut clicked);
+            run(input(vec![button(target, false)]), &mut clicked);
+        }
+        run(input(vec![]), &mut clicked);
+        clicked
+    }
+
+    #[test]
+    fn agents_demo_flag_defaults_off_and_is_recognized_anywhere() {
+        assert!(!parse_args(args(&[])).unwrap().agents_demo);
+        assert!(parse_args(args(&["--agents-demo"])).unwrap().agents_demo);
+        let parsed = parse_args(args(&["--plain", "--agents-demo", "--no-tray"])).unwrap();
+        assert!(parsed.agents_demo);
+        assert!(parsed.no_tray);
+        // The two demos are independent flags, not one mode.
+        assert!(!parse_args(args(&["--agents-demo"])).unwrap().pace_demo);
+        assert!(!parse_args(args(&["--pace-demo"])).unwrap().agents_demo);
+    }
+
+    #[test]
+    fn clicking_a_switcher_label_switches_the_view() {
+        for (current, label, expected) in [
+            (View::Usage, VIEW_LABEL_AGENTS, View::Agents),
+            (View::Agents, VIEW_LABEL_USAGE, View::Usage),
+        ] {
+            let gesture = gesture_on_switcher(current, label, false);
+            assert_eq!(
+                gesture.switched,
+                Some(expected),
+                "clicking {label:?} from {current:?} must switch"
+            );
+            assert!(
+                !gesture.moved_window,
+                "a click on {label:?} also started a window drag"
+            );
+        }
+    }
+
+    #[test]
+    fn dragging_from_a_label_moves_the_window_and_switches_nothing() {
+        // The gesture that moves this decoration-less window starts wherever
+        // the pointer happens to be — including on a switcher label. A drag is
+        // not a click, and the label must not swallow it either: `selectable`
+        // is off precisely so the drag reaches the strip behind it.
+        for (current, label) in [
+            (View::Usage, VIEW_LABEL_AGENTS),
+            (View::Agents, VIEW_LABEL_USAGE),
+        ] {
+            let gesture = gesture_on_switcher(current, label, true);
+            assert_eq!(
+                gesture.switched, None,
+                "a drag from {label:?} switched the view"
+            );
+            assert!(
+                gesture.moved_window,
+                "a drag from {label:?} was swallowed instead of moving the window"
+            );
+        }
+    }
+
+    #[test]
+    fn the_switcher_is_drawn_after_the_strips_drag_handle() {
+        // Ordering is the whole reason a label keeps its click: the strip's
+        // whole-rect handle is installed first, so every widget drawn after it
+        // sits on top. The buttons already depend on this; the switcher now
+        // does too, and nothing else in the file states it.
+        const SRC: &str = include_str!("main.rs");
+        let titlebar = SRC
+            .split("fn render_titlebar")
+            .nth(1)
+            .expect("render_titlebar not found");
+        let handle = titlebar
+            .find("titlebar_drag")
+            .expect("the strip's drag handle is gone");
+        let switcher = titlebar
+            .find("render_view_switcher(ui")
+            .expect("the switcher is not drawn in the titlebar");
+        assert!(
+            handle < switcher,
+            "the switcher must be drawn after the drag handle"
+        );
+    }
+
+    #[test]
+    fn the_switcher_reads_current_in_text_and_the_other_faint() {
+        for (current, lit, dim) in [
+            (View::Usage, VIEW_LABEL_USAGE, VIEW_LABEL_AGENTS),
+            (View::Agents, VIEW_LABEL_AGENTS, VIEW_LABEL_USAGE),
+        ] {
+            let colors: Vec<(String, egui::Color32)> = painted_shapes(|ui| {
+                let _ = render_view_switcher(ui, Theme::CipherPine, current);
+            })
+            .into_iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) => Some((
+                    text.galley.text().to_string(),
+                    text.galley.job.sections[0].format.color,
+                )),
+                _ => None,
+            })
+            .collect();
+            let of = |label: &str| {
+                colors
+                    .iter()
+                    .find(|(text, _)| text == label)
+                    .unwrap_or_else(|| panic!("{label} not painted: {colors:?}"))
+                    .1
+            };
+            assert_eq!(of(lit), TEXT, "{current:?}: the current view reads bright");
+            assert_eq!(of(dim), TEXT_FAINT, "{current:?}: the other reads faint");
+        }
+    }
+
+    #[test]
+    fn no_scan_is_reachable_while_the_usage_view_shows() {
+        // The whole policy, at every input it can be asked about.
+        for demo in [false, true] {
+            for since in [
+                None,
+                Some(Duration::ZERO),
+                Some(SCAN_EVERY),
+                Some(SCAN_EVERY * 1000),
+            ] {
+                assert!(
+                    !should_scan(View::Usage, demo, since),
+                    "usage view scanned (demo={demo}, since={since:?})"
+                );
+            }
+        }
+        // Switching in scans at once; after that, on the cadence.
+        assert!(should_scan(View::Agents, false, None));
+        assert!(!should_scan(View::Agents, false, Some(Duration::ZERO)));
+        assert!(!should_scan(
+            View::Agents,
+            false,
+            Some(SCAN_EVERY - Duration::from_millis(1))
+        ));
+        assert!(should_scan(View::Agents, false, Some(SCAN_EVERY)));
+        // The demo's rows are a fixture; it never scans at all.
+        for since in [None, Some(SCAN_EVERY * 1000)] {
+            assert!(!should_scan(View::Agents, true, since));
+        }
+    }
+
+    #[test]
+    fn the_scanner_has_exactly_one_call_site_and_it_is_the_guarded_one() {
+        // `should_scan` is only a promise if nothing routes around it. The one
+        // call site is `refresh_agents`, and it asks first.
+        const SRC: &str = include_str!("main.rs");
+        let code = &SRC[..SRC
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("test module not found")];
+        let calls: Vec<&str> = code
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.contains("agents::scan("))
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "agents::scan must have exactly one call site: {calls:?}"
+        );
+
+        let body = code
+            .split("fn refresh_agents")
+            .nth(1)
+            .expect("refresh_agents not found");
+        let body = &body[..body.find("\n    }").expect("unterminated refresh_agents")];
+        assert!(
+            body.contains("if !should_scan("),
+            "refresh_agents no longer asks should_scan first"
+        );
+        assert!(
+            body.contains("agents::scan("),
+            "the call site moved out of refresh_agents"
+        );
+    }
+
+    #[test]
+    fn the_agents_pane_never_renders_conversation_content() {
+        // The real scanner over a real fixture tree, drawn through the real
+        // render path — the only arrangement that can prove the pane, rather
+        // than the parser, keeps invariant 8.
+        let mut root = std::env::temp_dir();
+        root.push(format!("quotapane-ui-agents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let claude_dir = root.join("claude/projects/-home-j-dev-QuotaPane");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("a1b2c3d4-e5f6.jsonl"),
+            format!(
+                concat!(
+                    r#"{{"isSidechain":false,"cwd":"/home/j/dev/QuotaPane","sessionId":"a1b2c3d4-e5f6",
+"#,
+                    r#""gitBranch":"main","type":"user","timestamp":"2026-08-06T12:00:00.000Z",
+"#,
+                    r#""message":{{"role":"user","content":"{sentinel}"}}}}
+"#,
+                ),
+                sentinel = AGENT_SENTINEL
+            )
+            .replace('\n', ""),
+        )
+        .unwrap();
+
+        let codex_dir = root.join("codex/sessions/2026/08/06");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join("rollout-2026-08-06T12-00-00-9f8e7d6c.jsonl"),
+            format!(
+                concat!(
+                    r#"{{"timestamp":"2026-08-06T12:00:00.000Z","type":"session_meta","#,
+                    r#""payload":{{"id":"9f8e7d6c-1234","cwd":"/home/j/dev/other","#,
+                    r#""git_branch":"feat/x","instructions":"{sentinel}"}}}}"#,
+                ),
+                sentinel = AGENT_SENTINEL
+            ),
+        )
+        .unwrap();
+
+        let roots = SessionRoots {
+            claude: Some(root.join("claude")),
+            codex: Some(root.join("codex")),
+        };
+        let sessions = agents::scan(&roots, SystemTime::now());
+        assert_eq!(sessions.len(), 2, "fixture tree did not scan: {sessions:?}");
+
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let painted = painted_text(theme, |ui| render_agents(ui, &sessions, theme));
+            assert!(
+                painted.iter().all(|text| !text.contains(AGENT_SENTINEL)),
+                "{theme:?} rendered conversation content: {painted:?}"
+            );
+            // ...and the row it *did* draw is the metadata one.
+            assert!(
+                painted.iter().any(|text| text.contains("QuotaPane")),
+                "{theme:?} drew no identity at all: {painted:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_agents_demo_shows_every_state_both_providers_and_a_subagent() {
+        let sessions = demo_agents(SystemTime::now());
+        for state in [AgentState::Working, AgentState::Idle, AgentState::Recent] {
+            assert!(
+                sessions.iter().any(|s| s.state == state),
+                "the demo is missing {state:?}: {sessions:?}"
+            );
+        }
+        for provider in [
+            ProviderId::ClaudeSubscription,
+            ProviderId::CodexSubscription,
+        ] {
+            assert!(
+                sessions.iter().any(|s| s.provider == provider),
+                "the demo is missing {provider:?}"
+            );
+        }
+        assert!(sessions.iter().any(|s| s.is_subagent), "no subagent row");
+        assert!(sessions.iter().any(|s| s.branch.is_none()), "no bare row");
+
+        // ...and all of it reaches the screen.
+        let painted = painted_text(Theme::CipherPine, |ui| {
+            render_agents(ui, &sessions, Theme::CipherPine)
+        });
+        assert!(
+            painted.iter().any(|text| text == SUBAGENT_PREFIX),
+            "the subagent mark was not painted: {painted:?}"
+        );
+        let dots = agent_dot_colors(Theme::CipherPine, &sessions);
+        for expected in [OPER_GREEN, AMBER, TEXT_FAINT] {
+            assert!(
+                dots.contains(&expected),
+                "no {expected:?} dot among {dots:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_row_dot_carries_the_state_and_nothing_else_does() {
+        for (age, expected) in [
+            (Duration::ZERO, OPER_GREEN),
+            (agents::ACTIVE_WITHIN, OPER_GREEN),
+            (agents::ACTIVE_WITHIN + Duration::from_secs(1), AMBER),
+            (agents::IDLE_WITHIN, AMBER),
+            (agents::IDLE_WITHIN + Duration::from_secs(1), TEXT_FAINT),
+            (agents::LOOKBACK, TEXT_FAINT),
+        ] {
+            let sessions = vec![agent_row(
+                ProviderId::ClaudeSubscription,
+                "a1b2c3d4",
+                "QuotaPane",
+                Some("main"),
+                age,
+                false,
+            )];
+            // The same dot in both themes, exactly as M14's freshness dot is.
+            for theme in [Theme::CipherPine, Theme::Plain] {
+                assert_eq!(
+                    agent_dot_colors(theme, &sessions),
+                    vec![expected],
+                    "{theme:?} at {age:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_scan_says_so_and_draws_no_provider_headers() {
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let painted = painted_text(theme, |ui| render_agents(ui, &[], theme));
+            assert!(
+                painted.iter().any(|text| text == NO_AGENTS_LINE),
+                "{theme:?} printed no empty state: {painted:?}"
+            );
+            assert!(
+                !painted.iter().any(|text| text.contains("CLAUDE")),
+                "{theme:?} drew a header over an empty list: {painted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_provider_with_no_sessions_gets_no_header() {
+        let sessions = vec![agent_row(
+            ProviderId::CodexSubscription,
+            "9f8e7d6c",
+            "api",
+            None,
+            Duration::from_secs(30),
+            false,
+        )];
+        let painted = painted_text(Theme::CipherPine, |ui| {
+            render_agents(ui, &sessions, Theme::CipherPine)
+        });
+        assert!(painted.iter().any(|text| text == "CODEX"), "{painted:?}");
+        assert!(!painted.iter().any(|text| text == "CLAUDE"), "{painted:?}");
+        assert!(
+            !painted.iter().any(|text| text == NO_AGENTS_LINE),
+            "a list with a row in it is not empty: {painted:?}"
+        );
+    }
+
+    #[test]
+    fn a_row_omits_the_branch_it_does_not_have() {
+        let with = agent_row(
+            ProviderId::ClaudeSubscription,
+            "a1b2c3d4",
+            "QuotaPane",
+            Some("main"),
+            Duration::from_secs(5),
+            false,
+        );
+        assert_eq!(agent_identity(&with), "QuotaPane · main · a1b2c3d4");
+        let without = AgentSession {
+            branch: None,
+            ..with.clone()
+        };
+        assert_eq!(
+            agent_identity(&without),
+            "QuotaPane · a1b2c3d4",
+            "the separator must collapse, not leave a gap"
+        );
+        // A scan that could name nothing but the file still says something.
+        let bare = AgentSession {
+            project: String::new(),
+            branch: None,
+            ..with
+        };
+        assert_eq!(agent_identity(&bare), "a1b2c3d4");
+    }
+
+    #[test]
+    fn an_agent_row_fits_the_window_for_any_branch_name() {
+        // A branch name is user-supplied text of no bounded length. The row
+        // elides rather than overflows — this is the assertion that keeps it
+        // that way.
+        for branch in [
+            Some("main"),
+            Some("feature/the-longest-branch-name-anyone-has-ever-typed-into-a-terminal"),
+            None,
+        ] {
+            let sessions = vec![agent_row(
+                ProviderId::ClaudeSubscription,
+                "a1b2c3d4",
+                "a-project-with-a-long-directory-name",
+                branch,
+                Duration::from_secs(3_000),
+                true,
+            )];
+            for theme in [Theme::CipherPine, Theme::Plain] {
+                let laid = lay_out_themed(theme, |ui| render_agents(ui, &sessions, theme));
+                assert!(
+                    laid.width <= laid.available_width,
+                    "{theme:?} row with {branch:?} wanted {}px inside {}px",
+                    laid.width,
+                    laid.available_width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_agents_demo_fits_the_window_it_opens() {
+        // `--agents-demo` opens the ordinary window, so the fixture has to fit
+        // the ordinary height — no demo-sized viewport, no scroll bar.
+        let sessions = demo_agents(SystemTime::now());
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let laid = lay_out_themed(theme, |ui| render_agents(ui, &sessions, theme));
+            let needed = snapped_height(laid.height, laid.panel_chrome_height);
+            assert!(
+                needed <= WINDOW_HEIGHT,
+                "{theme:?} demo needs {needed}px inside the {WINDOW_HEIGHT}px window"
+            );
+            assert!(
+                laid.width <= laid.available_width,
+                "{theme:?} demo wanted {}px inside {}px",
+                laid.width,
+                laid.available_width
+            );
+        }
+    }
+
+    #[test]
+    fn the_agents_demo_marks_itself_as_a_demo() {
+        // M13's rule, applied to invented sessions: a decoration-less window
+        // shows its OS title only in the taskbar, so the pane has to say so
+        // where the fiction is.
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let painted = painted_text(theme, |ui| render_prompt(ui, theme, true));
+            assert!(
+                painted.iter().any(|text| text.trim() == "demo"),
+                "{theme:?} drew no demo marker: {painted:?}"
+            );
+        }
+        // ...and `--agents-demo` is one of the two flags that reaches it.
+        const SRC: &str = include_str!("main.rs");
+        let code = &SRC[..SRC
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("test module not found")];
+        assert!(
+            code.contains("let demo = self.pace_demo || self.agents_demo;"),
+            "the titlebar marker no longer covers --agents-demo"
+        );
+        assert!(
+            code.contains("window_title(pace_demo || agents_demo)"),
+            "the OS title no longer covers --agents-demo"
+        );
+    }
+
+    #[test]
+    fn the_switcher_fits_the_titlebar_beside_the_prompt_and_the_buttons() {
+        // The budget, derived rather than guessed: the strip's width less the
+        // two 24px buttons and the frame's own insets.
+        let budget = WINDOW_WIDTH
+            - 2.0 * TITLEBAR_HEIGHT
+            - f32::from(TITLEBAR_MARGIN_LEFT)
+            - f32::from(TITLEBAR_MARGIN_RIGHT);
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            for view in [View::Usage, View::Agents] {
+                let laid = lay_out_themed(theme, |ui| {
+                    ui.horizontal(|ui| {
+                        render_prompt(ui, theme, true);
+                        if theme == Theme::CipherPine {
+                            render_cursor(ui, true);
+                        }
+                        let _ = render_view_switcher(ui, theme, view);
+                    });
+                });
+                assert!(
+                    laid.width <= budget,
+                    "{theme:?}/{view:?}: titlebar content wanted {}px of {budget}px",
+                    laid.width
+                );
+            }
+        }
     }
 }
 

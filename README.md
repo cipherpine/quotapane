@@ -24,6 +24,7 @@ The entire value proposition is a **small, auditable trust boundary**. Credentia
 - **System tray** — an icon rendering current usage, with a tooltip and a Show/Hide/Quit menu (Windows and macOS; see [Platform support](#platform-support)).
 - **Headless mode** — `quotapane-cli` prints the same normalized snapshot as text or JSON, for scripts, for cron, and for proving to yourself what the app talks to. (Text output is a compact summary; per-model rows and reset credits appear in `--json` and the window.)
 - **A gate for scripted runs** — `--fail-at <N>` exits non-zero when a quota window reaches N percent, and `--watch <SECS>` polls on an interval, so a long agentic or batch run can stop *before* it dies mid-flight. QuotaPane runs no commands of its own: it reports, your script decides.
+- **An agents view** — `usage // agents` in the titlebar switches the pane to the Claude Code and Codex CLI sessions running on this machine (see below).
 
 Two binaries are produced: `quotapane` (the window) and `quotapane-cli` (headless).
 
@@ -56,6 +57,32 @@ carries over; it is never written again, and never deleted.
 `--pace-demo` renders a fixed made-up scenario so the pace markers can
 be seen without waiting hours for real usage to produce one: it shows
 fake data, polls nothing, reads no credentials, and talks to no host.
+
+## Agents view
+
+The titlebar carries a switcher: `usage // agents`. Click `agents` and
+the pane lists the Claude Code and Codex CLI sessions running on this
+machine — a state dot (green working, amber idle, faint finished),
+`project · branch · id8`, and how long since each last wrote. A row
+marked `· sub` is a subagent.
+
+**Identity only, never content.** The list comes from the session-log
+files those CLIs already write (`~/.claude/projects/`,
+`~/.codex/sessions/`), opened read-only, and QuotaPane extracts a fixed
+allowlist of metadata keys from them: ids, timestamps, record types, the
+working directory, the git branch. Your conversations are never
+deserialized, never rendered, never stored, and never sent anywhere —
+that is [`SECURITY.md`](SECURITY.md) invariant 8, and a test plants
+sentinel text in a fixture transcript and asserts it cannot reach any
+output. Liveness is inferred from file modification times, so a log
+QuotaPane cannot parse still reports honestly instead of disappearing.
+
+The scan runs **only while the agents view is showing** — on switch, then
+every two seconds. Leave the window on `usage` and no session log is
+read at all. Nothing is written, and nothing about these sessions leaves
+your machine. `--agents-demo` opens the view on a synthetic session list,
+touching no real log, for anyone who wants to see the feature before
+pointing it at their own work.
 
 <p align="center">
   <img src="assets/quotapane-window-plain.png" width="313" alt="The plain theme">
