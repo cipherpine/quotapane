@@ -76,3 +76,5 @@ test: crates/usage-core/src/agents.rs::sentinel_content_never_reaches_any_output
 test: crates/usage-core/src/agents.rs::extraction_is_welded_to_the_allowlist_const
 test: crates/usage-core/src/agents.rs::unparseable_file_still_reports_liveness_from_mtime
 test: crates/usage-core/src/agents.rs::scanner_opens_only_jsonl_under_the_session_roots
+test: crates/usage-core/src/agents.rs::no_allowlisted_key_can_ever_name_message_content
+test: crates/usage-core/src/agents.rs::turn_state_is_read_from_the_record_type_alone

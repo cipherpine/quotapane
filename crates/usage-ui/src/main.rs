@@ -75,7 +75,7 @@ use eframe::egui;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use usage_core::agents::{self, AgentSession, AgentState, SessionRoots};
+use usage_core::agents::{self, AgentSession, AgentState, SessionRoots, TurnState};
 use usage_core::egress::Egress;
 use usage_core::history::{self, HistoryEntry};
 use usage_core::model::{ProviderId, ProviderSnapshot, QuotaWindow, ResetCredits};
@@ -1294,6 +1294,11 @@ fn demo_agents(now: SystemTime) -> Vec<AgentSession> {
             last_write: now - age,
             age,
             is_subagent,
+            // M16 fills these in; M15's four rows say nothing about a turn.
+            turn: TurnState::Unknown,
+            duration: None,
+            cli_version: None,
+            pulse: [0; agents::PULSE_BUCKETS],
         }
     };
     vec![
@@ -7453,6 +7458,10 @@ mod tests {
             last_write: SystemTime::now() - age,
             age,
             is_subagent,
+            turn: TurnState::Unknown,
+            duration: None,
+            cli_version: None,
+            pulse: [0; agents::PULSE_BUCKETS],
         }
     }
 
