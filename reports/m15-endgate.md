@@ -259,6 +259,43 @@ fix, P1 and P1b both bite. No mutation survives in the tree as committed.
   logs explain them and the diff does not.
 - **§4.5 / §4.8** — no visual accepted, no milestone accepted, no release cut.
 
+## Addendum — the tip commit's own CI run (added after the report landed)
+
+**Both phase commits are green on all 8 required checks; that is unchanged and
+is what the end gate requires.** This addendum is about the run triggered by
+the *report* commit, `b6fac53` — a commit that touches nothing but
+`reports/m15-endgate.md`, a markdown file no CI job reads.
+
+That run (<https://github.com/cipherpine/quotapane/actions/runs/31121996517>)
+reached **7 of 8 green** and then stalled: `build & test (ubuntu-latest)`
+could not be allocated a hosted runner, repeatedly, over roughly two hours and
+eight `gh run rerun --failed` attempts, each waited for in the foreground. The
+job never ran a step; the failures alternate between the same control-plane
+error the phase-2 run hit —
+
+```
+Failed to resolve action download info. Error: Service Unavailable
+```
+
+— and
+
+```
+The job was not acquired by Runner of type hosted even after multiple attempts
+```
+
+Green on that run, per the last read: `invariants`, `cargo-deny`,
+`cargo-audit`, `gitleaks`, `invariant 4 — no telemetry`,
+`build & test (windows-latest)`, `build & test (macos-latest)`. Outstanding:
+`build & test (ubuntu-latest)` only.
+
+Nothing was changed to chase it, and nothing should be: the same job passed on
+`f7adb72` — the identical tree plus one markdown file — 40 minutes earlier,
+and on `9947e86` before that. `main` may therefore show a red X on the tip
+until GitHub's incident clears; **one `gh run rerun --failed` on that run is
+the whole remedy**, and it needs no code change. This session stops here
+rather than pushing further commits, each of which would only queue another
+run into the same outage.
+
 ## What the owner needs to do
 
 1. **§4.5 visual pass.** Run `quotapane --agents-demo` (and
