@@ -90,6 +90,7 @@ Scoped to the two trust boundaries and the release pipeline.
 - **T-I3 — Token sent to a non-provider host (accidental or malicious).** *Mitigation:* invariant 3 — deny-by-default egress allowlist + test asserting rejection of a non-listed host.
 - **T-I4 — First-party telemetry ships usage data off-box.** *Mitigation:* invariant 4 — no telemetry exists in the codebase.
 - **T-I5 — Token observed by a TLS-inspecting proxy.** *Mitigation:* invariant 7 — proxy off by default, explicit warning + opt-in. *Residual:* R3.
+- **T-I6 — Conversation content surfaced or persisted by the agents pane.** *Mitigation:* invariant 8 — allowlisted metadata keys only; the sentinel-content test proves the content payload cannot reach any output type; nothing is written to disk or sent anywhere.
 
 ### Denial of service
 - **T-D1 — Provider rate-limits the app (`429`).** *Mitigation:* a hard ≥180 s floor between polls, exponential backoff capped at 30 min, and `retry-after` honored when longer — all in one pure, tested function (`next_delay`). Impact is limited to stale display, never a crash.
@@ -140,6 +141,7 @@ invariant to its tests and CI's `invariants` job fails on drift.
 | 5. No self-update | absence of any updater code path | enforced by absence; the two-host allowlist test above doubles as the check that a covert updater has nowhere to call |
 | 6. Read-only credentials | `credentials` | `loads_credential_readonly_and_redacted`: file bytes identical after load; no write handle exists |
 | 7. Proxy opt-in (CLI-only, fail-closed) | `egress` proxy gate; `quotapane-cli --allow-proxy` is the only opt-in surface — the window has none | `proxy_env_without_opt_in_fails_closed` (either casing) + opt-in and empty-var tests; CLI tests pin the hint line, the per-run warning, and the absence of a window opt-in |
+| 8. Agent visibility is metadata-only | `usage_core::agents` — allowlisted key extraction; content payloads never deserialized | `sentinel_content_never_reaches_any_output`, `extraction_is_welded_to_the_allowlist_const`, `unparseable_file_still_reports_liveness_from_mtime`, `scanner_opens_only_jsonl_under_the_session_roots` |
 
 ---
 

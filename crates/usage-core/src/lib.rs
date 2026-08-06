@@ -11,8 +11,9 @@
 //!    a host on the compile-time allowlist.
 //!
 //! Everything else — [`providers`], [`poller`], [`model`], [`pace`],
-//! [`history`] — schedules, normalizes, or does arithmetic over **non-secret**
-//! data. Secrets never cross the channel to the UI or CLI; the message type
+//! [`history`], [`agents`] — schedules, normalizes, or does arithmetic over
+//! **non-secret** data. Secrets never cross the channel to the UI or CLI; the
+//! message type
 //! ([`model::ProviderSnapshot`]) contains no secret fields by construction.
 //! [`pace`] is the furthest thing from the boundary in the crate: pure
 //! functions over numbers, with no clock, no I/O, and no credentials in reach.
@@ -20,6 +21,11 @@
 //! what the window already displays — timestamps, window labels, and
 //! percentages, in a record type with no field a credential could occupy
 //! (invariant 1). It is off unless the user turns it on.
+//! [`agents`] is the one module that reads provider files which are **not**
+//! credential files: the local Claude Code / Codex CLI session logs, read-only
+//! and through a fixed allowlist of metadata keys, so the window can say which
+//! sessions are running. It never reaches conversation content, never writes,
+//! and never sends (invariant 8).
 //!
 //! ## Enforced invariants (each backed by a test — THREAT_MODEL.md §9)
 //!
@@ -30,6 +36,7 @@
 //! 5. No silent auto-update (M5; update check is notify-only, off by default).
 //! 6. Read-only credentials.
 //! 7. Proxy is opt-in.
+//! 8. Agent visibility is metadata-only (M15; [`agents`]).
 //!
 //! A change that weakens any invariant is a breaking security change and
 //! must be called out in review (SECURITY.md).
@@ -37,6 +44,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod agents;
 pub mod credentials;
 pub mod egress;
 pub mod history;
