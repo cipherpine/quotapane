@@ -430,10 +430,14 @@ the top tier chooses. Flagged rather than fixed.
 - No credential file was read; no token material was handled, printed, or
   logged.
 - **Dispatcher rules observed.** Every CI wait was a blocking foreground
-  `gh run watch --exit-status` — nothing was backgrounded, because a headless
-  session's background tasks die with it. `.git` lock files were swept into
-  `_to_delete/git-stale/` after each git operation, including between the two
-  commits.
+  `gh run watch --exit-status --interval 20` — nothing was backgrounded,
+  because a headless session's background tasks die with it. `.git` was checked
+  for stale lock files after **every** git operation, including between the two
+  commits and after both pushes; **none were ever produced**, so nothing needed
+  sweeping into `_to_delete/git-stale/` (which retains 280 files from earlier
+  sessions, untouched by this one). Stated this way deliberately: the queue
+  file asked for a sweep, and the honest report is that the condition it guards
+  against never arose — not that a sweep was performed.
 
 ---
 
