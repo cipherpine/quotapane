@@ -768,3 +768,9 @@ You are a headless floor release session for QuotaPane (C:\dev\QuotaPane\QuotaPa
 ```
 You are a headless floor release session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. The owner has published v1.6.0. Read CLAUDE.md, DECISIONS.md, then prompts/m13-release.md and execute LEG C ONLY: verify via gh that v1.6.0 has non-null publishedAt (else STOP); apply the spec's single §4a patch to DECISIONS.md (OLD/NEW extracted programmatically from the spec's bytes, unique before and after, DECISIONS.md the only protected file); write reports/m13-release-endgate.md; commit both ("docs: v1.6.0 published; M13 accepted (owner)"), push, record that commit's CI in a follow-up report commit per the M13 pattern, CI green on all 8 required checks, EXIT. Nothing further is queued.
 ```
+
+## M14 — density pass (resizable height + freshness dot)
+
+```
+You are a headless floor session for QuotaPane (C:\dev\QuotaPane\QuotaPane) under the M11d dispatcher. Read CLAUDE.md, DECISIONS.md, then prompts/m14-density.md and implement it exactly: Phase 1 (resizable height — grip + snap-to-fit + config `height` key, width pinned at 320) and Phase 2 (freshness dot with hover tooltip replacing the footer row), one commit each, Phase 2 only after Phase 1's CI is green on all 8 required checks. Wait for CI in the FOREGROUND (gh run watch <id> --exit-status); never background watchers. The full §3 bar before every push. Zero new dependencies; no --json change; no version bump or CHANGELOG; no §4.1 path. You never accept visuals (§4.5). Finish with reports/m14-endgate.md committed and pushed, CI green, then EXIT.
+```
