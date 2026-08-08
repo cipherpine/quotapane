@@ -12,7 +12,7 @@ A small, always-on-top desktop window that shows how much of your **Claude** and
 The entire value proposition is a **small, auditable trust boundary**. Credentials and the network are owned by two modules — `crates/usage-core/src/credentials/` and `crates/usage-core/src/egress/` — deliberately small enough to read end to end in one sitting; the two provider parsers consume what they return. Everything else is scheduling and rendering.
 
 <p align="center">
-  <img src="assets/quotapane-window-cipherpine.png" width="319" alt="The QuotaPane window in the Cipher Pine theme: Claude 5h and 7d windows with percent bars and reset countdowns, a per-model toggle, and the Codex 7d window with reset credits">
+  <img src="assets/quotapane-window-cipherpine.png" width="319" alt="The QuotaPane window in the Cipher Pine theme: Claude and Codex quota windows with percent bars, reset countdowns, pace markers, 24-hour sparklines, and a freshness dot on each provider header">
 </p>
 
 ## What it shows
@@ -20,7 +20,10 @@ The entire value proposition is a **small, auditable trust boundary**. Credentia
 - **Claude (Anthropic)** — your 5-hour and 7-day subscription windows: percent used, and how long until each resets.
 - **Codex (OpenAI)** — the rate-limit windows the Codex endpoint reports, labelled by their duration (typically a short rolling window plus a weekly one).
 - **Per-model breakdown** — where a provider reports per-model limits, each provider pane has a collapsible toggle that expands them into their own rows.
-- **Staleness** — the window tells you when the data is older than it should be, rather than quietly showing you a stale number.
+- **Pace** — elapsed-time markers on every bar, and a burn-rate forecast that speaks up only when the current spend rate would exhaust a window *before* it resets.
+- **Sparklines (opt-in)** — with `history=on`, a quiet 24-hour strip under each provider's bars: the day's shape at a glance.
+- **Alerts (opt-in)** — with `alerts=on`, a banner, a red ring on the tray icon, and one taskbar attention request when a window crosses your line. Time-aware by default: a healthy 85% late in the week stays quiet.
+- **Freshness** — a dot on each provider header ages green → amber → red as the data does; the exact seconds are on hover. You are never quietly shown a stale number.
 - **System tray** — an icon rendering current usage, with a tooltip and a Show/Hide/Quit menu (Windows and macOS; see [Platform support](#platform-support)).
 - **Headless mode** — `quotapane-cli` prints the same normalized snapshot as text or JSON, for scripts, for cron, and for proving to yourself what the app talks to. (Text output is a compact summary; per-model rows and reset credits appear in `--json` and the window.)
 - **A gate for scripted runs** — `--fail-at <N>` exits non-zero when a quota window reaches N percent, and `--watch <SECS>` polls on an interval, so a long agentic or batch run can stop *before* it dies mid-flight. QuotaPane runs no commands of its own: it reports, your script decides.
@@ -94,6 +97,10 @@ touching no real log, for anyone who wants to see the feature before
 pointing it at their own work.
 
 <p align="center">
+  <img src="assets/quotapane-window-agents.png" width="319" alt="The agents view: Claude Code and Codex CLI sessions with state dots, activity pulse strips, an amber your-turn marker, and a one-click line hiding older sessions">
+</p>
+
+<p align="center">
   <img src="assets/quotapane-window-plain.png" width="313" alt="The plain theme">
   <img src="assets/quotapane-window-plain-expanded.png" width="311" alt="The plain theme with per-model rows expanded">
 </p>
@@ -106,6 +113,8 @@ pointing it at their own work.
 - **No auto-update and no update check** — there is no updater in the codebase at all. Updating is always something you do deliberately.
 - Credential files are opened read-only. Token refresh is delegated to the official `claude` / `codex` CLIs; QuotaPane never writes them.
 - Proxy support is opt-in and fails closed: with a proxy variable set and no opt-in, nothing is sent. Opting in is a per-run CLI flag behind an explicit warning that a TLS-inspecting proxy can observe your bearer token; the window has no opt-in at all.
+
+Every claim above is a numbered invariant in `SECURITY.md`, and the mapping from each invariant to the live tests that prove it is **machine-checked in CI on every push** (`invariants.manifest` + `tools/check-invariants.py`, a required check). These are not promises in prose — the docs cannot silently drift from the code.
 
 Full detail: [`SECURITY.md`](SECURITY.md) · [`THREAT_MODEL.md`](THREAT_MODEL.md) · [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
@@ -175,7 +184,7 @@ Requires **Rust 1.92+** (the workspace sets `rust-version = "1.92"`; the floor c
 
 ## Usage
 
-The window takes no arguments in normal use; drag it to position it, and scroll if the content is taller than the window.
+The window takes no arguments in normal use. Drag it to position it; drag the grip at the bottom edge to choose its height, or double-click the grip to snap the window to exactly fit its content. The height is remembered.
 
 ```
 quotapane [--client-version <VER>] [--codex-user-agent <UA>] [--no-tray]
@@ -235,11 +244,11 @@ The system tray is **Windows and macOS only**. On Linux, QuotaPane is window-onl
 
 ## Roadmap
 
-**v1.0 is the current scope**: both subscription providers, the always-on-top window, the system tray, the per-model breakdown, and the headless CLI — packaged as signed, attested releases.
+**v1.0 shipped July 2026**: both subscription providers, the always-on-top window, the system tray, the per-model breakdown, and the headless CLI — packaged as signed, attested releases. Since then: per-model truth from the endpoint's own limits array (v1.1), the Cipher Pine theme and the live tray miniature (v1.2), pace markers and forecast-to-limit (v1.3), a full adversarial security review and its remediations (v1.4), CLI automation — `--fail-at` and `--watch` (v1.5), opt-in history, sparklines and time-aware alerts (v1.6), and the resizable window plus the agents view (v1.7).
 
 **M4 (opt-in official billing APIs) was withdrawn** on security grounds (ADR-002, in [`ARCHITECTURE.md`](ARCHITECTURE.md)). Both vendors' usage/cost endpoints require an organization **admin** API key, are unavailable to individual subscribers, measure a different thing than subscription quota, and would force this trust boundary to hold the highest-blast-radius secret in either ecosystem — the exact opposite of the point of this project.
 
-Deferred to after 1.0: usage history and sparklines, forecast-to-limit, configurable thresholds and alerts, an optional token-free `OtelSource` (the only acceptable route to any cost view), and package-manager distribution (WinGet / Homebrew / AUR).
+Next: package-manager distribution (WinGet / Homebrew / AUR), and a statusline output mode so the CLI can feed Claude Code's own status bar. Under consideration, on exactly the terms `SECURITY.md` invariant 5 pre-commits to: an update *check* that would be notify-only and off by default — today there is none of any kind. Still deferred: the token-free `OtelSource` (the only acceptable route to any cost view).
 
 ## FAQ
 
