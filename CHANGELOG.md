@@ -55,6 +55,8 @@ working.
   explicit forbidden list — with the same machine-checked traceability
   as every other claim.
 
+No JSON key changed in this release. Zero new dependencies.
+
 ## [1.6.0] - 2026-08-05
 
 The memory release: QuotaPane learns to remember — and to speak up.
