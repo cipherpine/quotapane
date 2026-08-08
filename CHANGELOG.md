@@ -5,6 +5,56 @@ All notable changes to QuotaPane are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-08-08
+
+The visibility release: the window makes room, and learns to say who is
+working.
+
+### Added
+
+- **A height of your own.** The window has been hard-fixed at 320x240
+  since the first build; the height is now yours. Drag the 8px grip at
+  the bottom edge, or double-click it to snap the window to exactly fit
+  what it is showing. The width stays 320 forever — even a borderless
+  edge-drag can only move the bottom edge. A new `height` key in
+  `config.cfg` remembers where you left it, written once a resize has
+  settled rather than on every frame of an OS-driven drag.
+- **`usage // agents` — a second view in the same pane.** The titlebar
+  gains a switcher; click either word to move between them. The agents
+  view names the Claude Code and Codex CLI sessions running on this
+  machine, read from their own session logs on your disk: a state dot,
+  `project · branch · id8`, a subagent marked `· sub`, and how long ago
+  it last wrote. A window left on `usage` does not read a session log,
+  does not list a session directory, and does not stat one.
+- **What each session is doing, without reading a word of it.** A
+  session that is still going carries a second line: a ten-bar pulse of
+  how busy the last ten minutes were, whether the CLI is working or
+  waiting on you (`in the loop` / `your turn`, in amber), how long it
+  has been up, and which CLI version wrote the log. All of it derived
+  from record types, timestamps and counts — invariant 8 still forbids
+  conversation content from reaching any output, and a new
+  `FORBIDDEN_KEYS` list machine-checks that the metadata allowlist can
+  never name a content field.
+- **The pane opens on what is alive.** Sessions from the last two hours
+  show by default; everything older sits behind one clickable
+  `// N older today` line and comes back with a click. The 24-hour
+  lookback is unchanged — it is what the scanner reads, not what the
+  pane shows.
+
+### Changed
+
+- **The freshness dot replaces the freshness row.** The per-provider
+  `• updated Ns ago` text line paid a full row to say what a coloured
+  dot says at a glance. The dot moves to the right edge of the provider
+  header — green, amber past five minutes, cardinal once stale — and the
+  exact seconds move to hover (`updated 5s ago at 09:14:22 UTC`).
+  Identical in both themes, because how old the data is, is data rather
+  than decoration.
+- SECURITY.md invariant 8 and THREAT_MODEL.md's T-I6 now describe the
+  agents scanner's aperture — a bounded key-depth search fenced by an
+  explicit forbidden list — with the same machine-checked traceability
+  as every other claim.
+
 ## [1.6.0] - 2026-08-05
 
 The memory release: QuotaPane learns to remember — and to speak up.
