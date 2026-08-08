@@ -12,7 +12,7 @@ A small, always-on-top desktop window that shows how much of your **Claude** and
 The entire value proposition is a **small, auditable trust boundary**. Credentials and the network are owned by two modules — `crates/usage-core/src/credentials/` and `crates/usage-core/src/egress/` — deliberately small enough to read end to end in one sitting; the two provider parsers consume what they return. Everything else is scheduling and rendering.
 
 <p align="center">
-  <img src="assets/quotapane-window-cipherpine.png" width="319" alt="The QuotaPane window in the Cipher Pine theme: Claude and Codex quota windows with percent bars, reset countdowns, pace markers, 24-hour sparklines, and a freshness dot on each provider header">
+  <img src="assets/quotapane-window-cipherpine.png" width="317" alt="The QuotaPane window in the Cipher Pine theme: Claude and Codex quota windows with percent bars, reset countdowns, pace markers, 24-hour sparklines, and a freshness dot on each provider header">
 </p>
 
 ## What it shows
@@ -97,12 +97,12 @@ touching no real log, for anyone who wants to see the feature before
 pointing it at their own work.
 
 <p align="center">
-  <img src="assets/quotapane-window-agents.png" width="319" alt="The agents view: Claude Code and Codex CLI sessions with state dots, activity pulse strips, an amber your-turn marker, and a one-click line hiding older sessions">
+  <img src="assets/quotapane-window-agents.png" width="317" alt="The agents view: Claude Code and Codex CLI sessions with state dots, activity pulse strips, an amber your-turn marker, and a one-click line hiding older sessions">
 </p>
 
 <p align="center">
-  <img src="assets/quotapane-window-plain.png" width="313" alt="The plain theme">
-  <img src="assets/quotapane-window-plain-expanded.png" width="311" alt="The plain theme with per-model rows expanded">
+  <img src="assets/quotapane-window-permodel.png" width="318" alt="The per-model toggle expanded: a Fable row with its own bar and reset countdown under the Claude headline windows">
+  <img src="assets/quotapane-window-agents-expanded.png" width="318" alt="The agents view with older sessions expanded: a dimmed finished session joins its provider group, and the foot line reads hide older">
 </p>
 
 ## Security posture (the short version)
