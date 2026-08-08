@@ -70,6 +70,15 @@
 //! after, so a window left on `usage` touches no session log at all.
 //! `--agents-demo` opens straight onto a synthetic fixture set covering every
 //! state, the `--pace-demo` idiom, and it never looks at a real root.
+//!
+//! M16 turns that list into a status light. The pane opens on the sessions
+//! written inside [`AGENTS_RECENT_WINDOW`] — two hours — with everything older
+//! behind one clickable foot line, and a row that is still going gains a second
+//! line saying what it is doing: a ten-minute activity strip, whose move it is
+//! ([`TURN_YOUR_TURN`] is the row worth walking back to your desk for), how long
+//! it has been up, and which build is running it. Still content-free: every one
+//! of those comes from record types, record counts and record timestamps, never
+//! from a payload.
 
 use eframe::egui;
 use std::path::PathBuf;
@@ -221,6 +230,59 @@ const SUBAGENT_PREFIX: &str = "· sub";
 /// Between the parts of a row's identity: `project · branch · id8`.
 const AGENT_ROW_SEPARATOR: &str = " · ";
 
+/// The gap between a row's dot, its subagent mark and its identity — and, since
+/// M16, the same gap the second line is inset by so it starts under the
+/// identity rather than under the dot.
+const AGENT_ROW_GAP: f32 = 4.0;
+
+// --------------------------------------------------------------------------
+// M16: the pane opens on what is alive.
+// --------------------------------------------------------------------------
+
+/// How recently a session must have been written to appear without asking.
+///
+/// Two hours. The pane's job is "who is working right now", and the 24 h
+/// lookback — which is a scanning bound, and stays one — turned out to be a
+/// reading list. Everything older is one line away, never gone.
+const AGENTS_RECENT_WINDOW: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// What the pane says when it did scan sessions, but none of them is recent.
+///
+/// Deliberately **not** [`NO_AGENTS_LINE`]: that line names the 24 h lookback,
+/// and over a list that has rows in it — just none from the last two hours —
+/// it would be false.
+const NO_RECENT_AGENTS_LINE: &str = "// nothing active in the last 2h";
+
+/// The foot line once the older sessions are showing: the way back.
+const HIDE_OLDER_LINE: &str = "// hide older";
+
+/// The turn phrases. Plain words rather than glyphs: the pane's font coverage
+/// is a thing M14 already had to prove once, and "your turn" needs no legend.
+const TURN_IN_LOOP: &str = "in the loop";
+/// The other phrase — see [`TURN_IN_LOOP`].
+const TURN_YOUR_TURN: &str = "your turn";
+
+/// One pulse bar's width.
+const PULSE_BAR_WIDTH: f32 = 2.0;
+/// The gap between two pulse bars. Between them only, so the strip's width is
+/// [`PULSE_STRIP_WIDTH`] rather than one gap wider.
+const PULSE_BAR_GAP: f32 = 1.0;
+/// The tallest a pulse bar draws.
+const PULSE_BAR_HEIGHT: f32 = 7.0;
+/// The whole strip's width — derived from the bar geometry rather than written
+/// down beside it, so the two cannot drift. 29 px at the shipped numbers.
+const PULSE_STRIP_WIDTH: f32 = agents::PULSE_BUCKETS as f32 * PULSE_BAR_WIDTH
+    + (agents::PULSE_BUCKETS - 1) as f32 * PULSE_BAR_GAP;
+/// The alpha the strip wears over the row's own state colour.
+///
+/// Reduced, because the strip is texture under a sentence rather than a mark
+/// competing with the dot that already told you the state.
+const PULSE_ALPHA: u8 = 140;
+/// The gap between the pulse strip and the words after it — wider than
+/// [`AGENT_ROW_GAP`], so the strip reads as its own object rather than as the
+/// first word of the phrase.
+const PULSE_TEXT_GAP: f32 = 6.0;
+
 /// Which of the two panes the window is showing (M15).
 ///
 /// Deliberately **not** persisted: a view is where you are looking right now,
@@ -316,14 +378,23 @@ const GRIP_HEIGHT: f32 = 8.0;
 /// to a resize handle.
 const GRIP_GLYPH: char = '▞';
 
-/// The inner height `--pace-demo` asks for instead of [`WINDOW_HEIGHT`]
-/// (M13-R1). **Demo only** — the production window is untouched.
+/// The inner height either demo flag asks for instead of [`WINDOW_HEIGHT`]
+/// (M13-R1; `--agents-demo` joined in M16). **Demo only** — the production
+/// window is untouched.
 ///
 /// The demo is the review path, and it shows every state at once: two panes,
 /// both with a 24 h strip, one raising an alert banner, one carrying a
 /// reset-credits line and a per-model disclosure. That is more than the
 /// 240px pane a real subscriber usually sees, and reviewing it through a
 /// scroll bar means reviewing it in pieces.
+///
+/// M16 gave `--agents-demo` the same treatment for the same reason: six rows,
+/// four of them two lines, and a foot line whose whole job is to be clicked do
+/// not fit a 240px window, and a review that opens with its toggle below the
+/// fold is not a review. The agents fixture is the smaller of the two, so this
+/// constant stays derived from the pace scenario and
+/// `the_agents_demo_fits_the_window_it_opens` only checks that the agents one
+/// — collapsed *and* expanded — fits inside it.
 ///
 /// Derived, not chosen. `the_demo_scenario_fits_the_window` measures the demo
 /// body through the same layout harness the width assertions use, puts it
@@ -345,17 +416,19 @@ const DEMO_WINDOW_HEIGHT: f32 = 330.0;
 
 /// The inner height the window asks the OS for at startup.
 ///
-/// Two inputs so each answer has exactly one source. `--pace-demo` gets
-/// [`DEMO_WINDOW_HEIGHT`] and ignores `saved_height` entirely — the demo is a
-/// fixture, not a session, and it neither reads nor writes the user's height.
-/// Every other launch gets whatever the config file remembered, which is
-/// [`WINDOW_HEIGHT`] until the user first drags the grip.
+/// Two inputs so each answer has exactly one source. `demo` — either flag —
+/// gets [`DEMO_WINDOW_HEIGHT`] and ignores `saved_height` entirely: a demo is a
+/// fixture, not a session, and it neither reads nor writes the user's height
+/// (the writing half is [`QuotaPaneApp::track_height`]'s guard, and the two
+/// have to name the same set of flags or a demo would save a height nobody
+/// chose). Every other launch gets whatever the config file remembered, which
+/// is [`WINDOW_HEIGHT`] until the user first drags the grip.
 ///
 /// `saved_height` arrives already range-checked by `config::height`; the clamp
 /// here is the second lock on the same door, so no path can ask the OS for a
 /// window outside the bounds the viewport declares.
-fn initial_inner_height(pace_demo: bool, saved_height: u32) -> f32 {
-    if pace_demo {
+fn initial_inner_height(demo: bool, saved_height: u32) -> f32 {
+    if demo {
         DEMO_WINDOW_HEIGHT
     } else {
         (saved_height as f32).clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT)
@@ -1266,75 +1339,158 @@ fn demo_panes(config: &Config) -> Vec<ProviderPane> {
     ]
 }
 
-/// The synthetic session list `--agents-demo` shows (M15).
+/// One row of the `--agents-demo` fixture, as the fixture spells it out.
 ///
-/// Four rows, chosen so one look reviews the whole feature: every state, both
-/// providers, a subagent, a row with no branch, and an age in each of
-/// [`format_age`]'s two shapes.
+/// A named struct rather than a closure with nine positional arguments: M16
+/// gave a row four more things to say, and `(…, 12, false, None, None)` at a
+/// call site is a row nobody can review.
+struct DemoRow {
+    provider: ProviderId,
+    short_id: &'static str,
+    project: &'static str,
+    branch: Option<&'static str>,
+    /// How long ago the row's log was last written — which is also what
+    /// [`agents::state_for_age`] turns into its dot.
+    age_secs: u64,
+    is_subagent: bool,
+    turn: TurnState,
+    /// How long the session has been going, in seconds.
+    up_secs: Option<u64>,
+    cli_version: Option<&'static str>,
+    pulse: [u32; agents::PULSE_BUCKETS],
+}
+
+/// The synthetic session list `--agents-demo` shows (M15, widened in M16).
 ///
-/// - **Claude, working** — `QuotaPane · main`, seconds old: the green dot.
-/// - **Claude, working, subagent** — the same project, marked `· sub`, which is
-///   what a fan-out looks like from outside.
-/// - **Codex, idle** — a session open on a branch, quiet for a quarter of an
-///   hour: amber.
-/// - **Codex, recent** — finished hours ago, and carrying *no* branch, so the
-///   row proves the separator collapses rather than leaving a gap.
+/// Six rows, chosen so one look reviews the whole feature: every state, both
+/// providers, a subagent, a row with no branch, an age in each of
+/// [`format_age`]'s two shapes, both turn phrases, three pulse shapes, and one
+/// session on the far side of [`AGENTS_RECENT_WINDOW`] so the pane opens with
+/// its `// 1 older today` line and the toggle has something to do.
+///
+/// - **Claude, working, `in the loop`** — `QuotaPane · main`, seconds old, a
+///   pulse rising into the present: an agent with work in hand.
+/// - **Claude, working, `your turn`** — the pulse decays to a single beat and
+///   then nothing, which is the shape of an agent that stopped and is waiting
+///   to be read. The one AMBER phrase in the pane.
+/// - **Claude, working, subagent** — marked `· sub`, minutes old, flat and busy
+///   over only the part of the strip it has existed for.
+/// - **Codex, idle** — open on a branch, quiet for a quarter of an hour, so its
+///   pulse is empty and its strip is absent rather than flat. It carries **no
+///   turn phrase**, and that is the honest Codex row: the Codex record
+///   vocabulary does not draw the line `usage_core::agents` can read without
+///   opening a payload, so a blank beats an invented claim.
+/// - **Codex, recent** — over, carrying *no* branch, so the row proves the
+///   separator collapses rather than leaving a gap. One line, even though it
+///   has a duration and a version it could have said: a finished session's
+///   second line is noise.
+/// - **Claude, older than two hours** — behind the foot line until it is asked
+///   for, and dim once it arrives.
+///
+/// Every row's numbers agree with each other: a pulse bucket is only busy
+/// inside the span the row's duration says it existed for, and only silent
+/// where the row's own age says nothing was written.
 ///
 /// Ages are frozen at the moment the window opens, exactly as `--pace-demo`'s
 /// numbers are: the demo is a fixture, not a clock.
 fn demo_agents(now: SystemTime) -> Vec<AgentSession> {
-    let row = |provider, short_id: &str, project: &str, branch: Option<&str>, secs, is_subagent| {
-        let age = Duration::from_secs(secs);
-        AgentSession {
-            provider,
-            short_id: short_id.to_string(),
-            project: project.to_string(),
-            branch: branch.map(str::to_string),
-            state: agents::state_for_age(age).unwrap_or(AgentState::Recent),
-            last_write: now - age,
-            age,
-            is_subagent,
-            // M16 fills these in; M15's four rows say nothing about a turn.
+    const ROWS: &[DemoRow] = &[
+        DemoRow {
+            provider: ProviderId::ClaudeSubscription,
+            short_id: "a1b2c3d4",
+            project: "QuotaPane",
+            branch: Some("main"),
+            age_secs: 12,
+            is_subagent: false,
+            turn: TurnState::InLoop,
+            up_secs: Some(12 * 60),
+            cli_version: Some("2.0.14"),
+            pulse: [1, 2, 2, 4, 5, 7, 9, 12, 14, 17],
+        },
+        DemoRow {
+            provider: ProviderId::ClaudeSubscription,
+            short_id: "b7c4e210",
+            project: "payments-api",
+            branch: Some("feat/idempotency"),
+            // Just inside `ACTIVE_WITHIN`, because that is what the pulse says
+            // too: the last beat is in the second-newest bucket and the newest
+            // is empty.
+            age_secs: 115,
+            is_subagent: false,
+            turn: TurnState::YourTurn,
+            up_secs: Some(47 * 60),
+            cli_version: Some("2.0.14"),
+            pulse: [8, 11, 9, 12, 7, 6, 4, 3, 1, 0],
+        },
+        DemoRow {
+            provider: ProviderId::ClaudeSubscription,
+            short_id: "7e5c91f0",
+            project: "QuotaPane",
+            branch: Some("main"),
+            age_secs: 41,
+            is_subagent: true,
+            turn: TurnState::InLoop,
+            up_secs: Some(200),
+            cli_version: Some("2.0.14"),
+            pulse: [0, 0, 0, 0, 0, 0, 3, 8, 8, 8],
+        },
+        DemoRow {
+            provider: ProviderId::CodexSubscription,
+            short_id: "9f8e7d6c",
+            project: "payments-api",
+            branch: Some("feat/idempotency"),
+            age_secs: 14 * 60,
+            is_subagent: false,
             turn: TurnState::Unknown,
-            duration: None,
-            cli_version: None,
+            up_secs: Some(75 * 60),
+            cli_version: Some("0.5.1"),
             pulse: [0; agents::PULSE_BUCKETS],
-        }
-    };
-    vec![
-        row(
-            ProviderId::ClaudeSubscription,
-            "a1b2c3d4",
-            "QuotaPane",
-            Some("main"),
-            12,
-            false,
-        ),
-        row(
-            ProviderId::ClaudeSubscription,
-            "7e5c91f0",
-            "QuotaPane",
-            Some("main"),
-            41,
-            true,
-        ),
-        row(
-            ProviderId::CodexSubscription,
-            "9f8e7d6c",
-            "payments-api",
-            Some("feat/idempotency"),
-            14 * 60,
-            false,
-        ),
-        row(
-            ProviderId::CodexSubscription,
-            "4b2a10de",
-            "notes",
-            None,
-            3 * 3600 + 600,
-            false,
-        ),
-    ]
+        },
+        DemoRow {
+            provider: ProviderId::CodexSubscription,
+            short_id: "4b2a10de",
+            project: "notes",
+            branch: None,
+            age_secs: 95 * 60,
+            is_subagent: false,
+            turn: TurnState::Unknown,
+            up_secs: Some(23 * 60),
+            cli_version: Some("0.5.1"),
+            pulse: [0; agents::PULSE_BUCKETS],
+        },
+        DemoRow {
+            provider: ProviderId::ClaudeSubscription,
+            short_id: "3d90ff41",
+            project: "dotfiles",
+            branch: Some("main"),
+            age_secs: 3 * 3600 + 600,
+            is_subagent: false,
+            turn: TurnState::Unknown,
+            up_secs: Some(18 * 60),
+            cli_version: Some("2.0.13"),
+            pulse: [0; agents::PULSE_BUCKETS],
+        },
+    ];
+
+    ROWS.iter()
+        .map(|row| {
+            let age = Duration::from_secs(row.age_secs);
+            AgentSession {
+                provider: row.provider,
+                short_id: row.short_id.to_string(),
+                project: row.project.to_string(),
+                branch: row.branch.map(str::to_string),
+                state: agents::state_for_age(age).unwrap_or(AgentState::Recent),
+                last_write: now - age,
+                age,
+                is_subagent: row.is_subagent,
+                turn: row.turn,
+                duration: row.up_secs.map(Duration::from_secs),
+                cli_version: row.cli_version.map(str::to_string),
+                pulse: row.pulse,
+            }
+        })
+        .collect()
 }
 
 /// The OS window title. Demo mode says so, since the pane is showing numbers
@@ -2049,6 +2205,14 @@ struct QuotaPaneApp {
     agent_roots: SessionRoots,
     /// The most recent scan's rows, or the demo fixture.
     agents: Vec<AgentSession>,
+    /// Whether the agents pane is also showing the sessions older than
+    /// [`AGENTS_RECENT_WINDOW`] (M16).
+    ///
+    /// Deliberately **not** persisted, for the reason [`View`] is not: which
+    /// rows you have unfolded is where you are looking right now, not a
+    /// preference, and a window that reopened already expanded would undo the
+    /// whole point of opening on what is alive.
+    agents_show_older: bool,
     /// When the last scan ran. `None` means "not since this view was opened",
     /// which is what makes a switch scan on the very next frame.
     last_agent_scan: Option<Instant>,
@@ -2121,8 +2285,10 @@ impl QuotaPaneApp {
     /// is *observed* each frame and written once it has held still for
     /// [`HEIGHT_SETTLE`] — see [`height_action`] for the decision itself.
     fn track_height(&mut self, ctx: &egui::Context) {
-        // The demo neither reads nor writes the saved height.
-        if self.pace_demo {
+        // Neither demo reads or writes the saved height: both open at
+        // [`DEMO_WINDOW_HEIGHT`], and a fixture's window is not a preference.
+        // `initial_inner_height` gates the reading half on the same pair.
+        if self.pace_demo || self.agents_demo {
             return;
         }
         let current = ctx
@@ -2563,7 +2729,9 @@ impl eframe::App for QuotaPaneApp {
                 })
                 .show(ui, |ui| match view {
                     View::Usage => render_panes(ui, &mut self.panes, theme),
-                    View::Agents => render_agents(ui, &self.agents, theme),
+                    View::Agents => {
+                        render_agents(ui, &self.agents, theme, &mut self.agents_show_older);
+                    }
                 })
                 .content_size
                 .y;
@@ -2843,14 +3011,264 @@ fn agent_identity(session: &AgentSession) -> String {
     parts.join(AGENT_ROW_SEPARATOR)
 }
 
-/// One session: state dot, identity, and a right-aligned age.
+/// Whether a scanned session is one of the older ones: written longer ago than
+/// [`AGENTS_RECENT_WINDOW`], and therefore behind the foot line until asked for.
+///
+/// The boundary belongs to the recent side — a session written exactly two
+/// hours ago is still one the pane opens on — which is the same inclusive rule
+/// every threshold in `usage_core::agents` follows.
+fn is_older_session(session: &AgentSession) -> bool {
+    session.age > AGENTS_RECENT_WINDOW
+}
+
+/// The words a row uses for whose move it is, or `None` when the scan could not
+/// tell — which is every Codex row and every finished one, and where a blank is
+/// the honest answer rather than a missing feature.
+fn turn_phrase(turn: TurnState) -> Option<&'static str> {
+    match turn {
+        TurnState::InLoop => Some(TURN_IN_LOOP),
+        TurnState::YourTurn => Some(TURN_YOUR_TURN),
+        TurnState::Unknown => None,
+    }
+}
+
+/// The ink a turn phrase is painted in.
+///
+/// `your turn` takes [`AMBER`] — the ink this pane already uses for "this wants
+/// attention" — and it is the only colour the second line carries. Everything
+/// else, `in the loop` included, takes the dim the rest of the line is in: an
+/// agent that is busy is the ordinary case and does not want the eye.
+fn turn_color(turn: TurnState, dim: egui::Color32) -> egui::Color32 {
+    match turn {
+        TurnState::YourTurn => AMBER,
+        TurnState::InLoop | TurnState::Unknown => dim,
+    }
+}
+
+/// How long a session has been going, as the second line says it: `up 42s`,
+/// `up 12m`, `up 3h20m`.
+///
+/// Hours are spelled out rather than folded into minutes the way [`format_age`]
+/// folds seconds into minutes. A row's *age* is bounded by the two-hour window
+/// it had to pass to be on screen at all; a session left open across a working
+/// day routinely runs longer than that, and `up 431m` is a number nobody reads.
+fn format_uptime(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs < 60 {
+        format!("up {secs}s")
+    } else if secs < 3600 {
+        format!("up {}m", secs / 60)
+    } else {
+        format!("up {}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// A CLI version as the row wears it: `v2.0.14`.
+///
+/// The `v` is this window's, not the log's — both CLIs write a bare `2.0.14` —
+/// so a build that ever starts writing its own is not handed a second one.
+fn format_cli_version(version: &str) -> String {
+    if version.starts_with('v') {
+        version.to_string()
+    } else {
+        format!("v{version}")
+    }
+}
+
+/// The words of a row's second line, most valuable first: whose move it is, how
+/// long it has been going, which build is running it.
+///
+/// Ordering is by value under truncation, because truncation is what a 320px
+/// row does to the tail of a long line. Anything the scan could not name is
+/// absent rather than empty, and a row with nothing to add returns nothing at
+/// all — the caller draws no line rather than an indented gap.
+fn agent_detail_parts(session: &AgentSession) -> Vec<String> {
+    let mut parts = Vec::with_capacity(3);
+    if let Some(phrase) = turn_phrase(session.turn) {
+        parts.push(phrase.to_string());
+    }
+    if let Some(duration) = session.duration {
+        parts.push(format_uptime(duration));
+    }
+    if let Some(version) = &session.cli_version {
+        parts.push(format_cli_version(version));
+    }
+    parts
+}
+
+/// Whether a row's pulse has any beat in it at all.
+fn has_pulse(session: &AgentSession) -> bool {
+    session.pulse.iter().any(|count| *count > 0)
+}
+
+/// Whether this row draws a second line.
+///
+/// **Only a session that is still going gets one.** A [`AgentState::Recent`]
+/// row is over: its rhythm is not a thing anyone is watching, its turn is not a
+/// thing `usage_core::agents` will claim, and one line each is what keeps the
+/// expanded older list from doubling in height. A live row still needs
+/// *something* to say — all four parts absent draws no line, never an empty
+/// indented gap.
+fn has_detail_line(session: &AgentSession) -> bool {
+    match session.state {
+        AgentState::Recent => false,
+        AgentState::Working | AgentState::Idle => {
+            has_pulse(session) || !agent_detail_parts(session).is_empty()
+        }
+    }
+}
+
+/// The second line's left inset: the state dot's own width plus the gap after
+/// it, so the line sits under the identity rather than under the dot.
+///
+/// Measured from the installed font rather than written down as a number — the
+/// two themes do not lay the same glyph out the same way, and a hard-coded
+/// inset would be right in exactly one of them.
+fn agent_detail_indent(ui: &egui::Ui) -> f32 {
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let dot = ui
+        .painter()
+        .layout_no_wrap(FRESHNESS_DOT.to_string(), font, TEXT)
+        .size()
+        .x;
+    dot + AGENT_ROW_GAP
+}
+
+/// The second line as one layout job, or `None` when it has no words.
+///
+/// One job rather than a label per part, because the whole line is a single
+/// [`egui::Label::truncate`] for the reason the identity is: what runs off the
+/// end of a 320px row must elide, not overflow. A job is how one truncating
+/// label can still carry two inks — the `your turn` section and the dim rest.
+fn agent_detail_job(
+    ui: &egui::Ui,
+    session: &AgentSession,
+    dim: egui::Color32,
+) -> Option<egui::text::LayoutJob> {
+    let parts = agent_detail_parts(session);
+    if parts.is_empty() {
+        return None;
+    }
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let format = |color| egui::TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            job.append(AGENT_ROW_SEPARATOR, 0.0, format(dim));
+        }
+        // The turn phrase is first whenever there is one, so this is the only
+        // place the line's one colour can land.
+        let ink = if index == 0 {
+            turn_color(session.turn, dim)
+        } else {
+            dim
+        };
+        job.append(part, 0.0, format(ink));
+    }
+    Some(job)
+}
+
+/// The pulse strip's ink: the row's own state colour at [`PULSE_ALPHA`], so a
+/// working row's rhythm is green and an idle row's is amber without inventing a
+/// second palette for the same fact the dot already reports.
+fn pulse_color(state: AgentState) -> egui::Color32 {
+    let base = agent_state_color(state);
+    egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), PULSE_ALPHA)
+}
+
+/// Paint a row's last ten minutes as [`agents::PULSE_BUCKETS`] bars, and report
+/// whether it painted anything at all.
+///
+/// A dedicated painter, deliberately **not** the M13 sparkline: that one draws a
+/// percentage series over 24 h scaled 0..100 against a quota window, and this is
+/// a record count over ten minutes scaled against its own busiest minute.
+/// Sharing one function would mean two callers arguing over one set of
+/// assumptions, which is how the M13 painter would grow a mode flag.
+///
+/// **Scaled row-relative**, against the busiest bucket rather than
+/// [`agents::PULSE_CAP`]: the question a reader asks of this strip is "is this
+/// speeding up or dying", not "is this agent busier than that one". Against a
+/// fixed cap every ordinary row would be a flat line of 1px stubs.
+///
+/// Any non-zero bucket rounds up to at least a pixel, so one record in a minute
+/// is visibly different from silence. A pulse with no beats in it paints
+/// nothing and allocates nothing — no strip, and no gap where one would be.
+fn render_pulse(
+    ui: &mut egui::Ui,
+    pulse: &[u32; agents::PULSE_BUCKETS],
+    state: AgentState,
+) -> bool {
+    let Some(busiest) = pulse.iter().copied().max().filter(|max| *max > 0) else {
+        return false;
+    };
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(PULSE_STRIP_WIDTH, PULSE_BAR_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let ink = pulse_color(state);
+    for (index, count) in pulse.iter().enumerate() {
+        if *count == 0 {
+            continue;
+        }
+        let height = (PULSE_BAR_HEIGHT * *count as f32 / busiest as f32).ceil();
+        let left = rect.left() + index as f32 * (PULSE_BAR_WIDTH + PULSE_BAR_GAP);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(left, rect.bottom() - height),
+                egui::pos2(left + PULSE_BAR_WIDTH, rect.bottom()),
+            ),
+            0.0,
+            ink,
+        );
+    }
+    true
+}
+
+/// A row's second line: the pulse strip, then what the row has to say about
+/// itself, indented to start under the identity above it.
+///
+/// Item spacing is zeroed and every gap placed by hand, because the inset has
+/// to be exactly [`agent_detail_indent`] — a layout's own spacing added before
+/// and after an `add_space` would make it something else.
+fn render_agent_detail_line(ui: &mut egui::Ui, session: &AgentSession, theme: Theme) {
+    let dim = match theme {
+        Theme::CipherPine => TEXT_FAINT,
+        Theme::Plain => ui.visuals().weak_text_color(),
+    };
+    let indent = agent_detail_indent(ui);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(indent);
+        if render_pulse(ui, &session.pulse, session.state) {
+            ui.add_space(PULSE_TEXT_GAP);
+        }
+        if let Some(job) = agent_detail_job(ui, session, dim) {
+            ui.add(egui::Label::new(job).truncate());
+        }
+    });
+}
+
+/// A row's first line: state dot, identity, and a right-aligned age.
 ///
 /// The age is placed first under a right-to-left layout — the titlebar and
 /// provider-header idiom — so the identity gets whatever width is left and
 /// elides into it. Elision matters here in a way it does not elsewhere in this
 /// window: a branch name is user-supplied text of no bounded length, and the
 /// alternative to eliding it is a row that overflows a 320px pane.
-fn render_agent_row(ui: &mut egui::Ui, session: &AgentSession, theme: Theme) {
+///
+/// `older` dims the identity of a row that is only on screen because the reader
+/// asked for the older ones (M16). The dot is untouched: it reports the
+/// session's state, and a state is not less true for being three hours old.
+fn render_agent_identity_line(
+    ui: &mut egui::Ui,
+    session: &AgentSession,
+    theme: Theme,
+    older: bool,
+) {
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let age_ink = match theme {
@@ -2863,7 +3281,7 @@ fn render_agent_row(ui: &mut egui::Ui, session: &AgentSession, theme: Theme) {
                     .color(age_ink),
             );
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing.x = AGENT_ROW_GAP;
                 ui.label(
                     egui::RichText::new(FRESHNESS_DOT)
                         .small()
@@ -2876,9 +3294,11 @@ fn render_agent_row(ui: &mut egui::Ui, session: &AgentSession, theme: Theme) {
                             .color(TEXT_FAINT),
                     );
                 }
-                let identity_ink = match theme {
-                    Theme::CipherPine => TEXT,
-                    Theme::Plain => ui.visuals().text_color(),
+                let identity_ink = match (older, theme) {
+                    (true, Theme::CipherPine) => TEXT_FAINT,
+                    (true, Theme::Plain) => ui.visuals().weak_text_color(),
+                    (false, Theme::CipherPine) => TEXT,
+                    (false, Theme::Plain) => ui.visuals().text_color(),
                 };
                 ui.add(
                     egui::Label::new(
@@ -2893,27 +3313,80 @@ fn render_agent_row(ui: &mut egui::Ui, session: &AgentSession, theme: Theme) {
     });
 }
 
-/// The whole agents pane: each provider's sessions under the header style the
-/// usage pane already uses, or one quiet line when nothing has run today.
+/// One session: the identity line, and — for a session that is still going and
+/// has something to add — a second line under it (M16).
+///
+/// A row with only one line is drawn without a wrapping layout at all, so every
+/// finished row keeps exactly the geometry M15 shipped and was accepted at.
+fn render_agent_row(ui: &mut egui::Ui, session: &AgentSession, theme: Theme, older: bool) {
+    if !has_detail_line(session) {
+        render_agent_identity_line(ui, session, theme, older);
+        return;
+    }
+    ui.vertical(|ui| {
+        // The two lines are one row, not two: no row spacing between them.
+        ui.spacing_mut().item_spacing.y = 0.0;
+        render_agent_identity_line(ui, session, theme, older);
+        render_agent_detail_line(ui, session, theme);
+    });
+}
+
+/// The foot line's words: how many sessions the two-hour window is holding
+/// back, or the way to fold them away again.
+///
+/// `older` is a comparative, not a noun to be pluralised — one session reads
+/// `// 1 older today` and seven read `// 7 older today`, and neither wants an
+/// `s`. Said here because the tempting "fix" is to add one.
+fn older_toggle_line(older: usize, showing: bool) -> String {
+    if showing {
+        HIDE_OLDER_LINE.to_string()
+    } else {
+        format!("// {older} older today")
+    }
+}
+
+/// The whole agents pane: each provider's **recent** sessions under the header
+/// style the usage pane already uses, one quiet line when nothing has run
+/// today, and — when the scan found older ones — a clickable foot line that
+/// brings them in.
 ///
 /// A provider with no sessions gets no header at all. Two headers over two
 /// empty lists would spend a third of a 240px window saying nothing twice.
-fn render_agents(ui: &mut egui::Ui, sessions: &[AgentSession], theme: Theme) {
+///
+/// `show_older` is the caller's flag and this flips it: the toggle is one line
+/// with one job, and routing the click back out through a return value would
+/// buy nothing but a second place to get it wrong.
+fn render_agents(
+    ui: &mut egui::Ui,
+    sessions: &[AgentSession],
+    theme: Theme,
+    show_older: &mut bool,
+) {
+    let faint = match theme {
+        Theme::CipherPine => TEXT_FAINT,
+        Theme::Plain => ui.visuals().weak_text_color(),
+    };
     if sessions.is_empty() {
-        let ink = match theme {
-            Theme::CipherPine => TEXT_FAINT,
-            Theme::Plain => ui.visuals().weak_text_color(),
-        };
-        ui.label(egui::RichText::new(NO_AGENTS_LINE).small().color(ink));
+        ui.label(egui::RichText::new(NO_AGENTS_LINE).small().color(faint));
         return;
     }
+
+    let older_count = sessions.iter().filter(|s| is_older_session(s)).count();
+    let showing = *show_older;
 
     let mut drawn = 0;
     for id in [
         ProviderId::ClaudeSubscription,
         ProviderId::CodexSubscription,
     ] {
-        let rows: Vec<&AgentSession> = sessions.iter().filter(|s| s.provider == id).collect();
+        // The older rows join their own provider's group rather than gathering
+        // under a second set of headers; `scan` already orders newest write
+        // first, so they arrive at the foot of the group they belong to.
+        let rows: Vec<&AgentSession> = sessions
+            .iter()
+            .filter(|s| s.provider == id)
+            .filter(|s| showing || !is_older_session(s))
+            .collect();
         if rows.is_empty() {
             continue;
         }
@@ -2925,7 +3398,36 @@ fn render_agents(ui: &mut egui::Ui, sessions: &[AgentSession], theme: Theme) {
         // polls nothing. Each row carries its own age instead.
         render_provider_header(ui, id, theme, None);
         for session in rows {
-            render_agent_row(ui, session, theme);
+            render_agent_row(ui, session, theme, is_older_session(session));
+        }
+    }
+
+    // Everything scanned is older than the window, and folded away: say the
+    // claim that is true. [`NO_AGENTS_LINE`] names the 24 h lookback and would
+    // be a lie over a list that has rows one click below it.
+    if drawn == 0 {
+        ui.label(
+            egui::RichText::new(NO_RECENT_AGENTS_LINE)
+                .small()
+                .color(faint),
+        );
+    }
+
+    if older_count > 0 {
+        let response = ui.add(
+            egui::Label::new(
+                egui::RichText::new(older_toggle_line(older_count, showing))
+                    .small()
+                    .color(faint),
+            )
+            .selectable(false)
+            .sense(egui::Sense::click()),
+        );
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked() {
+            *show_older = !showing;
         }
     }
 }
@@ -3777,9 +4279,12 @@ fn main() -> ExitCode {
     // OS-provided edge-drag a borderless resizable window gets on Windows can
     // only ever move the bottom edge. The window has no left/right handle to
     // fight over, and this file never computes a width but [`WINDOW_WIDTH`].
+    // Either demo opens at the demo height and leaves the saved one alone —
+    // see [`initial_inner_height`] and [`QuotaPaneApp::track_height`].
+    let inner_height = initial_inner_height(pace_demo || agents_demo, config.height);
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([WINDOW_WIDTH, initial_inner_height(pace_demo, config.height)])
+            .with_inner_size([WINDOW_WIDTH, inner_height])
             .with_decorations(false)
             .with_resizable(true)
             .with_min_inner_size([WINDOW_WIDTH, MIN_WINDOW_HEIGHT])
@@ -3828,6 +4333,7 @@ fn main() -> ExitCode {
                 agents_demo,
                 agent_roots,
                 agents,
+                agents_show_older: false,
                 last_agent_scan: None,
                 pending_height: None,
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -7441,6 +7947,9 @@ mod tests {
     const AGENT_SENTINEL: &str = "SENTINEL-DO-NOT-SURFACE";
 
     /// A synthetic agent session, ages and states supplied by the caller.
+    ///
+    /// Every M16 field is the honest nothing, so a row from here has no second
+    /// line at all. Tests that want one say so — see [`live_row`].
     fn agent_row(
         provider: ProviderId,
         short_id: &str,
@@ -7465,9 +7974,46 @@ mod tests {
         }
     }
 
+    /// A session that is still going and has all four of M16's things to say.
+    fn live_row(
+        age: Duration,
+        turn: TurnState,
+        duration: Option<Duration>,
+        cli_version: Option<&str>,
+        pulse: [u32; agents::PULSE_BUCKETS],
+    ) -> AgentSession {
+        AgentSession {
+            turn,
+            duration,
+            cli_version: cli_version.map(str::to_string),
+            pulse,
+            ..agent_row(
+                ProviderId::ClaudeSubscription,
+                "a1b2c3d4",
+                "QuotaPane",
+                Some("main"),
+                age,
+                false,
+            )
+        }
+    }
+
+    /// Render the whole pane with the older rows folded away — how it opens.
+    fn render_collapsed(ui: &mut egui::Ui, sessions: &[AgentSession], theme: Theme) {
+        render_agents(ui, sessions, theme, &mut false);
+    }
+
+    /// Render the whole pane with every row showing.
+    fn render_expanded(ui: &mut egui::Ui, sessions: &[AgentSession], theme: Theme) {
+        render_agents(ui, sessions, theme, &mut true);
+    }
+
     /// Every colour the row dots were painted in, in paint order.
+    ///
+    /// Expanded, so a fixture beyond [`AGENTS_RECENT_WINDOW`] is still asked
+    /// about its dot rather than silently contributing nothing.
     fn agent_dot_colors(theme: Theme, sessions: &[AgentSession]) -> Vec<egui::Color32> {
-        painted_shapes_themed(theme, |ui| render_agents(ui, sessions, theme))
+        painted_shapes_themed(theme, |ui| render_expanded(ui, sessions, theme))
             .into_iter()
             .filter_map(|shape| match shape {
                 egui::Shape::Text(text) if text.galley.text() == FRESHNESS_DOT => {
@@ -7476,6 +8022,32 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The colour a run of text was painted in, found among the sections of
+    /// every galley a render produced.
+    ///
+    /// Sections rather than whole galleys, because the second line is one
+    /// truncating [`egui::Label`] carrying two inks: `your turn` is a section
+    /// of a line, not a label of its own.
+    fn painted_run_color(
+        theme: Theme,
+        sessions: &[AgentSession],
+        needle: &str,
+    ) -> Option<egui::Color32> {
+        use egui::epaint::text::ByteRangeExt as _;
+        painted_shapes_themed(theme, |ui| render_expanded(ui, sessions, theme))
+            .into_iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text) => {
+                    let job = &text.galley.job;
+                    job.sections
+                        .iter()
+                        .find(|section| section.byte_range.slice(&job.text) == needle)
+                        .map(|section| section.format.color)
+                }
+                _ => None,
+            })
     }
 
     /// What a pointer gesture aimed at a switcher label actually did.
@@ -7763,7 +8335,9 @@ mod tests {
 "#,
                     r#""gitBranch":"main","type":"user","timestamp":"2026-08-06T12:00:00.000Z",
 "#,
-                    r#""message":{{"role":"user","content":"{sentinel}"}}}}
+                    r#""version":"2.0.14",
+"#,
+                    r#""message":{{"role":"user","content":"{sentinel}","model":"{sentinel}"}}}}
 "#,
                 ),
                 sentinel = AGENT_SENTINEL
@@ -7780,7 +8354,9 @@ mod tests {
                 concat!(
                     r#"{{"timestamp":"2026-08-06T12:00:00.000Z","type":"session_meta","#,
                     r#""payload":{{"id":"9f8e7d6c-1234","cwd":"/home/j/dev/other","#,
-                    r#""git_branch":"feat/x","instructions":"{sentinel}"}}}}"#,
+                    r#""git_branch":"feat/x","cli_version":"0.5.1","#,
+                    r#""git":{{"branch":"feat/x","commit_message":"{sentinel}"}},"#,
+                    r#""instructions":"{sentinel}"}}}}"#,
                 ),
                 sentinel = AGENT_SENTINEL
             ),
@@ -7795,7 +8371,7 @@ mod tests {
         assert_eq!(sessions.len(), 2, "fixture tree did not scan: {sessions:?}");
 
         for theme in [Theme::CipherPine, Theme::Plain] {
-            let painted = painted_text(theme, |ui| render_agents(ui, &sessions, theme));
+            let painted = painted_text(theme, |ui| render_collapsed(ui, &sessions, theme));
             assert!(
                 painted.iter().all(|text| !text.contains(AGENT_SENTINEL)),
                 "{theme:?} rendered conversation content: {painted:?}"
@@ -7805,6 +8381,21 @@ mod tests {
                 painted.iter().any(|text| text.contains("QuotaPane")),
                 "{theme:?} drew no identity at all: {painted:?}"
             );
+            // Every M16 field that can hold text at all has to reach this
+            // render, or the assertion above is passing over a second line
+            // nobody drew. The turn phrase, the uptime and both CLIs' version
+            // strings are that list; `pulse` is a `[u32; 10]` of counts, which
+            // paints rectangles and has no text to leak — its own tests cover
+            // it. The fixtures carry `model` and `commit_message` sentinels
+            // two and three levels down for the same reason, so a lookup that
+            // reached them would surface here.
+            for expected in [TURN_IN_LOOP, "up ", "v2.0.14", "v0.5.1"] {
+                assert!(
+                    painted.iter().any(|text| text.contains(expected)),
+                    "{theme:?} drew no {expected:?}, so this test proves nothing \
+                     about it: {painted:?}"
+                );
+            }
         }
 
         let _ = std::fs::remove_dir_all(&root);
@@ -7833,7 +8424,7 @@ mod tests {
 
         // ...and all of it reaches the screen.
         let painted = painted_text(Theme::CipherPine, |ui| {
-            render_agents(ui, &sessions, Theme::CipherPine)
+            render_collapsed(ui, &sessions, Theme::CipherPine)
         });
         assert!(
             painted.iter().any(|text| text == SUBAGENT_PREFIX),
@@ -7880,7 +8471,7 @@ mod tests {
     #[test]
     fn an_empty_scan_says_so_and_draws_no_provider_headers() {
         for theme in [Theme::CipherPine, Theme::Plain] {
-            let painted = painted_text(theme, |ui| render_agents(ui, &[], theme));
+            let painted = painted_text(theme, |ui| render_collapsed(ui, &[], theme));
             assert!(
                 painted.iter().any(|text| text == NO_AGENTS_LINE),
                 "{theme:?} printed no empty state: {painted:?}"
@@ -7903,7 +8494,7 @@ mod tests {
             false,
         )];
         let painted = painted_text(Theme::CipherPine, |ui| {
-            render_agents(ui, &sessions, Theme::CipherPine)
+            render_collapsed(ui, &sessions, Theme::CipherPine)
         });
         assert!(painted.iter().any(|text| text == "CODEX"), "{painted:?}");
         assert!(!painted.iter().any(|text| text == "CLAUDE"), "{painted:?}");
@@ -7961,7 +8552,7 @@ mod tests {
                 true,
             )];
             for theme in [Theme::CipherPine, Theme::Plain] {
-                let laid = lay_out_themed(theme, |ui| render_agents(ui, &sessions, theme));
+                let laid = lay_out_themed(theme, |ui| render_collapsed(ui, &sessions, theme));
                 assert!(
                     laid.width <= laid.available_width,
                     "{theme:?} row with {branch:?} wanted {}px inside {}px",
@@ -7974,22 +8565,36 @@ mod tests {
 
     #[test]
     fn the_agents_demo_fits_the_window_it_opens() {
-        // `--agents-demo` opens the ordinary window, so the fixture has to fit
-        // the ordinary height — no demo-sized viewport, no scroll bar.
+        // Since M16 the window `--agents-demo` opens is the demo-sized one, for
+        // `--pace-demo`'s reason: reviewing a fixture through a scroll bar is
+        // reviewing it in pieces, and the row this pass exists for is the foot
+        // line at the very bottom.
+        //
+        // **Both states**, because the toggle is meant to be clicked: an
+        // expanded pane that needs a scroll bar hides the rows it just added.
         let sessions = demo_agents(SystemTime::now());
         for theme in [Theme::CipherPine, Theme::Plain] {
-            let laid = lay_out_themed(theme, |ui| render_agents(ui, &sessions, theme));
-            let needed = snapped_height(laid.height, laid.panel_chrome_height);
-            assert!(
-                needed <= WINDOW_HEIGHT,
-                "{theme:?} demo needs {needed}px inside the {WINDOW_HEIGHT}px window"
-            );
-            assert!(
-                laid.width <= laid.available_width,
-                "{theme:?} demo wanted {}px inside {}px",
-                laid.width,
-                laid.available_width
-            );
+            for (label, expanded) in [("collapsed", false), ("expanded", true)] {
+                let laid = lay_out_sized(theme, DEMO_WINDOW_HEIGHT, |ui| {
+                    if expanded {
+                        render_expanded(ui, &sessions, theme);
+                    } else {
+                        render_collapsed(ui, &sessions, theme);
+                    }
+                });
+                let needed = snapped_height(laid.height, laid.panel_chrome_height);
+                assert!(
+                    needed <= DEMO_WINDOW_HEIGHT,
+                    "{theme:?} {label} demo needs {needed}px inside the \
+                     {DEMO_WINDOW_HEIGHT}px demo window"
+                );
+                assert!(
+                    laid.width <= laid.available_width,
+                    "{theme:?} {label} demo wanted {}px inside {}px",
+                    laid.width,
+                    laid.available_width
+                );
+            }
         }
     }
 
@@ -8046,6 +8651,830 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- M16: the pane opens on what is alive ---
+
+    /// Four sessions spanning the two-hour line: two the pane opens on, two
+    /// behind the foot line.
+    fn split_fixture() -> Vec<AgentSession> {
+        vec![
+            agent_row(
+                ProviderId::ClaudeSubscription,
+                "aaaa1111",
+                "QuotaPane",
+                Some("main"),
+                Duration::from_secs(30),
+                false,
+            ),
+            agent_row(
+                ProviderId::CodexSubscription,
+                "bbbb2222",
+                "payments-api",
+                Some("feat/x"),
+                Duration::from_secs(20 * 60),
+                false,
+            ),
+            agent_row(
+                ProviderId::ClaudeSubscription,
+                "cccc3333",
+                "dotfiles",
+                Some("main"),
+                AGENTS_RECENT_WINDOW + Duration::from_secs(1),
+                false,
+            ),
+            agent_row(
+                ProviderId::CodexSubscription,
+                "dddd4444",
+                "notes",
+                None,
+                Duration::from_secs(5 * 3600),
+                false,
+            ),
+        ]
+    }
+
+    /// The strings one row painted, drawn on its own.
+    fn painted_row_text(theme: Theme, session: &AgentSession) -> Vec<String> {
+        painted_text(theme, |ui| render_agent_row(ui, session, theme, false))
+    }
+
+    /// How tall one row laid out, drawn on its own.
+    fn row_height(theme: Theme, session: &AgentSession) -> f32 {
+        lay_out_themed(theme, |ui| render_agent_row(ui, session, theme, false)).height
+    }
+
+    /// Every pulse bar one row painted, left to right, as heights.
+    ///
+    /// Selected by the strip's own ink, so nothing else the row draws — a
+    /// separator, a label's background — can be mistaken for a beat.
+    fn painted_pulse_bars(theme: Theme, session: &AgentSession) -> Vec<f32> {
+        let ink = pulse_color(session.state);
+        let mut bars: Vec<(f32, f32)> =
+            painted_shapes_themed(theme, |ui| render_agent_row(ui, session, theme, false))
+                .into_iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Rect(rect) if rect.fill == ink => {
+                        Some((rect.rect.left(), rect.rect.height()))
+                    }
+                    _ => None,
+                })
+                .collect();
+        bars.sort_by(|a, b| a.0.total_cmp(&b.0));
+        bars.into_iter().map(|(_, height)| height).collect()
+    }
+
+    /// Every colour any run of text was painted in, across a whole pane render.
+    fn painted_section_colors(theme: Theme, sessions: &[AgentSession]) -> Vec<egui::Color32> {
+        painted_shapes_themed(theme, |ui| render_expanded(ui, sessions, theme))
+            .into_iter()
+            .flat_map(|shape| match shape {
+                egui::Shape::Text(text) => text
+                    .galley
+                    .job
+                    .sections
+                    .iter()
+                    .map(|section| section.format.color)
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Click the pane's foot line the way a user would, and report the flag it
+    /// left behind.
+    ///
+    /// A real pointer gesture through a real `Context`, for
+    /// `gesture_on_switcher`'s reason: the line's position is discovered from
+    /// the shapes the pane actually painted, so this clicks where a user would
+    /// rather than at a coordinate written down here and left to rot.
+    fn click_foot_line(sessions: &[AgentSession], show_older: bool) -> bool {
+        let ctx = egui::Context::default();
+        install_theme(&ctx, Theme::CipherPine);
+        let mut flag = show_older;
+        let input = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(WINDOW_WIDTH, DEMO_WINDOW_HEIGHT),
+            )),
+            events,
+            ..Default::default()
+        };
+        let run = |raw: egui::RawInput, flag: &mut bool| {
+            let out = ctx.run_ui(raw, |ui| {
+                render_agents(ui, sessions, Theme::CipherPine, flag);
+            });
+            let mut flat = Vec::new();
+            for shape in out.shapes {
+                flatten_shape(shape.shape, &mut flat);
+            }
+            flat
+        };
+
+        // Two quiet frames: the first warms the font atlas, the second settles
+        // the widget rects egui resolves the next frame's pointer against.
+        run(input(vec![]), &mut flag);
+        let shapes = run(input(vec![]), &mut flag);
+
+        let wanted = older_toggle_line(
+            sessions.iter().filter(|s| is_older_session(s)).count(),
+            show_older,
+        );
+        let target = shapes
+            .into_iter()
+            .find_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.text() == wanted => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the pane never painted {wanted:?}"));
+
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(input(vec![egui::Event::PointerMoved(target)]), &mut flag);
+        run(input(vec![button(target, true)]), &mut flag);
+        run(input(vec![button(target, false)]), &mut flag);
+        run(input(vec![]), &mut flag);
+        flag
+    }
+
+    #[test]
+    fn the_pane_opens_on_the_last_two_hours_and_keeps_the_rest_one_click_away() {
+        let sessions = split_fixture();
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let collapsed = painted_text(theme, |ui| render_collapsed(ui, &sessions, theme));
+            for shown in ["QuotaPane", "payments-api"] {
+                assert!(
+                    collapsed.iter().any(|text| text.contains(shown)),
+                    "{theme:?} did not open on {shown}: {collapsed:?}"
+                );
+            }
+            for hidden in ["dotfiles", "notes"] {
+                assert!(
+                    !collapsed.iter().any(|text| text.contains(hidden)),
+                    "{theme:?} opened on {hidden}, which is older than the window: \
+                     {collapsed:?}"
+                );
+            }
+            assert!(
+                collapsed.iter().any(|text| text == "// 2 older today"),
+                "{theme:?} hid two rows without saying so: {collapsed:?}"
+            );
+
+            // Never gone, only folded: one click brings all four back, under
+            // their own provider headers rather than a second set.
+            let expanded = painted_text(theme, |ui| render_expanded(ui, &sessions, theme));
+            for project in ["QuotaPane", "payments-api", "dotfiles", "notes"] {
+                assert!(
+                    expanded.iter().any(|text| text.contains(project)),
+                    "{theme:?} expanded without {project}: {expanded:?}"
+                );
+            }
+            // Each theme spells its own header — `// CLAUDE` in Cipher Pine, a
+            // title-cased heading in Plain — and either way there is one of it.
+            let claude = provider_label(ProviderId::ClaudeSubscription);
+            let header = match theme {
+                Theme::CipherPine => claude.to_uppercase(),
+                Theme::Plain => claude.to_string(),
+            };
+            assert_eq!(
+                expanded.iter().filter(|text| **text == header).count(),
+                1,
+                "{theme:?} grew a second {header} header for the older rows: {expanded:?}"
+            );
+            assert!(
+                expanded.iter().any(|text| text == HIDE_OLDER_LINE),
+                "{theme:?} offered no way back: {expanded:?}"
+            );
+            assert!(
+                !expanded.iter().any(|text| text.contains("older today")),
+                "{theme:?} still counts rows it is already showing: {expanded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_hour_boundary_belongs_to_the_recent_side() {
+        let at = agent_row(
+            ProviderId::ClaudeSubscription,
+            "aaaa1111",
+            "boundary",
+            Some("main"),
+            AGENTS_RECENT_WINDOW,
+            false,
+        );
+        let past = AgentSession {
+            age: AGENTS_RECENT_WINDOW + Duration::from_secs(1),
+            ..at.clone()
+        };
+        assert!(!is_older_session(&at), "the boundary row is still recent");
+        assert!(is_older_session(&past), "a second past it is not");
+
+        // ...and the pane agrees with the predicate.
+        let theme = Theme::CipherPine;
+        let opened_rows = vec![at];
+        let opened = painted_text(theme, |ui| render_collapsed(ui, &opened_rows, theme));
+        assert!(
+            opened.iter().any(|text| text.contains("boundary")),
+            "{opened:?}"
+        );
+        assert!(
+            !opened.iter().any(|text| text.contains("older today")),
+            "the boundary row was counted as older: {opened:?}"
+        );
+
+        // The second empty state: something scanned, none of it recent. The
+        // 24 h line would be false here, and is not what is drawn.
+        let folded_rows = vec![past];
+        let folded = painted_text(theme, |ui| render_collapsed(ui, &folded_rows, theme));
+        assert!(
+            folded.iter().any(|text| text == NO_RECENT_AGENTS_LINE),
+            "{folded:?}"
+        );
+        assert!(
+            !folded.iter().any(|text| text == NO_AGENTS_LINE),
+            "the 24h line claims nothing ran today, over a row that did: {folded:?}"
+        );
+        assert!(
+            folded.iter().any(|text| text == "// 1 older today"),
+            "{folded:?}"
+        );
+    }
+
+    #[test]
+    fn the_foot_line_counts_without_inventing_a_plural() {
+        // `older` is a comparative, not a noun: one row and seven rows read
+        // the same sentence with a different number in it.
+        assert_eq!(older_toggle_line(1, false), "// 1 older today");
+        assert_eq!(older_toggle_line(2, false), "// 2 older today");
+        assert_eq!(older_toggle_line(7, false), "// 7 older today");
+        assert_eq!(older_toggle_line(1, true), HIDE_OLDER_LINE);
+        assert_eq!(older_toggle_line(7, true), HIDE_OLDER_LINE);
+
+        // ...and the number the pane puts there is the number it is holding.
+        for count in 1..=3usize {
+            let sessions: Vec<AgentSession> = (0..count)
+                .map(|index| {
+                    agent_row(
+                        ProviderId::ClaudeSubscription,
+                        &format!("old{index}"),
+                        "dotfiles",
+                        Some("main"),
+                        AGENTS_RECENT_WINDOW + Duration::from_secs(60 * (index as u64 + 1)),
+                        false,
+                    )
+                })
+                .collect();
+            let painted = painted_text(Theme::CipherPine, |ui| {
+                render_collapsed(ui, &sessions, Theme::CipherPine)
+            });
+            let wanted = format!("// {count} older today");
+            assert!(
+                painted.contains(&wanted),
+                "{count} older rows did not read {wanted:?}: {painted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_the_foot_line_folds_the_older_rows_in_and_out() {
+        let sessions = split_fixture();
+        assert!(
+            click_foot_line(&sessions, false),
+            "a click on the count did not bring the older rows in"
+        );
+        assert!(
+            !click_foot_line(&sessions, true),
+            "a click on `hide older` did not fold them away again"
+        );
+    }
+
+    #[test]
+    fn the_second_line_is_for_a_session_that_is_still_going() {
+        for (age, expected_state, expected_line) in [
+            (Duration::from_secs(30), AgentState::Working, true),
+            (
+                agents::ACTIVE_WITHIN + Duration::from_secs(1),
+                AgentState::Idle,
+                true,
+            ),
+            (
+                agents::IDLE_WITHIN + Duration::from_secs(1),
+                AgentState::Recent,
+                false,
+            ),
+        ] {
+            let session = live_row(
+                age,
+                TurnState::InLoop,
+                Some(Duration::from_secs(12 * 60)),
+                Some("2.0.14"),
+                [3; agents::PULSE_BUCKETS],
+            );
+            assert_eq!(session.state, expected_state, "fixture age {age:?}");
+            assert_eq!(has_detail_line(&session), expected_line, "{age:?}");
+            for theme in [Theme::CipherPine, Theme::Plain] {
+                let painted = painted_row_text(theme, &session);
+                assert_eq!(
+                    painted.iter().any(|text| text.contains(TURN_IN_LOOP)),
+                    expected_line,
+                    "{theme:?} at {age:?} drew: {painted:?}"
+                );
+                assert_eq!(
+                    painted_pulse_bars(theme, &session).is_empty(),
+                    !expected_line,
+                    "{theme:?} at {age:?} disagreed about the strip"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_with_nothing_to_add_draws_exactly_one_line() {
+        let bare = live_row(
+            Duration::from_secs(30),
+            TurnState::Unknown,
+            None,
+            None,
+            [0; agents::PULSE_BUCKETS],
+        );
+        assert!(!has_detail_line(&bare), "nothing to say is not a line");
+        let full = AgentSession {
+            turn: TurnState::InLoop,
+            duration: Some(Duration::from_secs(12 * 60)),
+            cli_version: Some("2.0.14".to_string()),
+            pulse: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            ..bare.clone()
+        };
+        // A finished row is one line by rule, whatever it could have said.
+        let finished = agent_row(
+            ProviderId::ClaudeSubscription,
+            "a1b2c3d4",
+            "QuotaPane",
+            Some("main"),
+            Duration::from_secs(3 * 3600),
+            false,
+        );
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let bare_height = row_height(theme, &bare);
+            assert!(
+                row_height(theme, &full) > bare_height,
+                "{theme:?}: a row with four things to say drew no second line"
+            );
+            assert_eq!(
+                bare_height,
+                row_height(theme, &finished),
+                "{theme:?}: a live row with nothing to add is taller than a \
+                 finished one — an empty indented gap"
+            );
+        }
+    }
+
+    #[test]
+    fn your_turn_is_the_only_colour_the_second_line_carries() {
+        let waiting = vec![live_row(
+            Duration::from_secs(30),
+            TurnState::YourTurn,
+            Some(Duration::from_secs(47 * 60)),
+            Some("2.0.14"),
+            [0; agents::PULSE_BUCKETS],
+        )];
+        let busy = vec![live_row(
+            Duration::from_secs(30),
+            TurnState::InLoop,
+            Some(Duration::from_secs(47 * 60)),
+            Some("2.0.14"),
+            [0; agents::PULSE_BUCKETS],
+        )];
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            assert_eq!(
+                painted_run_color(theme, &waiting, TURN_YOUR_TURN),
+                Some(AMBER),
+                "{theme:?} did not paint `your turn` in AMBER"
+            );
+            assert_eq!(
+                painted_section_colors(theme, &waiting)
+                    .iter()
+                    .filter(|color| **color == AMBER)
+                    .count(),
+                1,
+                "{theme:?} painted more than the turn phrase in AMBER"
+            );
+            // The busy row is the ordinary case and wants no eye at all: the
+            // fixture is `Working`, so nothing in it — dot included — is amber.
+            assert!(
+                !painted_section_colors(theme, &busy).contains(&AMBER),
+                "{theme:?} coloured `in the loop` like a row that wants attention"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pulse_scales_against_the_rows_own_busiest_minute() {
+        // Four beats beside seven, in a row whose busiest minute is seven: the
+        // tall bar is the whole 7px strip and the short one is four sevenths of
+        // it. Scaled against PULSE_CAP instead, both would be a 1px stub and
+        // the shape — the only thing this strip is for — would be gone.
+        let mut pulse = [0u32; agents::PULSE_BUCKETS];
+        pulse[0] = 4;
+        pulse[1] = 7;
+        let paired = live_row(
+            Duration::from_secs(30),
+            TurnState::Unknown,
+            None,
+            None,
+            pulse,
+        );
+        assert_eq!(
+            painted_pulse_bars(Theme::CipherPine, &paired),
+            vec![4.0, PULSE_BAR_HEIGHT]
+        );
+
+        // ...and one record in a minute still reads as different from silence,
+        // however busy the minute it is standing next to.
+        let mut lopsided = [0u32; agents::PULSE_BUCKETS];
+        lopsided[0] = 1;
+        lopsided[agents::PULSE_BUCKETS - 1] = agents::PULSE_CAP;
+        let lopsided = live_row(
+            Duration::from_secs(30),
+            TurnState::Unknown,
+            None,
+            None,
+            lopsided,
+        );
+        assert_eq!(
+            painted_pulse_bars(Theme::CipherPine, &lopsided),
+            vec![1.0, PULSE_BAR_HEIGHT]
+        );
+
+        // The strip is exactly the ten buckets wide it claims to be.
+        assert_eq!(PULSE_STRIP_WIDTH, 29.0);
+        assert_eq!(agents::PULSE_BUCKETS, 10);
+    }
+
+    #[test]
+    fn the_second_line_starts_under_the_identity_and_not_under_the_dot() {
+        // The whole of the inset claim, and nothing else in this file holds it:
+        // the second line begins one column in, where the identity above it
+        // begins, so the two read as one row rather than as a row and a stray.
+        // Written after a mutation pass found that dropping `add_space(indent)`
+        // altogether broke no test at all.
+        let beating = live_row(
+            Duration::from_secs(30),
+            TurnState::InLoop,
+            Some(Duration::from_secs(12 * 60)),
+            Some("2.0.14"),
+            [4; agents::PULSE_BUCKETS],
+        );
+        let silent = AgentSession {
+            pulse: [0; agents::PULSE_BUCKETS],
+            ..beating.clone()
+        };
+        let identity = agent_identity(&beating);
+
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let left_edges = |session: &AgentSession| {
+                let shapes =
+                    painted_shapes_themed(theme, |ui| render_agent_row(ui, session, theme, false));
+                let text_x = |wanted: &str| {
+                    shapes.iter().find_map(|shape| match shape {
+                        egui::Shape::Text(text) if text.galley.text() == wanted => Some(text.pos.x),
+                        _ => None,
+                    })
+                };
+                let strip_x = shapes.iter().find_map(|shape| match shape {
+                    egui::Shape::Rect(rect) if rect.fill == pulse_color(session.state) => {
+                        Some(rect.rect.left())
+                    }
+                    _ => None,
+                });
+                (
+                    text_x(FRESHNESS_DOT).expect("no dot"),
+                    text_x(&identity).expect("no identity"),
+                    strip_x,
+                    text_x(&format!(
+                        "{TURN_IN_LOOP}{AGENT_ROW_SEPARATOR}up 12m{AGENT_ROW_SEPARATOR}v2.0.14"
+                    )),
+                )
+            };
+
+            // A row whose second line leads with its strip.
+            let (dot_x, identity_x, strip_x, _) = left_edges(&beating);
+            assert!(
+                identity_x > dot_x,
+                "{theme:?}: the identity does not sit right of the dot"
+            );
+            let strip_x = strip_x.expect("the beating row painted no strip");
+            assert!(
+                (strip_x - identity_x).abs() < 0.5,
+                "{theme:?}: the strip starts at {strip_x}, the identity at \
+                 {identity_x} — the second line is not under the identity"
+            );
+
+            // ...and a row whose second line is words only lands in the same
+            // column, so the inset is the indent and not the strip.
+            let (_, identity_x, strip_x, words_x) = left_edges(&silent);
+            assert!(strip_x.is_none(), "{theme:?}: a silent row painted a strip");
+            let words_x = words_x.expect("the silent row painted no second line");
+            assert!(
+                (words_x - identity_x).abs() < 0.5,
+                "{theme:?}: the words start at {words_x}, the identity at \
+                 {identity_x}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_silent_pulse_paints_nothing_and_costs_no_room() {
+        let quiet = live_row(
+            Duration::from_secs(30),
+            TurnState::InLoop,
+            Some(Duration::from_secs(12 * 60)),
+            Some("2.0.14"),
+            [0; agents::PULSE_BUCKETS],
+        );
+        let mut beating = quiet.clone();
+        beating.pulse[agents::PULSE_BUCKETS - 1] = 1;
+
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            assert!(
+                painted_pulse_bars(theme, &quiet).is_empty(),
+                "{theme:?} painted a bar for a row with no beats"
+            );
+            assert_eq!(painted_pulse_bars(theme, &beating).len(), 1, "{theme:?}");
+
+            // Nor is the strip's width reserved for it: the words of a silent
+            // row start where the indent ends, not a strip further right.
+            let text_x = |session: &AgentSession| {
+                painted_shapes_themed(theme, |ui| render_agent_detail_line(ui, session, theme))
+                    .into_iter()
+                    .find_map(|shape| match shape {
+                        egui::Shape::Text(text) => Some(text.pos.x),
+                        _ => None,
+                    })
+                    .expect("the second line painted no text")
+            };
+            let shift = text_x(&beating) - text_x(&quiet);
+            assert!(
+                (shift - (PULSE_STRIP_WIDTH + PULSE_TEXT_GAP)).abs() < 0.5,
+                "{theme:?}: a beating row's words moved {shift}px, not the \
+                 {}px a strip and its gap cost",
+                PULSE_STRIP_WIDTH + PULSE_TEXT_GAP
+            );
+        }
+    }
+
+    #[test]
+    fn an_older_row_arrives_dimmed_and_keeps_its_state_dot() {
+        let recent = vec![agent_row(
+            ProviderId::ClaudeSubscription,
+            "cccc3333",
+            "dotfiles",
+            Some("main"),
+            AGENTS_RECENT_WINDOW,
+            false,
+        )];
+        let older = vec![AgentSession {
+            age: AGENTS_RECENT_WINDOW + Duration::from_secs(1),
+            ..recent[0].clone()
+        }];
+        let identity = "dotfiles · main · cccc3333";
+        assert_eq!(agent_identity(&recent[0]), identity);
+
+        assert_eq!(
+            painted_run_color(Theme::CipherPine, &recent, identity),
+            Some(TEXT)
+        );
+        assert_eq!(
+            painted_run_color(Theme::CipherPine, &older, identity),
+            Some(TEXT_FAINT),
+            "an older row must read dimmer than a recent one"
+        );
+        // Plain has no palette of its own here — it borrows egui's — so the
+        // claim it can make is that the two are not drawn alike.
+        let plain_recent = painted_run_color(Theme::Plain, &recent, identity);
+        let plain_older = painted_run_color(Theme::Plain, &older, identity);
+        assert!(plain_recent.is_some() && plain_older.is_some());
+        assert_ne!(
+            plain_recent, plain_older,
+            "Plain drew an older row exactly like a recent one"
+        );
+
+        // The dot is untouched: a state is not less true for being old, and
+        // the dot is the one thing on the row that reports it.
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            assert_eq!(agent_dot_colors(theme, &older), vec![TEXT_FAINT]);
+        }
+    }
+
+    #[test]
+    fn the_second_line_says_uptime_and_version_the_way_the_row_reads_them() {
+        for (secs, expected) in [
+            (0, "up 0s"),
+            (59, "up 59s"),
+            (60, "up 1m"),
+            (12 * 60, "up 12m"),
+            (3599, "up 59m"),
+            (3600, "up 1h00m"),
+            (3 * 3600 + 20 * 60, "up 3h20m"),
+            (23 * 3600 + 59 * 60 + 59, "up 23h59m"),
+        ] {
+            assert_eq!(format_uptime(Duration::from_secs(secs)), expected);
+        }
+        assert_eq!(format_cli_version("2.0.14"), "v2.0.14");
+        assert_eq!(format_cli_version("0.5.1"), "v0.5.1");
+        // A CLI that ever writes its own `v` is not handed a second one.
+        assert_eq!(format_cli_version("v1.2.3"), "v1.2.3");
+
+        // Ordering is by value under truncation: turn, then duration, then
+        // version — and anything the scan could not name is absent, not empty.
+        let full = live_row(
+            Duration::from_secs(30),
+            TurnState::YourTurn,
+            Some(Duration::from_secs(12 * 60)),
+            Some("2.0.14"),
+            [0; agents::PULSE_BUCKETS],
+        );
+        assert_eq!(
+            agent_detail_parts(&full),
+            ["your turn", "up 12m", "v2.0.14"]
+        );
+        assert_eq!(
+            agent_detail_parts(&AgentSession {
+                turn: TurnState::Unknown,
+                duration: None,
+                ..full.clone()
+            }),
+            ["v2.0.14"]
+        );
+        assert!(agent_detail_parts(&AgentSession {
+            turn: TurnState::Unknown,
+            duration: None,
+            cli_version: None,
+            ..full
+        })
+        .is_empty());
+    }
+
+    #[test]
+    fn the_second_line_elides_rather_than_overflowing_the_window() {
+        // Every part at its longest at once: the wordier phrase, a duration in
+        // hours, and a version string at `usage_core`'s own 16-character cap,
+        // over a full strip.
+        let session = live_row(
+            Duration::from_secs(30),
+            TurnState::InLoop,
+            Some(Duration::from_secs(23 * 3600 + 59 * 60)),
+            Some("2.0.14-nightly.9"),
+            [agents::PULSE_CAP; agents::PULSE_BUCKETS],
+        );
+        for theme in [Theme::CipherPine, Theme::Plain] {
+            let laid = lay_out_themed(theme, |ui| render_agent_row(ui, &session, theme, false));
+            assert!(
+                laid.width <= laid.available_width,
+                "{theme:?} second line wanted {}px inside {}px",
+                laid.width,
+                laid.available_width
+            );
+        }
+    }
+
+    #[test]
+    fn the_agents_demo_shows_the_whole_of_what_m16_added() {
+        let sessions = demo_agents(SystemTime::now());
+        assert_eq!(sessions.len(), 6, "the demo is not six rows: {sessions:?}");
+        assert_eq!(
+            sessions.iter().filter(|s| is_older_session(s)).count(),
+            1,
+            "the demo must open with exactly one row behind the foot line"
+        );
+        for turn in [TurnState::InLoop, TurnState::YourTurn] {
+            assert!(
+                sessions.iter().any(|s| s.turn == turn),
+                "the demo never shows {turn:?}"
+            );
+        }
+        assert!(
+            sessions.iter().any(
+                |s| s.provider == ProviderId::CodexSubscription && s.turn == TurnState::Unknown
+            ),
+            "the demo is missing the honest Codex row"
+        );
+        assert!(sessions.iter().any(has_pulse), "no row has a pulse");
+        assert!(
+            sessions
+                .iter()
+                .any(|s| s.state != AgentState::Recent && !has_pulse(s)),
+            "no live row shows what an empty strip looks like"
+        );
+
+        // Every row's numbers agree with each other, which is what makes this a
+        // fixture rather than a picture: a beat in the newest bucket that owns
+        // one means the row's own age says it was written that recently, and no
+        // bucket claims a beat from before the session started.
+        for session in &sessions {
+            let beats: Vec<usize> = session
+                .pulse
+                .iter()
+                .enumerate()
+                .filter(|(_, count)| **count > 0)
+                .map(|(index, _)| index)
+                .collect();
+            let (Some(oldest), Some(newest)) = (beats.first(), beats.last()) else {
+                continue;
+            };
+            let quiet_for = (agents::PULSE_BUCKETS - 1 - newest) as u64 * 60;
+            assert!(
+                session.age.as_secs() >= quiet_for && session.age.as_secs() < quiet_for + 60,
+                "{}: last beat {newest} buckets in, but the row's age is {:?}",
+                session.short_id,
+                session.age
+            );
+            let began_before = (agents::PULSE_BUCKETS - oldest) as u64 * 60;
+            let up = session.duration.expect("a beating row knows its uptime");
+            assert!(
+                up.as_secs() + 60 >= began_before,
+                "{}: a beat {oldest} buckets in, but it has only been up {up:?}",
+                session.short_id
+            );
+        }
+
+        // ...and all of it reaches the screen the reviewer is shown.
+        let painted = painted_text(Theme::CipherPine, |ui| {
+            render_collapsed(ui, &sessions, Theme::CipherPine)
+        });
+        for expected in [
+            TURN_IN_LOOP,
+            TURN_YOUR_TURN,
+            "up 12m",
+            "v2.0.14",
+            "v0.5.1",
+            "// 1 older today",
+        ] {
+            assert!(
+                painted.iter().any(|text| text.contains(expected)),
+                "the demo never painted {expected:?}: {painted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_older_toggle_is_runtime_state_the_way_the_view_is() {
+        // Not persisted, for the reason `View` is not: which rows you have
+        // unfolded is where you are looking right now, not a preference. The
+        // window has exactly one writer, and the flag is not in what it writes.
+        const SRC: &str = include_str!("main.rs");
+        let code = &SRC[..SRC
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("test module not found")];
+        let body = code
+            .split("fn persist_preferences")
+            .nth(1)
+            .expect("persist_preferences not found");
+        let body = &body[..body.find("\n    }").expect("unterminated fn")];
+        assert!(
+            !body.contains("agents_show_older"),
+            "the single config writer now names the older toggle: {body}"
+        );
+        assert!(
+            !code.contains("config.agents_show_older"),
+            "the older toggle became a stored preference"
+        );
+    }
+
+    #[test]
+    fn neither_demo_reads_or_writes_the_saved_window_height() {
+        // M13 gave `--pace-demo` its own window and kept it out of the config;
+        // M16 gave `--agents-demo` the same, and the two halves — the height
+        // asked for at startup and the height observed afterwards — have to
+        // name the same set of flags or a fixture would save a height nobody
+        // chose.
+        assert_eq!(
+            initial_inner_height(true, config::DEFAULT_HEIGHT),
+            DEMO_WINDOW_HEIGHT
+        );
+        const SRC: &str = include_str!("main.rs");
+        let code = &SRC[..SRC
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("test module not found")];
+        assert!(
+            code.contains("initial_inner_height(pace_demo || agents_demo, config.height)"),
+            "the startup height no longer covers --agents-demo"
+        );
+        let body = code
+            .split("fn track_height")
+            .nth(1)
+            .expect("track_height not found");
+        let body = &body[..body.find("\n    }").expect("unterminated fn")];
+        assert!(
+            body.contains("if self.pace_demo || self.agents_demo {"),
+            "track_height would write a demo's window height to the config: {body}"
+        );
     }
 }
 

@@ -64,13 +64,22 @@ The titlebar carries a switcher: `usage // agents`. Click `agents` and
 the pane lists the Claude Code and Codex CLI sessions running on this
 machine — a state dot (green working, amber idle, faint finished),
 `project · branch · id8`, and how long since each last wrote. A row
-marked `· sub` is a subagent.
+marked `· sub` is a subagent. The pane opens on the last **two hours**,
+with anything older one click away behind a `// N older today` line, so
+a morning's finished sessions do not crowd out the one running now. A
+session that is still going carries a second line: a ten-minute activity
+strip, how long it has been up, the CLI version, and — for Claude Code,
+whose transcript says so — whether it is `in the loop` or it is `your
+turn`.
 
 **Identity only, never content.** The list comes from the session-log
 files those CLIs already write (`~/.claude/projects/`,
 `~/.codex/sessions/`), opened read-only, and QuotaPane extracts a fixed
 allowlist of metadata keys from them: ids, timestamps, record types, the
-working directory, the git branch. Your conversations are never
+working directory, the git branch, and the CLI's own version string. The
+second line above is made of the same stuff — the activity strip counts
+timestamps, and the turn phrase reads a record's *type* and stops. Your
+conversations are never
 deserialized, never rendered, never stored, and never sent anywhere —
 that is [`SECURITY.md`](SECURITY.md) invariant 8, and a test plants
 sentinel text in a fixture transcript and asserts it cannot reach any
