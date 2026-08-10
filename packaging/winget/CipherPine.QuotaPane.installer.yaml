@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+
+# The published release archive, installed as two portable commands.
+#
+# There is no installer to run: the archive holds self-contained binaries, so
+# WinGet unpacks it and puts `quotapane` and `quotapane-cli` on PATH. That is
+# the honest shape for this package — an MSI would create an uninstall entry
+# for something that has nothing to uninstall.
+#
+# InstallerSha256 is the value published in the release's own SHA256SUMS,
+# cross-checked against an independently computed hash of the downloaded asset
+# before being copied here. See README.md in this directory.
+
+PackageIdentifier: CipherPine.QuotaPane
+PackageVersion: 1.7.0
+MinimumOSVersion: 10.0.0.0
+ReleaseDate: 2026-08-08
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: quotapane-v1.7.0-x86_64-pc-windows-msvc\quotapane.exe
+    PortableCommandAlias: quotapane
+  - RelativeFilePath: quotapane-v1.7.0-x86_64-pc-windows-msvc\quotapane-cli.exe
+    PortableCommandAlias: quotapane-cli
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/cipherpine/quotapane/releases/download/v1.7.0/quotapane-v1.7.0-x86_64-pc-windows-msvc.zip
+    InstallerSha256: 5B465E544DFAF62C80BFBA6F6093C2A4C674BBCE94D414747A9A3B95BE86B64F
+ManifestType: installer
+ManifestVersion: 1.6.0
