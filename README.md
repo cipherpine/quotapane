@@ -209,7 +209,7 @@ quotapane-cli --statusline
 |---|---|
 | `--once` | Poll once and exit. Exactly one of `--once` and `--watch` is required. |
 | `--watch <SECS>` | Poll every `SECS` seconds until interrupted. `SECS` must be at least **180** — the same polling floor the window respects, applied to scripted polling too. Text output precedes each cycle with a `--- <RFC 3339 UTC timestamp> ---` separator; with `--json`, each cycle is one compact line (NDJSON). |
-| `--statusline` | Read one [Claude Code statusline](https://docs.claude.com/en/docs/claude-code/statusline) JSON document from stdin, print one line of quota, and exit 0 — e.g. `5h 12% · 7d 83%! · resets 2h10m`. **The only mode that sends nothing:** Claude Code already hands its statusline command the quota numbers, so QuotaPane opens no credential file, builds no HTTP client, and makes no request. Combines with no other polling flag. A payload with no `rate_limits` in it prints nothing and still exits 0 — a status line must never break its host. The line is for humans and is **not** covered by the `--json` stability contract. |
+| `--statusline` | Read one [Claude Code statusline](https://docs.claude.com/en/docs/claude-code/statusline) JSON document from stdin, print one line of quota, and exit 0 — e.g. `5h 12% · 7d 83%! · resets 2h10m`. **The only mode that sends nothing:** Claude Code already hands its statusline command the quota numbers, so QuotaPane opens no credential file, builds no HTTP client, and makes no request. Combines with no other polling flag. A payload with no `rate_limits` in it prints nothing and still exits 0 — a status line must never break its host. The line is for humans and is **not** covered by the `--json` stability contract. Setup, and the cases where the payload carries no quota at all: [`docs/gating.md`](docs/gating.md#5-claude-codes-own-status-line). |
 | `--fail-at <N>` | Exit **3** if any window is at or over `N` percent used (`N` is 1–100), after printing the normal output. Checked over every window of every provider that polled successfully — headline **and** per-model, because a gate should fail safe. Under `--watch`, the first tripping cycle exits. |
 | `--json` | Emit the normalized snapshot as JSON instead of a text summary. With `--provider all`, emits an array. The keys are documented in [`docs/cli-json.md`](docs/cli-json.md), which also states the stability policy. |
 | `--provider <WHICH>` | `claude`, `codex`, or `all`. Default: `claude`. |
@@ -235,6 +235,8 @@ quotapane-cli --once --provider all --fail-at 85 || exit 1
 ```
 
 QuotaPane never executes anything on your behalf — `--fail-at` reports, and your script decides.
+
+**Gating** — that one-liner explained, plus a CI stage that refuses to start under quota pressure, a background NDJSON heartbeat, a `pre-push` hook that warns without blocking, and the Claude Code status line setup: [`docs/gating.md`](docs/gating.md).
 
 If a token has expired, QuotaPane says so and tells you to run `claude` or `codex` — it never refreshes tokens itself.
 
