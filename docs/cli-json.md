@@ -6,7 +6,10 @@ parsing QuotaPane's output in a script.
 
 Only `--json` output is a contract. The text summary is for humans and
 may be reworded at any time; `--debug-raw` prints a provider's wire
-response, which is the provider's shape, not ours.
+response, which is the provider's shape, not ours; and `--statusline`
+emits a one-line human-format surface (`5h 12% · 7d 83%! · resets 2h10m`)
+that is **not** covered by this contract and may be reworded in any
+release.
 
 ## Stability policy
 

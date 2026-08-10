@@ -196,18 +196,20 @@ quotapane [--client-version <VER>] [--codex-user-agent <UA>] [--no-tray]
 | `--codex-user-agent <UA>` | Override the `User-Agent` sent to the Codex endpoint. Defaults to the Codex CLI's own. |
 | `--no-tray` | Start without the system tray icon. The escape hatch if tray creation fails. |
 
-The headless CLI takes exactly one mode: `--once` or `--watch <SECS>`.
+The headless CLI takes exactly one mode: `--once`, `--watch <SECS>`, or `--statusline`.
 
 ```
 quotapane-cli (--once | --watch <SECS>) [--json]
               [--provider claude|codex|all] [--fail-at <N>]
               [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe]
+quotapane-cli --statusline
 ```
 
 | Flag | Meaning |
 |---|---|
 | `--once` | Poll once and exit. Exactly one of `--once` and `--watch` is required. |
 | `--watch <SECS>` | Poll every `SECS` seconds until interrupted. `SECS` must be at least **180** — the same polling floor the window respects, applied to scripted polling too. Text output precedes each cycle with a `--- <RFC 3339 UTC timestamp> ---` separator; with `--json`, each cycle is one compact line (NDJSON). |
+| `--statusline` | Read one [Claude Code statusline](https://docs.claude.com/en/docs/claude-code/statusline) JSON document from stdin, print one line of quota, and exit 0 — e.g. `5h 12% · 7d 83%! · resets 2h10m`. **The only mode that sends nothing:** Claude Code already hands its statusline command the quota numbers, so QuotaPane opens no credential file, builds no HTTP client, and makes no request. Combines with no other polling flag. A payload with no `rate_limits` in it prints nothing and still exits 0 — a status line must never break its host. The line is for humans and is **not** covered by the `--json` stability contract. |
 | `--fail-at <N>` | Exit **3** if any window is at or over `N` percent used (`N` is 1–100), after printing the normal output. Checked over every window of every provider that polled successfully — headline **and** per-model, because a gate should fail safe. Under `--watch`, the first tripping cycle exits. |
 | `--json` | Emit the normalized snapshot as JSON instead of a text summary. With `--provider all`, emits an array. The keys are documented in [`docs/cli-json.md`](docs/cli-json.md), which also states the stability policy. |
 | `--provider <WHICH>` | `claude`, `codex`, or `all`. Default: `claude`. |

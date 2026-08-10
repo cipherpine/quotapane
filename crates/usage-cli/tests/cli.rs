@@ -362,6 +362,138 @@ fn the_two_modes_cannot_be_combined() {
     );
 }
 
+// --- M18a: --statusline, end to end through a real pipe ---
+
+/// Run `--statusline` with `payload` on stdin and return (exit code, stdout).
+///
+/// stdin is always a pipe, never inherited: the mode reads to EOF, and a test
+/// that let it inherit the harness's stdin could block forever.
+fn run_statusline(payload: &str, extra_args: &[&str]) -> (Option<i32>, String) {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(BIN)
+        .arg("--statusline")
+        .args(extra_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn quotapane-cli");
+    child
+        .stdin
+        .take()
+        .expect("stdin was not piped")
+        .write_all(payload.as_bytes())
+        .expect("failed to write the payload");
+
+    let out = child
+        .wait_with_output()
+        .expect("failed to run quotapane-cli");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+#[test]
+fn statusline_prints_one_line_from_a_real_payload_and_exits_zero() {
+    // The documented shape, with a reset far enough out that the countdown is
+    // stable whenever this test runs: `resets_at` is read against the real
+    // clock here, so the assertion checks the segments, not the exact minutes.
+    let resets_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before 1970")
+        .as_secs()
+        + 7_800;
+    let payload = format!(
+        r#"{{"cwd":"/tmp","model":{{"id":"claude-opus-5"}},"rate_limits":{{
+             "five_hour":{{"used_percentage":12,"resets_at":{resets_at}}},
+             "seven_day":{{"used_percentage":83.4,"resets_at":{resets_at}}}}}}}"#
+    );
+
+    let (code, stdout) = run_statusline(&payload, &[]);
+
+    assert_eq!(code, Some(0), "a statusline must exit 0: {stdout}");
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "the host displays one line; got: {stdout:?}"
+    );
+    let line = stdout.trim_end();
+    assert!(line.starts_with("5h 12% · 7d 83%!"), "got: {line:?}");
+    assert!(line.contains("· resets "), "got: {line:?}");
+    // Nothing from the rest of the payload came along for the ride.
+    assert!(!line.contains("/tmp") && !line.contains("opus"), "{line:?}");
+}
+
+#[test]
+fn statusline_survives_garbage_and_quota_less_payloads_with_exit_zero() {
+    // Every one of these is a real field condition: no rate_limits before the
+    // first API response, the #40094 plan/auth gap, and a host that piped
+    // something unexpected. None of them may break the status bar.
+    for payload in [
+        "",
+        "not json",
+        r#"{"cwd":"/tmp"}"#,
+        r#"{"rate_limits":{}}"#,
+        r#"{"rate_limits":null}"#,
+    ] {
+        let (code, stdout) = run_statusline(payload, &[]);
+        assert_eq!(code, Some(0), "{payload:?} must still exit 0");
+        assert!(
+            stdout.trim().is_empty(),
+            "{payload:?} must print nothing, got: {stdout:?}"
+        );
+    }
+}
+
+#[test]
+fn statusline_combined_with_a_polling_flag_exits_two() {
+    for (flag, value) in [
+        ("--once", None),
+        ("--json", None),
+        ("--fail-at", Some("85")),
+        ("--allow-proxy", None),
+    ] {
+        let mut cmd = Command::new(BIN);
+        cmd.arg("--statusline").arg(flag);
+        if let Some(v) = value {
+            cmd.arg(v);
+        }
+        let out = cmd.output().expect("failed to run quotapane-cli");
+
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "`--statusline {flag}` must be a usage error"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("--statusline cannot be combined with") && stderr.contains(flag),
+            "expected the conflict diagnostic naming {flag}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn help_lists_the_statusline_mode_on_its_own_usage_line() {
+    let out = Command::new(BIN)
+        .arg("--help")
+        .output()
+        .expect("failed to run quotapane-cli");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("       quotapane-cli --statusline"),
+        "the statusline mode needs its own synopsis line: {stdout}"
+    );
+    // Both claims a reader must be able to check before wiring it into a
+    // settings file: it sends nothing, and its output is not the contract.
+    assert!(stdout.contains("sends nothing"), "{stdout}");
+    assert!(stdout.contains("stability"), "{stdout}");
+}
+
 #[test]
 fn missing_required_mode_still_errors() {
     let out = Command::new(BIN)

@@ -34,6 +34,13 @@
 //! never executes anything on the user's behalf — it reports, and the user's
 //! own script decides what to do about it.
 //!
+//! M18a adds `--statusline`, a third mode beside `--once` and `--watch` and the
+//! only one that reports usage without asking anyone: Claude Code's statusline
+//! feature already hands its command the quota numbers on stdin, so the mode
+//! reads one JSON document, prints one line, and exits 0 — no credential file,
+//! no `Egress`, no byte sent. It lives in its own module so "sends nothing" can
+//! be pinned by scanning that module's source (see `mod statusline`).
+//!
 //! `--allow-proxy` (M9b) is the **only** proxy opt-in surface in the product.
 //! Egress refuses to send anything while a proxy environment variable is set
 //! and the user has not opted in — it fails closed, it does not quietly
@@ -41,6 +48,8 @@
 //! TLS-inspecting proxy can read my bearer token, do it anyway", for one run.
 //! The window has no equivalent: it constructs its egress proxy-off
 //! unconditionally (SECURITY.md invariant 7).
+
+mod statusline;
 
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -66,6 +75,7 @@ usage: quotapane-cli (--once | --watch <SECS>) [--json]
                      [--provider claude|codex|all] [--fail-at <N>]
                      [--client-version <VER>] [--debug-raw]
                      [--debug-raw-unsafe] [--allow-proxy]
+       quotapane-cli --statusline
 
 Options:
   --once                  Poll once and exit. Exactly one of --once and
@@ -76,6 +86,16 @@ Options:
                           output precedes each cycle with a separator line,
                           `--- <RFC 3339 UTC timestamp> ---`; with --json each
                           cycle prints one compact line instead (NDJSON).
+  --statusline            Read one Claude Code statusline JSON document from
+                          stdin, print one line of quota, and exit 0. The third
+                          mode, and the only one that sends nothing: the
+                          numbers are already in the payload, so no credential
+                          file is opened and no request is made. Combines with
+                          no other polling flag. A payload with no quota in it
+                          prints nothing and still exits 0 — a status line must
+                          never break its host. The line is a human-readable
+                          surface and is NOT covered by the --json stability
+                          contract.
   --fail-at <N>           Exit 3 if any window is at or over N percent used
                           (N is 1–100). Checked after the normal output is
                           printed, over every window of every provider that
@@ -509,7 +529,53 @@ fn render_debug_raw(raw: &str, byte_exact: bool) -> String {
 enum Invocation {
     Help,
     Version,
+    /// `--statusline`: format one stdin payload and exit. Carries no [`Args`]
+    /// because there is nothing to configure — no provider to choose, no
+    /// output shape to pick, and nothing to poll.
+    Statusline,
     Run(Args),
+}
+
+/// The flags `--statusline` refuses to share an invocation with, in the order
+/// they are reported.
+///
+/// Every one of them configures polling, and `--statusline` does not poll — an
+/// invocation carrying both asked for two different programs, so the parser
+/// refuses rather than silently ignoring one (the same reason `--once` and
+/// `--watch` cannot be combined). The order is fixed here so the message a
+/// script sees is deterministic; `--debug-raw-unsafe` precedes `--debug-raw`
+/// because it sets both, and the flag the user actually typed is the one worth
+/// naming.
+fn statusline_conflict(seen: PollingFlags) -> Option<&'static str> {
+    [
+        ("--once", seen.once),
+        ("--watch", seen.watch),
+        ("--json", seen.json),
+        ("--provider", seen.provider),
+        ("--fail-at", seen.fail_at),
+        ("--debug-raw-unsafe", seen.debug_raw_unsafe),
+        ("--debug-raw", seen.debug_raw),
+        ("--allow-proxy", seen.allow_proxy),
+    ]
+    .into_iter()
+    .find(|(_, present)| *present)
+    .map(|(flag, _)| flag)
+}
+
+/// Which polling flags this command line carried, for the check above.
+///
+/// A named struct rather than eight positional booleans: they are all the same
+/// type, so a transposed pair would compile silently and report the wrong flag.
+#[derive(Debug, Clone, Copy, Default)]
+struct PollingFlags {
+    once: bool,
+    watch: bool,
+    json: bool,
+    provider: bool,
+    fail_at: bool,
+    debug_raw: bool,
+    debug_raw_unsafe: bool,
+    allow_proxy: bool,
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, String> {
@@ -522,6 +588,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
     let mut debug_raw_unsafe = false;
     let mut allow_proxy = false;
     let mut fail_at: Option<u32> = None;
+    let mut statusline = false;
 
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
@@ -532,6 +599,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
             "--help" | "-h" => return Ok(Invocation::Help),
             "--version" => return Ok(Invocation::Version),
             "--once" => once = true,
+            "--statusline" => statusline = true,
             "--watch" => {
                 let value = iter
                     .next()
@@ -571,6 +639,28 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
         }
     }
 
+    // The statusline mode is resolved first and separately: it shares no
+    // configuration with the polling modes, so it is answered here rather than
+    // threaded through `Args` as a third `Mode` that every polling field would
+    // then have to be meaningless for.
+    if statusline {
+        if let Some(flag) = statusline_conflict(PollingFlags {
+            once,
+            watch: watch.is_some(),
+            json,
+            provider: provider.is_some(),
+            fail_at: fail_at.is_some(),
+            debug_raw,
+            debug_raw_unsafe,
+            allow_proxy,
+        }) {
+            return Err(format!(
+                "--statusline cannot be combined with {flag}; it reads one JSON document from stdin and prints one line"
+            ));
+        }
+        return Ok(Invocation::Statusline);
+    }
+
     // Exactly one mode. "Both" is not a merge of two intents and "neither" is
     // not a default — either way the CLI would be guessing, so it refuses.
     let mode = match (once, watch) {
@@ -579,7 +669,9 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
         (true, Some(_)) => {
             return Err("--once and --watch cannot be combined; pass exactly one".to_string())
         }
-        (false, None) => return Err("a mode is required: --once or --watch <SECS>".to_string()),
+        (false, None) => {
+            return Err("a mode is required: --once, --watch <SECS>, or --statusline".to_string())
+        }
     };
 
     let client_version_defaulted = client_version.is_none();
@@ -732,12 +824,25 @@ fn main() -> ExitCode {
             println!("quotapane-cli {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         }
+        // Answered here, and this arm returns: the statusline mode must be
+        // resolved before the `Egress::new` below ever runs. Nothing in this
+        // path opens a credential file or constructs a chokepoint — a test
+        // pins both the ordering and the module's contents.
+        Ok(Invocation::Statusline) => {
+            let line = statusline::line(&statusline::read_payload(), now_unix_secs());
+            // Nothing to say prints nothing at all, not a blank line.
+            if !line.is_empty() {
+                println!("{line}");
+            }
+            return ExitCode::SUCCESS;
+        }
         Ok(Invocation::Run(a)) => a,
         Err(e) => {
             eprintln!("error: {e}");
             eprintln!(
                 "usage: quotapane-cli (--once | --watch <SECS>) [--json] [--provider claude|codex|all] [--fail-at <N>] [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe] [--allow-proxy]"
             );
+            eprintln!("       quotapane-cli --statusline");
             eprintln!("try `quotapane-cli --help` for the full list of options");
             return ExitCode::from(2);
         }
@@ -1671,6 +1776,7 @@ mod tests {
         // source layout moved, the assertions below would pass vacuously.
         for expected in [
             "--once",
+            "--statusline",
             "--json",
             "--debug-raw",
             "--provider",
@@ -2195,5 +2301,180 @@ exit codes:
             "{HELP}"
         );
         assert!(HELP.contains("NDJSON"), "{HELP}");
+    }
+
+    // --- M18a: --statusline, the third mode ---
+
+    #[test]
+    fn statusline_is_its_own_invocation_and_needs_no_other_mode() {
+        // It does not satisfy "--once or --watch" — it replaces the question.
+        assert!(matches!(
+            parse_args(args(&["--statusline"])),
+            Ok(Invocation::Statusline)
+        ));
+        // And it is still compatible with the flags that describe nothing about
+        // polling: --client-version is inert here, not an error.
+        assert!(matches!(
+            parse_args(args(&["--statusline", "--client-version", "1.2.3"])),
+            Ok(Invocation::Statusline)
+        ));
+    }
+
+    #[test]
+    fn statusline_refuses_every_polling_flag_and_names_the_one_it_found() {
+        // Each conflict, in both orders — the flag before --statusline and
+        // after it — because a parser that only checked one order would let
+        // `--statusline --fail-at 85` through.
+        let cases: [(&[&str], &str); 8] = [
+            (&["--once"], "--once"),
+            (&["--watch", "300"], "--watch"),
+            (&["--json"], "--json"),
+            (&["--provider", "all"], "--provider"),
+            (&["--fail-at", "85"], "--fail-at"),
+            (&["--debug-raw"], "--debug-raw"),
+            (&["--debug-raw-unsafe"], "--debug-raw-unsafe"),
+            (&["--allow-proxy"], "--allow-proxy"),
+        ];
+
+        for (conflicting, expected) in cases {
+            // --statusline before the flag and after it. A parser that checked
+            // only one order would let `--statusline --fail-at 85` through.
+            for statusline_first in [true, false] {
+                let mut v: Vec<&str> = Vec::with_capacity(conflicting.len() + 1);
+                if statusline_first {
+                    v.push("--statusline");
+                }
+                v.extend_from_slice(conflicting);
+                if !statusline_first {
+                    v.push("--statusline");
+                }
+
+                let err = parse_args(args(&v))
+                    .err()
+                    .unwrap_or_else(|| panic!("{v:?} must be a usage error"));
+                assert!(
+                    err.contains("--statusline cannot be combined with"),
+                    "{v:?} produced the wrong error: {err}"
+                );
+                assert!(
+                    err.contains(expected),
+                    "{v:?} must name {expected}, got: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_reported_statusline_conflict_is_the_first_in_a_fixed_order() {
+        // With several present the message must be deterministic, not
+        // whichever the argument order happened to surface.
+        assert_eq!(
+            statusline_conflict(PollingFlags {
+                once: true,
+                watch: true,
+                json: true,
+                provider: true,
+                fail_at: true,
+                debug_raw: true,
+                debug_raw_unsafe: true,
+                allow_proxy: true,
+            }),
+            Some("--once")
+        );
+        assert_eq!(
+            statusline_conflict(PollingFlags {
+                json: true,
+                fail_at: true,
+                ..PollingFlags::default()
+            }),
+            Some("--json")
+        );
+        // --debug-raw-unsafe sets both flags; the one the user typed is named.
+        assert_eq!(
+            statusline_conflict(PollingFlags {
+                debug_raw: true,
+                debug_raw_unsafe: true,
+                ..PollingFlags::default()
+            }),
+            Some("--debug-raw-unsafe")
+        );
+        assert_eq!(
+            statusline_conflict(PollingFlags {
+                debug_raw: true,
+                ..PollingFlags::default()
+            }),
+            Some("--debug-raw")
+        );
+        // Nothing conflicting: the mode stands alone.
+        assert_eq!(statusline_conflict(PollingFlags::default()), None);
+    }
+
+    #[test]
+    fn the_statusline_mode_is_resolved_before_any_egress_is_constructed() {
+        // The ordering, not just the absence: "this mode sends nothing" must
+        // not rest on `Egress::new` happening to be harmless to call. The arm
+        // has to appear — and return — ahead of the constructor in `main`.
+        // The `=>` matters: `parse_args` also *returns* `Ok(Invocation::
+        // Statusline)`, and that one is not the arm under test.
+        let code = real_code();
+        let arm = code
+            .find("Ok(Invocation::Statusline) =>")
+            .expect("main does not handle Invocation::Statusline");
+        let egress = code
+            .find("Egress::new(")
+            .expect("the Egress construction moved");
+        assert!(
+            arm < egress,
+            "the statusline arm must come before the Egress construction"
+        );
+
+        let next_arm = arm
+            + code[arm..]
+                .find("Ok(Invocation::Run")
+                .expect("the Run arm moved");
+        assert!(
+            code[arm..next_arm].contains("return ExitCode::SUCCESS"),
+            "the statusline arm must return, not fall through to the poll path"
+        );
+    }
+
+    #[test]
+    fn the_statusline_module_is_the_only_place_that_formats_the_line() {
+        // One call site, fed by the module's own reader — so a future edit
+        // cannot grow a second statusline path in `main` that skips the
+        // module's zero-egress guarantees.
+        let code = real_code();
+        assert_eq!(
+            code.matches("statusline::line(").count(),
+            1,
+            "expected exactly one statusline::line call site"
+        );
+        assert!(
+            code.contains("statusline::line(&statusline::read_payload(), now_unix_secs())"),
+            "the statusline arm must read its payload from the module's reader"
+        );
+    }
+
+    #[test]
+    fn help_documents_the_statusline_mode_and_what_it_does_not_do() {
+        assert!(HELP.contains("--statusline"), "{HELP}");
+        // Its own synopsis line: it combines with no polling flag, and folding
+        // it into the bracketed one would say the opposite.
+        assert!(
+            HELP.contains("       quotapane-cli --statusline\n"),
+            "the statusline mode needs its own usage line: {HELP}"
+        );
+        // The two claims a reader has to be able to check: it sends nothing,
+        // and its output is not the JSON contract.
+        assert!(HELP.contains("sends nothing"), "{HELP}");
+        assert!(HELP.contains("stability"), "{HELP}");
+    }
+
+    #[test]
+    fn the_missing_mode_error_names_all_three_modes() {
+        let err = parse_args(args(&["--json"])).unwrap_err();
+        for mode in ["--once", "--watch", "--statusline"] {
+            assert!(err.contains(mode), "the mode error omits {mode}: {err}");
+        }
     }
 }
