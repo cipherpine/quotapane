@@ -91,11 +91,12 @@ Options:
                           mode, and the only one that sends nothing: the
                           numbers are already in the payload, so no credential
                           file is opened and no request is made. Combines with
-                          no other polling flag. A payload with no quota in it
-                          prints nothing and still exits 0 — a status line must
-                          never break its host. The line is a human-readable
-                          surface and is NOT covered by the --json stability
-                          contract.
+                          no other flag, --client-version included: there is no
+                          request for a version string to ride on. A payload
+                          with no quota in it prints nothing and still exits
+                          0 — a status line must never break its host. The line
+                          is a human-readable surface and is NOT covered by the
+                          --json stability contract.
   --fail-at <N>           Exit 3 if any window is at or over N percent used
                           (N is 1–100). Checked after the normal output is
                           printed, over every window of every provider that
@@ -539,13 +540,19 @@ enum Invocation {
 /// The flags `--statusline` refuses to share an invocation with, in the order
 /// they are reported.
 ///
-/// Every one of them configures polling, and `--statusline` does not poll — an
-/// invocation carrying both asked for two different programs, so the parser
+/// Every one of them describes a request this mode never makes: most configure
+/// polling, and `--client-version` names the version string a poll would send.
+/// An invocation carrying both asked for two different programs, so the parser
 /// refuses rather than silently ignoring one (the same reason `--once` and
 /// `--watch` cannot be combined). The order is fixed here so the message a
 /// script sees is deterministic; `--debug-raw-unsafe` precedes `--debug-raw`
 /// because it sets both, and the flag the user actually typed is the one worth
 /// naming.
+///
+/// `--client-version` was accepted-and-ignored when M18a shipped; the owner's
+/// D3 ruling closed that, on this codebase's own standard that a silently
+/// dropped flag reads as "the tool produced nothing", not "that flag does not
+/// apply here".
 fn statusline_conflict(seen: PollingFlags) -> Option<&'static str> {
     [
         ("--once", seen.once),
@@ -556,6 +563,7 @@ fn statusline_conflict(seen: PollingFlags) -> Option<&'static str> {
         ("--debug-raw-unsafe", seen.debug_raw_unsafe),
         ("--debug-raw", seen.debug_raw),
         ("--allow-proxy", seen.allow_proxy),
+        ("--client-version", seen.client_version),
     ]
     .into_iter()
     .find(|(_, present)| *present)
@@ -564,7 +572,7 @@ fn statusline_conflict(seen: PollingFlags) -> Option<&'static str> {
 
 /// Which polling flags this command line carried, for the check above.
 ///
-/// A named struct rather than eight positional booleans: they are all the same
+/// A named struct rather than nine positional booleans: they are all the same
 /// type, so a transposed pair would compile silently and report the wrong flag.
 #[derive(Debug, Clone, Copy, Default)]
 struct PollingFlags {
@@ -576,6 +584,7 @@ struct PollingFlags {
     debug_raw: bool,
     debug_raw_unsafe: bool,
     allow_proxy: bool,
+    client_version: bool,
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, String> {
@@ -653,6 +662,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
             debug_raw,
             debug_raw_unsafe,
             allow_proxy,
+            client_version: client_version.is_some(),
         }) {
             return Err(format!(
                 "--statusline cannot be combined with {flag}; it reads one JSON document from stdin and prints one line"
@@ -971,13 +981,28 @@ fn print_summary(snapshot: &ProviderSnapshot) {
     }
 }
 
+/// Format a reset countdown compactly: `45s`, `12m`, `3h12m`, and — past two
+/// days — `3d0h`.
+///
+/// The day unit is the M18a §8.2 ruling. Without it a weekly window three days
+/// out read `72h0m`, which is arithmetic rather than an answer; the window has
+/// always said `resets in 5d 17h` for the same span, so the two surfaces now
+/// agree on the unit even though this one stays space-free for a status bar.
+///
+/// The switch is at **48 hours**, not the window's 24: a status line is read at
+/// a glance and `36h0m` is still a number a reader holds in their head, while
+/// the window has room to be gentler about it. Above the boundary the minutes
+/// go — `3d0h` is the same information as `3d 0h 14m` for a countdown nobody is
+/// timing to the minute.
 fn format_reset(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3600 {
         format!("{}m", secs / 60)
-    } else {
+    } else if secs <= 172_800 {
         format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d{}h", secs / 86_400, (secs % 86_400) / 3600)
     }
 }
 
@@ -2312,12 +2337,26 @@ exit codes:
             parse_args(args(&["--statusline"])),
             Ok(Invocation::Statusline)
         ));
-        // And it is still compatible with the flags that describe nothing about
-        // polling: --client-version is inert here, not an error.
-        assert!(matches!(
-            parse_args(args(&["--statusline", "--client-version", "1.2.3"])),
-            Ok(Invocation::Statusline)
-        ));
+    }
+
+    /// M18a D3, ruled 2026-08-11: `--client-version` is a conflict, not an
+    /// inert extra. The flag names the version string a request would carry,
+    /// and this mode makes no request — so accepting it silently would be the
+    /// one thing the rest of this parser refuses to do.
+    #[test]
+    fn statusline_refuses_client_version_rather_than_ignoring_it() {
+        for v in [
+            &["--statusline", "--client-version", "1.2.3"][..],
+            &["--client-version", "1.2.3", "--statusline"][..],
+        ] {
+            let err = parse_args(args(v))
+                .err()
+                .unwrap_or_else(|| panic!("{v:?} must be a usage error"));
+            assert!(
+                err.contains("--statusline cannot be combined with --client-version"),
+                "{v:?} produced the wrong error: {err}"
+            );
+        }
     }
 
     #[test]
@@ -2325,7 +2364,7 @@ exit codes:
         // Each conflict, in both orders — the flag before --statusline and
         // after it — because a parser that only checked one order would let
         // `--statusline --fail-at 85` through.
-        let cases: [(&[&str], &str); 8] = [
+        let cases: [(&[&str], &str); 9] = [
             (&["--once"], "--once"),
             (&["--watch", "300"], "--watch"),
             (&["--json"], "--json"),
@@ -2334,6 +2373,7 @@ exit codes:
             (&["--debug-raw"], "--debug-raw"),
             (&["--debug-raw-unsafe"], "--debug-raw-unsafe"),
             (&["--allow-proxy"], "--allow-proxy"),
+            (&["--client-version", "1.2.3"], "--client-version"),
         ];
 
         for (conflicting, expected) in cases {
@@ -2378,8 +2418,25 @@ exit codes:
                 debug_raw: true,
                 debug_raw_unsafe: true,
                 allow_proxy: true,
+                client_version: true,
             }),
             Some("--once")
+        );
+        // Last in the order: reported only when it is the only one present.
+        assert_eq!(
+            statusline_conflict(PollingFlags {
+                client_version: true,
+                ..PollingFlags::default()
+            }),
+            Some("--client-version")
+        );
+        assert_eq!(
+            statusline_conflict(PollingFlags {
+                allow_proxy: true,
+                client_version: true,
+                ..PollingFlags::default()
+            }),
+            Some("--allow-proxy")
         );
         assert_eq!(
             statusline_conflict(PollingFlags {
@@ -2476,5 +2533,73 @@ exit codes:
         for mode in ["--once", "--watch", "--statusline"] {
             assert!(err.contains(mode), "the mode error omits {mode}: {err}");
         }
+    }
+
+    // --- M18a §8.2, ruled: the countdown grows a day unit ---
+
+    /// The whole format as a table, boundaries included.
+    ///
+    /// A table rather than one assertion per case: the units are a single
+    /// decision and reading them in a column is how you see a gap. The two rows
+    /// that matter are `172_800` and `172_801` — the ruling is "above 48h", so
+    /// exactly two days is still hours.
+    #[test]
+    fn format_reset_renders_days_only_above_forty_eight_hours() {
+        for (secs, expected) in [
+            (0_u64, "0s"),
+            (1, "1s"),
+            (59, "59s"),
+            (60, "1m"),
+            (3_599, "59m"),
+            (3_600, "1h0m"),
+            (7_830, "2h10m"),
+            (86_400, "24h0m"),
+            (172_799, "47h59m"),
+            // Exactly 48h is not "above" it: the hour form holds.
+            (172_800, "48h0m"),
+            // One second past, and the unit changes.
+            (172_801, "2d0h"),
+            // The ruling's own example: three days out reads 3d0h, not 72h0m.
+            (259_200, "3d0h"),
+            (446_400, "5d4h"),
+            (604_800, "7d0h"),
+        ] {
+            assert_eq!(
+                format_reset(secs),
+                expected,
+                "format_reset({secs}) should be {expected:?}"
+            );
+        }
+    }
+
+    /// The ruling's stated purpose, as a property rather than a sample: past
+    /// the boundary nothing reads in bare hours any more.
+    #[test]
+    fn no_countdown_past_two_days_is_reported_in_hours() {
+        for days in 3..=14_u64 {
+            let rendered = format_reset(days * 86_400 + 3_600);
+            assert!(
+                rendered.contains('d'),
+                "{days} days rendered without a day unit: {rendered}"
+            );
+            assert!(
+                !rendered.contains('m'),
+                "a multi-day countdown should not carry minutes: {rendered}"
+            );
+        }
+    }
+
+    /// The statusline's own segment, end to end — the surface the ruling was
+    /// about, not just the helper underneath it.
+    #[test]
+    fn the_statusline_countdown_uses_the_day_unit_for_a_weekly_window() {
+        let doc = format!(
+            r#"{{"rate_limits": {{"seven_day": {{"used_percentage": 41, "resets_at": {}}}}}}}"#,
+            1_784_000_000_u64 + 259_200
+        );
+        assert_eq!(
+            statusline::line(&doc, 1_784_000_000),
+            "7d 41% · resets 3d0h"
+        );
     }
 }
