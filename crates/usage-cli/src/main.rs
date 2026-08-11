@@ -59,6 +59,7 @@ use usage_core::model::{ProviderId, ProviderSnapshot};
 use usage_core::providers::{
     ClaudeSubscription, CodexSubscription, ProviderError, UsageProvider, CODEX_DEFAULT_USER_AGENT,
 };
+use usage_core::update;
 
 /// Sent when `--client-version` is omitted. Real Claude Code versions avoid
 /// the provider's aggressively rate-limited fallback bucket (see
@@ -76,6 +77,7 @@ usage: quotapane-cli (--once | --watch <SECS>) [--json]
                      [--client-version <VER>] [--debug-raw]
                      [--debug-raw-unsafe] [--allow-proxy]
        quotapane-cli --statusline
+       quotapane-cli --check-update
 
 Options:
   --once                  Poll once and exit. Exactly one of --once and
@@ -97,6 +99,17 @@ Options:
                           0 — a status line must never break its host. The line
                           is a human-readable surface and is NOT covered by the
                           --json stability contract.
+  --check-update          Ask GitHub for the latest release tag, print one line,
+                          and exit. The fourth mode, and the only request this
+                          tool makes carrying no credential: one anonymous GET
+                          with a fixed User-Agent and
+                          no identifier of any kind — no version string, no OS,
+                          no account — from which exactly one field is read.
+                          Running this command IS the opt-in, so no preference
+                          file is consulted; the window has its own separate
+                          setting, off until you answer it. Exits 0 whether or
+                          not a newer version exists, and 1 if the check could
+                          not complete. Combines with no other flag.
   --fail-at <N>           Exit 3 if any window is at or over N percent used
                           (N is 1–100). Checked after the normal output is
                           printed, over every window of every provider that
@@ -132,7 +145,7 @@ or `codex` to refresh it.
 
 exit codes:
   0  success; with --fail-at: all windows under the threshold
-  1  a provider or credential error
+  1  a provider or credential error; with --check-update: the check failed
   2  usage error
   3  --fail-at tripped: a window reached the threshold
 ";
@@ -158,14 +171,25 @@ fn parse_provider(s: &str) -> Result<ProviderSel, String> {
     }
 }
 
-/// How this invocation polls: once and out, or every `SECS` until interrupted.
+/// How this invocation polls: once and out, or every `SECS` until interrupted
+/// — or, in the one case that polls nothing, the update check.
 ///
 /// Exactly one is chosen at parse time, so nothing downstream has to handle
 /// "neither" or "both".
+///
+/// [`Mode::CheckUpdate`] lives here rather than beside [`Invocation::Statusline`]
+/// for one structural reason: the statusline mode must return *before* an
+/// [`Egress`] exists, and this one needs exactly that `Egress` — the same one,
+/// from the same `--allow-proxy` seam, so the CLI keeps its single chokepoint
+/// constructor (pinned by `the_only_egress_constructor_call_is_fed_by_the_seam`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Once,
     Watch(u64),
+    /// `--check-update`: one anonymous request for the latest release tag,
+    /// one line of output, exit. No provider is polled and no credential file
+    /// is opened — see `usage_core::update`.
+    CheckUpdate,
 }
 
 /// The shortest `--watch` interval, taken from the poller's own floor rather
@@ -564,6 +588,7 @@ fn statusline_conflict(seen: PollingFlags) -> Option<&'static str> {
         ("--debug-raw", seen.debug_raw),
         ("--allow-proxy", seen.allow_proxy),
         ("--client-version", seen.client_version),
+        ("--check-update", seen.check_update),
     ]
     .into_iter()
     .find(|(_, present)| *present)
@@ -585,6 +610,7 @@ struct PollingFlags {
     debug_raw_unsafe: bool,
     allow_proxy: bool,
     client_version: bool,
+    check_update: bool,
 }
 
 fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, String> {
@@ -598,6 +624,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
     let mut allow_proxy = false;
     let mut fail_at: Option<u32> = None;
     let mut statusline = false;
+    let mut check_update = false;
 
     let mut iter = argv.into_iter();
     while let Some(arg) = iter.next() {
@@ -609,6 +636,7 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
             "--version" => return Ok(Invocation::Version),
             "--once" => once = true,
             "--statusline" => statusline = true,
+            "--check-update" => check_update = true,
             "--watch" => {
                 let value = iter
                     .next()
@@ -663,12 +691,51 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
             debug_raw_unsafe,
             allow_proxy,
             client_version: client_version.is_some(),
+            check_update,
         }) {
             return Err(format!(
                 "--statusline cannot be combined with {flag}; it reads one JSON document from stdin and prints one line"
             ));
         }
         return Ok(Invocation::Statusline);
+    }
+
+    // The update check is resolved the same way and for the same reason: it
+    // shares no configuration with the polling modes. It refuses the identical
+    // flag set — every one of those flags describes a provider poll, and this
+    // request is not one. `--statusline` is absent from the list because it was
+    // answered above; an invocation carrying both never reaches here.
+    if check_update {
+        if let Some(flag) = statusline_conflict(PollingFlags {
+            once,
+            watch: watch.is_some(),
+            json,
+            provider: provider.is_some(),
+            fail_at: fail_at.is_some(),
+            debug_raw,
+            debug_raw_unsafe,
+            allow_proxy,
+            client_version: client_version.is_some(),
+            // Not its own conflict.
+            check_update: false,
+        }) {
+            return Err(format!(
+                "--check-update cannot be combined with {flag}; it asks GitHub for the latest release tag and prints one line"
+            ));
+        }
+        return Ok(Invocation::Run(Args {
+            mode: Mode::CheckUpdate,
+            json: false,
+            provider: ProviderSel::Claude,
+            client_version: DEFAULT_CLIENT_VERSION.to_string(),
+            // Nothing is polled, so there is no throttle note to suppress or
+            // emit — the flag it refers to is a conflict in this mode anyway.
+            client_version_defaulted: false,
+            debug_raw: false,
+            debug_raw_unsafe: false,
+            allow_proxy: false,
+            fail_at: None,
+        }));
     }
 
     // Exactly one mode. "Both" is not a merge of two intents and "neither" is
@@ -680,7 +747,10 @@ fn parse_args<I: IntoIterator<Item = String>>(argv: I) -> Result<Invocation, Str
             return Err("--once and --watch cannot be combined; pass exactly one".to_string())
         }
         (false, None) => {
-            return Err("a mode is required: --once, --watch <SECS>, or --statusline".to_string())
+            return Err(
+                "a mode is required: --once, --watch <SECS>, --statusline, or --check-update"
+                    .to_string(),
+            )
         }
     };
 
@@ -824,6 +894,54 @@ fn run_cycle(
     }
 }
 
+/// `--check-update`: one anonymous request, one line, an exit code.
+///
+/// Three outcomes and three exit codes, because a script may want to act on
+/// this: newer (0), current (0), and "could not tell" (1). The CLI is allowed
+/// to be honest about a failed check in a way the window is not — the user
+/// typed this command and is owed an answer — but it can say no more than that
+/// it failed. `usage_core::update` has no error type to say more with, which
+/// is deliberate: a failure detail is where a proxy variable's name or a URL
+/// would leak into a terminal.
+///
+/// Passing `Some(true)` is the opt-in: `config.cfg` is not read here at all,
+/// because typing the command IS asking. The window's stored preference has no
+/// business gating a command the user just ran.
+fn run_check_update(egress: &Egress) -> ExitCode {
+    let (line, ok) = check_update_report(
+        &update::check_outcome(egress, Some(true)),
+        env!("CARGO_PKG_VERSION"),
+    );
+    if ok {
+        println!("{line}");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("{line}");
+        ExitCode::FAILURE
+    }
+}
+
+/// The line `--check-update` prints, and whether the run succeeded.
+///
+/// Pure, and separate from [`run_check_update`], so all three outcomes are
+/// testable without a network: the only untested hop left is the one that
+/// actually dials, which no test in this repository is allowed to do.
+fn check_update_report(outcome: &update::CheckOutcome, running: &str) -> (String, bool) {
+    match outcome {
+        update::CheckOutcome::Newer(notice) => (
+            format!(
+                "quotapane {running} — {} available: {}",
+                notice.version, notice.url
+            ),
+            true,
+        ),
+        update::CheckOutcome::Current => (format!("quotapane {running} — up to date"), true),
+        // Deliberately no detail: `usage_core::update` has none to give, and a
+        // reason here is where a URL or a proxy variable's name would surface.
+        update::CheckOutcome::Inconclusive => ("update check failed".to_string(), false),
+    }
+}
+
 fn main() -> ExitCode {
     let args = match parse_args(std::env::args().skip(1)) {
         Ok(Invocation::Help) => {
@@ -853,6 +971,7 @@ fn main() -> ExitCode {
                 "usage: quotapane-cli (--once | --watch <SECS>) [--json] [--provider claude|codex|all] [--fail-at <N>] [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe] [--allow-proxy]"
             );
             eprintln!("       quotapane-cli --statusline");
+            eprintln!("       quotapane-cli --check-update");
             eprintln!("try `quotapane-cli --help` for the full list of options");
             return ExitCode::from(2);
         }
@@ -894,6 +1013,14 @@ fn main() -> ExitCode {
     // variable is set — the CLI does not decide that, and does not route
     // around it; it only surfaces the way out (see `report_provider_error`).
     let egress = Egress::new(egress_proxy_opt_in(&args));
+
+    // The update check, answered here and returning: it needs the chokepoint
+    // above and nothing below — no provider is built, no credential file is
+    // opened, and the poll loop is never entered.
+    if args.mode == Mode::CheckUpdate {
+        return run_check_update(&egress);
+    }
+
     // The proxy hint is a once-per-run line, for the same reason the warnings
     // above are: `--provider all` failing twice on one gate does not need to
     // say it twice. It survives across watch cycles for the same reason.
@@ -926,7 +1053,10 @@ fn main() -> ExitCode {
         }
 
         match args.mode {
-            Mode::Once => {
+            // `--check-update` returned before this loop was entered; if it
+            // ever reached here it has nothing to repeat, so it leaves the way
+            // `--once` does rather than looping forever.
+            Mode::Once | Mode::CheckUpdate => {
                 return if cycle.had_error {
                     ExitCode::FAILURE
                 } else {
@@ -2063,7 +2193,7 @@ mod tests {
                 "\
 exit codes:
   0  success; with --fail-at: all windows under the threshold
-  1  a provider or credential error
+  1  a provider or credential error; with --check-update: the check failed
   2  usage error
   3  --fail-at tripped: a window reached the threshold
 "
@@ -2419,6 +2549,7 @@ exit codes:
                 debug_raw_unsafe: true,
                 allow_proxy: true,
                 client_version: true,
+                check_update: true,
             }),
             Some("--once")
         );
@@ -2528,11 +2659,209 @@ exit codes:
     }
 
     #[test]
-    fn the_missing_mode_error_names_all_three_modes() {
+    fn the_missing_mode_error_names_all_four_modes() {
         let err = parse_args(args(&["--json"])).unwrap_err();
-        for mode in ["--once", "--watch", "--statusline"] {
+        for mode in ["--once", "--watch", "--statusline", "--check-update"] {
             assert!(err.contains(mode), "the mode error omits {mode}: {err}");
         }
+    }
+
+    // --- M18b: --check-update, the fourth mode ---
+
+    #[test]
+    fn check_update_is_its_own_mode_and_needs_no_other() {
+        assert_eq!(
+            parse_run(&["--check-update"]).mode,
+            Mode::CheckUpdate,
+            "--check-update must satisfy the mode requirement by itself"
+        );
+    }
+
+    /// The mode polls nothing, so it inherits none of the polling
+    /// configuration: the defaults it carries exist only to keep one `Args`
+    /// type, and the parser must not let a user set any of them.
+    #[test]
+    fn check_update_carries_no_polling_configuration() {
+        let parsed = parse_run(&["--check-update"]);
+        assert!(!parsed.json);
+        assert!(!parsed.debug_raw);
+        assert!(!parsed.debug_raw_unsafe);
+        assert_eq!(parsed.fail_at, None);
+        // Never proxy-enabled: --allow-proxy is a conflict, so the seam this
+        // mode hands the chokepoint can only ever be false.
+        assert!(!parsed.allow_proxy);
+        assert!(!egress_proxy_opt_in(&parsed));
+        // And it prints no throttle note: there is no poll for a client
+        // version to be missing from.
+        assert!(!parsed.client_version_defaulted);
+    }
+
+    #[test]
+    fn check_update_refuses_every_other_flag_and_names_the_one_it_found() {
+        let cases: [(&[&str], &str); 10] = [
+            (&["--once"], "--once"),
+            (&["--watch", "300"], "--watch"),
+            (&["--json"], "--json"),
+            (&["--provider", "all"], "--provider"),
+            (&["--fail-at", "85"], "--fail-at"),
+            (&["--debug-raw"], "--debug-raw"),
+            (&["--debug-raw-unsafe"], "--debug-raw-unsafe"),
+            (&["--allow-proxy"], "--allow-proxy"),
+            (&["--client-version", "1.2.3"], "--client-version"),
+            (&["--statusline"], "--statusline"),
+        ];
+
+        for (conflicting, expected) in cases {
+            // Both orders, for the reason the statusline cases test both.
+            for check_first in [true, false] {
+                let mut v: Vec<&str> = Vec::with_capacity(conflicting.len() + 1);
+                if check_first {
+                    v.push("--check-update");
+                }
+                v.extend_from_slice(conflicting);
+                if !check_first {
+                    v.push("--check-update");
+                }
+
+                let err = parse_args(args(&v))
+                    .err()
+                    .unwrap_or_else(|| panic!("{v:?} must be a usage error"));
+                assert!(
+                    err.contains("cannot be combined with"),
+                    "{v:?} produced the wrong error: {err}"
+                );
+                assert!(
+                    err.contains(expected),
+                    "{v:?} must name {expected}, got: {err}"
+                );
+            }
+        }
+    }
+
+    /// `--statusline --check-update` asked for two modes that both refuse
+    /// company. Whichever message wins, it must be a refusal naming the other
+    /// flag — never a silent win for one of them.
+    #[test]
+    fn the_two_non_polling_modes_refuse_each_other() {
+        for v in [
+            &["--statusline", "--check-update"][..],
+            &["--check-update", "--statusline"][..],
+        ] {
+            let err = parse_args(args(v))
+                .err()
+                .unwrap_or_else(|| panic!("{v:?} must be a usage error"));
+            assert!(
+                err.contains("--statusline cannot be combined with --check-update"),
+                "{v:?} produced: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_update_check_returns_before_the_poll_path_is_entered() {
+        // The structural half of "this mode polls nothing": the arm appears
+        // after the one Egress construction (it needs the chokepoint) and
+        // before any provider is built (it needs nothing else). Same technique
+        // as the statusline ordering pin.
+        let code = real_code();
+        let egress = code
+            .find("Egress::new(")
+            .expect("the Egress construction moved");
+        let arm = code
+            .find("if args.mode == Mode::CheckUpdate {")
+            .expect("main does not dispatch the update check");
+        // The poll path's entry point, as called from `main` — providers are
+        // built inside `run_cycle`, which is defined above `main`, so the call
+        // is what to look for rather than the definition.
+        let poll = arm
+            + code[arm..]
+                .find("run_cycle(&args,")
+                .expect("no run_cycle call after the update-check arm");
+        let returns = arm
+            + code[arm..]
+                .find("return run_check_update(&egress);")
+                .expect("the update-check arm does not return");
+        assert!(
+            egress < arm,
+            "the update check needs the chokepoint, so it must follow it"
+        );
+        assert!(
+            returns < poll,
+            "the update-check arm must return, not fall through to the poll path"
+        );
+    }
+
+    #[test]
+    fn the_update_check_is_the_only_caller_of_the_update_module() {
+        // One call site, and it passes the literal opt-in: running the command
+        // IS the consent, and config.cfg is never consulted here.
+        let code = real_code();
+        assert_eq!(
+            code.matches("update::check_outcome(").count(),
+            1,
+            "expected exactly one update::check_outcome call site"
+        );
+        assert!(
+            code.contains("update::check_outcome(egress, Some(true))"),
+            "the CLI's opt-in is the command itself, passed as a literal"
+        );
+        // The window's preference file has no say over a command the user just
+        // typed — and the CLI has no way to read it: the preferences module
+        // lives in usage-ui and is never named here.
+        let outside_help = code.split("\";").nth(1).expect("HELP is not terminated");
+        assert!(
+            !outside_help.contains("config"),
+            "the CLI must not consult the window's preferences"
+        );
+    }
+
+    /// All three outcomes, byte-exact. This is the surface a human reads and a
+    /// script may grep, so it is pinned in full rather than by substring.
+    #[test]
+    fn the_three_update_check_outcomes_are_byte_exact() {
+        use usage_core::update::{CheckOutcome, UpdateNotice};
+
+        let newer = CheckOutcome::Newer(UpdateNotice {
+            version: "v1.8.0".to_string(),
+            url: usage_core::update::RELEASES_URL,
+        });
+        assert_eq!(
+            check_update_report(&newer, "1.7.0"),
+            (
+                "quotapane 1.7.0 — v1.8.0 available: github.com/cipherpine/quotapane/releases"
+                    .to_string(),
+                true
+            )
+        );
+
+        assert_eq!(
+            check_update_report(&CheckOutcome::Current, "1.7.0"),
+            ("quotapane 1.7.0 — up to date".to_string(), true)
+        );
+
+        // The failure line says that it failed and nothing else — no host, no
+        // URL, no reason. The `false` is exit 1.
+        let (line, ok) = check_update_report(&CheckOutcome::Inconclusive, "1.7.0");
+        assert_eq!(line, "update check failed");
+        assert!(!ok, "a failed check must exit non-zero");
+        assert!(!line.contains("github"), "the failure line names no host");
+        assert!(
+            !line.contains("1.7.0"),
+            "the failure line claims no version"
+        );
+    }
+
+    #[test]
+    fn help_documents_the_update_check_and_its_anonymity() {
+        assert!(HELP.contains("--check-update"), "{HELP}");
+        // Its own synopsis line, like --statusline: it combines with nothing.
+        assert!(
+            HELP.contains("       quotapane-cli --check-update\n"),
+            "the update check needs its own usage line: {HELP}"
+        );
+        // The two claims a reader must be able to check before running it.
+        assert!(HELP.contains("no credential"), "{HELP}");
+        assert!(HELP.contains("no identifier"), "{HELP}");
     }
 
     // --- M18a §8.2, ruled: the countdown grows a day unit ---

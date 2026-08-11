@@ -93,6 +93,7 @@ use usage_core::poller::{self, PollerHandle, Update};
 use usage_core::providers::{
     ClaudeSubscription, CodexSubscription, UsageProvider, CODEX_DEFAULT_USER_AGENT,
 };
+use usage_core::update::{self, UpdateNotice};
 
 mod config;
 mod icon;
@@ -255,6 +256,39 @@ const NO_RECENT_AGENTS_LINE: &str = "// nothing active in the last 2h";
 
 /// The foot line once the older sessions are showing: the way back.
 const HIDE_OLDER_LINE: &str = "// hide older";
+
+// --------------------------------------------------------------------------
+// The update check's two lines (M18b)
+// --------------------------------------------------------------------------
+
+/// The first-run ask, shown once and only while `update_check` is absent.
+///
+/// A question in the `//` register the rest of the window uses for its asides,
+/// with the two answers as the words themselves — the same shape as the
+/// `usage // agents` switcher, because it is the same gesture. Phrased as a
+/// question rather than as a setting name: the user is being asked something,
+/// not shown a checkbox, and "check github for new versions?" says exactly
+/// what the `on` answer will cause and to whom.
+const UPDATE_ASK_LINE: &str = "// check github for new versions?";
+
+/// The affirmative answer's word, and the value it writes.
+const UPDATE_ASK_ON: &str = "on";
+/// The other answer — see [`UPDATE_ASK_ON`].
+const UPDATE_ASK_OFF: &str = "off";
+/// What separates the two answers. The middle dot the window already uses.
+const UPDATE_ASK_SEPARATOR: &str = " · ";
+/// The gap between the question and the first answer.
+const UPDATE_ASK_GAP: &str = "  ";
+
+/// The notify line, once a newer release is known.
+///
+/// Faint, display-only, and deliberately not amber: amber is quota's colour in
+/// this window, and a new release is not a quota event. There is no click
+/// handler anywhere on it — the URL is a tooltip, so the window never opens a
+/// browser and never has to own that decision.
+fn update_notice_line(version: &str) -> String {
+    format!("// {version} available")
+}
 
 /// The turn phrases. Plain words rather than glyphs: the pane's font coverage
 /// is a thing M14 already had to prove once, and "your turn" needs no legend.
@@ -2220,6 +2254,20 @@ struct QuotaPaneApp {
     /// itself and when it was first observed (M14). `None` means the window is
     /// sitting at the height already stored.
     pending_height: Option<(u32, Instant)>,
+    /// The newer release the check found, if it found one (M18b).
+    ///
+    /// Set at most once per launch and never cleared: a check that failed and
+    /// a check that found nothing both leave it `None`, which renders the same
+    /// nothing. There is no timestamp beside it and no retry — restarting is
+    /// the re-check.
+    update_notice: Option<UpdateNotice>,
+    /// The in-flight check's channel, taken once its answer arrives.
+    ///
+    /// `None` means there is nothing outstanding: the user has not opted in,
+    /// the check already answered, or this is a demo. The request runs on its
+    /// own thread for the reason polls do — a blocking GET on the UI thread
+    /// would freeze the window for the length of a network timeout.
+    update_rx: Option<std::sync::mpsc::Receiver<Option<UpdateNotice>>>,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     tray: Option<tray::Tray>,
 }
@@ -2263,6 +2311,82 @@ impl QuotaPaneApp {
         }
         self.last_agent_scan = Some(Instant::now());
         self.agents = agents::scan(&self.agent_roots, SystemTime::now());
+    }
+
+    /// Start the one update check this launch is allowed, if it is allowed one
+    /// (M18b).
+    ///
+    /// **The only place in this crate that names [`update::check`]**, and the
+    /// gate is `update::check`'s own `setting` argument, passed straight from
+    /// the stored preference. Called from exactly two places — startup, and
+    /// the moment the user answers `on` — so "once per launch" is a property
+    /// of the call sites rather than of a flag someone has to remember to set.
+    ///
+    /// Refuses in three cases: a demo (a fixture polls nothing and must reach
+    /// no host), an answer that is not `on`, and a check that is already in
+    /// flight or already answered.
+    fn start_update_check(&mut self, ctx: &egui::Context) {
+        if self.pace_demo || self.agents_demo {
+            return;
+        }
+        if !update::opted_in(self.config.update_check) {
+            return;
+        }
+        if self.update_rx.is_some() || self.update_notice.is_some() {
+            return;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let setting = self.config.update_check;
+        let ctx = ctx.clone();
+        // Detached on purpose: nothing waits for it, and a window that is
+        // closing has no reason to block on a release lookup. The thread ends
+        // when the request does.
+        std::thread::spawn(move || {
+            // The window never opts into a proxy — invariant 7's opt-in is
+            // CLI-only, and this request is not special enough to change that.
+            let egress = Egress::new(false);
+            let notice = update::check(&egress, setting);
+            // A closed receiver means the window is gone; there is nothing to
+            // report to and nothing to clean up.
+            if tx.send(notice).is_ok() {
+                ctx.request_repaint();
+            }
+        });
+        self.update_rx = Some(rx);
+    }
+
+    /// Take the check's answer, once, if it has arrived.
+    fn poll_update_check(&mut self) {
+        let Some(rx) = self.update_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(notice) => {
+                self.update_notice = notice;
+                // Answered: drop the channel so nothing polls it again, and so
+                // `start_update_check` cannot start a second one.
+                self.update_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            // The thread died without sending. Silence is the whole failure
+            // policy here, so this is the same as "no update".
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.update_rx = None,
+        }
+    }
+
+    /// Record the user's answer to the first-run ask, and act on it.
+    ///
+    /// Written once, on the click, exactly as the theme is — never on a timer
+    /// and never as a side effect of anything else. Answering `on` starts the
+    /// check immediately, because a user who just said yes should not have to
+    /// restart to see the result.
+    fn answer_update_ask(&mut self, allow: bool, ctx: &egui::Context) {
+        self.config.update_check = Some(allow);
+        self.persist_preferences();
+        if allow {
+            self.start_update_check(ctx);
+        }
     }
 
     /// Switch views, and arm the next frame to scan when the destination is the
@@ -2645,6 +2769,11 @@ impl eframe::App for QuotaPaneApp {
             }
         }
 
+        // The update check's answer, if it has come back. Nothing is started
+        // here: the check begins at launch (or the moment the user says yes)
+        // and this only collects it.
+        self.poll_update_check();
+
         // The agents list, and only while its view is showing — see
         // [`Self::refresh_agents`] and [`should_scan`].
         self.refresh_agents();
@@ -2722,19 +2851,38 @@ impl eframe::App for QuotaPaneApp {
             // background into a scroll, stealing the only gesture that moves
             // this decoration-less window. Wheel and scroll bar stay enabled.
             let view = self.view;
+            // The footer's state is decided before the closure borrows `self`
+            // mutably for the panes, and the answer is acted on after it.
+            let footer = update_footer(
+                self.config.update_check,
+                self.update_notice.as_ref(),
+                self.pace_demo || self.agents_demo,
+            );
+            let mut answer = None;
             content_height = egui::ScrollArea::vertical()
                 .scroll_source(egui::containers::scroll_area::ScrollSource {
                     drag: egui::containers::scroll_area::DragScroll::Never,
                     ..Default::default()
                 })
                 .show(ui, |ui| match view {
-                    View::Usage => render_panes(ui, &mut self.panes, theme),
+                    View::Usage => {
+                        render_panes(ui, &mut self.panes, theme);
+                        // The usage view's footer, under the panes and above
+                        // the grip — the register the agents pane's
+                        // `// N older today` line established. The agents view
+                        // deliberately gets neither line: it is a different
+                        // question and already has a foot line of its own.
+                        answer = render_update_footer(ui, theme, &footer);
+                    }
                     View::Agents => {
                         render_agents(ui, &self.agents, theme, &mut self.agents_show_older);
                     }
                 })
                 .content_size
                 .y;
+            if let Some(allow) = answer {
+                self.answer_update_ask(allow, &ctx);
+            }
         });
 
         // Snap-to-fit, acted on after the layout so the fit is measured from
@@ -2978,6 +3126,113 @@ fn render_view_switcher(ui: &mut egui::Ui, theme: Theme, current: View) -> Optio
         }
     }
     clicked
+}
+
+/// What the usage view's footer has to say about updates, if anything.
+///
+/// Three states, and they are mutually exclusive by construction: a window
+/// that has not been asked has not checked, and a window that has checked was
+/// asked. Computed once, off the render path's own inputs, so the footer has
+/// no logic of its own to get wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpdateFooter<'a> {
+    /// The key is absent: ask, once.
+    Ask,
+    /// A newer release is known: say so, faintly, and do nothing else.
+    Notice(&'a UpdateNotice),
+    /// Answered and nothing to report — the overwhelmingly common case, and
+    /// also every failure. Draws nothing at all.
+    Silent,
+}
+
+/// Decide what the footer shows.
+///
+/// A demo shows neither line: a fixture is not a first run, so it must not put
+/// a question to the reviewer, and it polls nothing, so it has no notice to
+/// carry. Kept as a pure function of the three inputs precisely so that gating
+/// is one testable expression rather than two conditions inside a renderer.
+fn update_footer<'a>(
+    setting: Option<bool>,
+    notice: Option<&'a UpdateNotice>,
+    demo: bool,
+) -> UpdateFooter<'a> {
+    if demo {
+        return UpdateFooter::Silent;
+    }
+    match (setting, notice) {
+        (None, _) => UpdateFooter::Ask,
+        (Some(_), Some(notice)) => UpdateFooter::Notice(notice),
+        (Some(_), None) => UpdateFooter::Silent,
+    }
+}
+
+/// Draw the usage view's update footer. Returns the answer the user just gave,
+/// if they gave one this frame.
+///
+/// The ask borrows [`render_view_switcher`]'s gesture wholesale, and for the
+/// same reason: `selectable(false)` turns egui's default
+/// `Sense::click_and_drag` back into a plain click, so a press-and-drag that
+/// happens to start on the word `on` moves the window instead of being
+/// swallowed as a text selection. A decoration-less window cannot afford to
+/// lose a drag to a footer any more than it can to a tab bar.
+///
+/// The notice, by contrast, senses **nothing**: it is a plain label with a
+/// hover tooltip and no click handler at all. The window never opens a URL.
+fn render_update_footer(
+    ui: &mut egui::Ui,
+    theme: Theme,
+    footer: &UpdateFooter<'_>,
+) -> Option<bool> {
+    let faint = match theme {
+        Theme::CipherPine => TEXT_FAINT,
+        Theme::Plain => ui.visuals().weak_text_color(),
+    };
+
+    match footer {
+        UpdateFooter::Silent => None,
+
+        UpdateFooter::Notice(notice) => {
+            ui.label(
+                egui::RichText::new(update_notice_line(&notice.version))
+                    .small()
+                    .color(faint),
+            )
+            .on_hover_text(notice.url);
+            None
+        }
+
+        UpdateFooter::Ask => {
+            let mut answer = None;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.label(egui::RichText::new(UPDATE_ASK_LINE).small().color(faint));
+                ui.label(egui::RichText::new(UPDATE_ASK_GAP).small());
+                for (word, value, leading) in
+                    [(UPDATE_ASK_ON, true, true), (UPDATE_ASK_OFF, false, false)]
+                {
+                    if !leading {
+                        ui.label(
+                            egui::RichText::new(UPDATE_ASK_SEPARATOR)
+                                .small()
+                                .color(HAIRLINE),
+                        );
+                    }
+                    let response = ui.add(
+                        egui::Label::new(egui::RichText::new(word).small().color(faint))
+                            .selectable(false)
+                            .sense(egui::Sense::click()),
+                    );
+                    if response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if response.clicked() {
+                        answer = Some(value);
+                    }
+                }
+            });
+            answer
+        }
+    }
 }
 
 /// The dot beside an agent row, in the M14 freshness palette's own terms.
@@ -4321,7 +4576,7 @@ fn main() -> ExitCode {
                 (None, false)
             };
 
-            let app = QuotaPaneApp {
+            let mut app = QuotaPaneApp {
                 panes,
                 tray_active,
                 quitting: false,
@@ -4336,9 +4591,15 @@ fn main() -> ExitCode {
                 agents_show_older: false,
                 last_agent_scan: None,
                 pending_height: None,
+                update_notice: None,
+                update_rx: None,
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
                 tray,
             };
+            // The one check this launch may make, started here and never
+            // rescheduled. It returns immediately unless the stored preference
+            // says `on`, and it is refused outright under either demo.
+            app.start_update_check(&_cc.egui_ctx);
             Ok(Box::new(app))
         }),
     );
@@ -4400,14 +4661,23 @@ mod tests {
             !code.contains("Egress::new(true)"),
             "the window must never construct a proxy-enabled egress"
         );
+        // M18b widened this from "exactly one construction" to "every
+        // construction, and there are exactly two". The window gained a second
+        // chokepoint — the update check's, on its own thread — and the claim
+        // that matters was never the count: it is that no egress in this crate
+        // can be proxy-enabled. Asserting equality between the two counts says
+        // that directly, and pinning the total still means a third one cannot
+        // appear unnoticed.
+        let constructions = code.matches("Egress::new(").count();
         assert_eq!(
-            code.matches("Egress::new(").count(),
-            1,
-            "exactly one egress construction in the window"
+            constructions,
+            code.matches("Egress::new(false)").count(),
+            "every egress the window constructs must be proxy-off, literally and \
+             unconditionally (SECURITY.md invariant 7: the window has no opt-in surface)"
         );
-        assert!(
-            code.contains("Egress::new(false)"),
-            "the window's egress must be constructed proxy-off, literally and unconditionally"
+        assert_eq!(
+            constructions, 2,
+            "expected exactly two: the poller's, and the update check's"
         );
     }
 
@@ -6672,6 +6942,7 @@ mod tests {
             alerts: false,
             alert_at: 95,
             alert_mode: AlertMode::Threshold,
+            update_check: Some(true),
         };
         let forced = demo_config(theirs);
         assert!(forced.alerts);
@@ -8196,6 +8467,348 @@ mod tests {
                 "a drag from {label:?} was swallowed instead of moving the window"
             );
         }
+    }
+
+    // --- M18b: the update check's two footer lines ---
+
+    /// Render the usage footer in isolation and report what it painted, plus
+    /// what a pointer gesture at one of the answer words did.
+    ///
+    /// Replicates the real arrangement the way [`gesture_on_switcher`] does:
+    /// the panel's whole-rect background drag handle is installed **first**,
+    /// exactly as `App::ui` installs it, and the footer is drawn on top. That
+    /// ordering is the reason a word keeps its click and a drag still moves
+    /// the window, so a harness that omitted it would prove nothing.
+    fn gesture_on_update_footer(
+        footer: &UpdateFooter<'_>,
+        word: Option<&str>,
+        drag: bool,
+    ) -> (Option<bool>, bool, Vec<String>) {
+        let ctx = egui::Context::default();
+        install_theme(&ctx, Theme::CipherPine);
+        let input = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(WINDOW_WIDTH, 120.0),
+            )),
+            events,
+            ..Default::default()
+        };
+
+        let mut answer = None;
+        let mut moved_window = false;
+        let run = |raw: egui::RawInput, answer: &mut Option<bool>, moved: &mut bool| {
+            let out = ctx.run_ui(raw, |ui| {
+                let bg = ui.interact(
+                    ui.max_rect(),
+                    ui.id().with("background_drag"),
+                    egui::Sense::drag(),
+                );
+                if bg.drag_started() {
+                    *moved = true;
+                }
+                if let Some(given) = render_update_footer(ui, Theme::CipherPine, footer) {
+                    *answer = Some(given);
+                }
+            });
+            let mut flat = Vec::new();
+            for shape in out.shapes {
+                flatten_shape(shape.shape, &mut flat);
+            }
+            flat
+        };
+
+        run(input(vec![]), &mut answer, &mut moved_window);
+        let shapes = run(input(vec![]), &mut answer, &mut moved_window);
+        let painted: Vec<String> = shapes
+            .iter()
+            .filter_map(|shape| match shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+
+        if let Some(word) = word {
+            let target = shapes
+                .into_iter()
+                .find_map(|shape| match shape {
+                    egui::Shape::Text(text) if text.galley.text() == word => {
+                        Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("the footer never painted {word:?}"));
+
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            if drag {
+                let away = target + egui::vec2(60.0, 20.0);
+                run(
+                    input(vec![
+                        egui::Event::PointerMoved(target),
+                        button(target, true),
+                    ]),
+                    &mut answer,
+                    &mut moved_window,
+                );
+                run(
+                    input(vec![egui::Event::PointerMoved(away)]),
+                    &mut answer,
+                    &mut moved_window,
+                );
+                run(
+                    input(vec![button(away, false)]),
+                    &mut answer,
+                    &mut moved_window,
+                );
+            } else {
+                run(
+                    input(vec![egui::Event::PointerMoved(target)]),
+                    &mut answer,
+                    &mut moved_window,
+                );
+                run(
+                    input(vec![button(target, true)]),
+                    &mut answer,
+                    &mut moved_window,
+                );
+                run(
+                    input(vec![button(target, false)]),
+                    &mut answer,
+                    &mut moved_window,
+                );
+            }
+            run(input(vec![]), &mut answer, &mut moved_window);
+        }
+
+        (answer, moved_window, painted)
+    }
+
+    fn notice(version: &str) -> UpdateNotice {
+        UpdateNotice {
+            version: version.to_string(),
+            url: usage_core::update::RELEASES_URL,
+        }
+    }
+
+    /// The footer's whole decision table, including the demo column.
+    #[test]
+    fn the_ask_is_shown_only_while_the_question_is_unanswered() {
+        let found = notice("v1.8.0");
+
+        // Un-asked: the ask, whether or not a notice somehow exists (it cannot
+        // — an un-asked window never checked — but the table is total).
+        assert_eq!(update_footer(None, None, false), UpdateFooter::Ask);
+        assert_eq!(update_footer(None, Some(&found), false), UpdateFooter::Ask);
+
+        // Answered: never the ask again, either way.
+        assert_eq!(update_footer(Some(true), None, false), UpdateFooter::Silent);
+        assert_eq!(
+            update_footer(Some(false), None, false),
+            UpdateFooter::Silent
+        );
+        assert_eq!(
+            update_footer(Some(true), Some(&found), false),
+            UpdateFooter::Notice(&found)
+        );
+
+        // A demo shows neither line, in every combination: a fixture is not a
+        // first run, and it polls nothing.
+        for setting in [None, Some(true), Some(false)] {
+            for carried in [None, Some(&found)] {
+                assert_eq!(
+                    update_footer(setting, carried, true),
+                    UpdateFooter::Silent,
+                    "a demo must show no update line ({setting:?}, {carried:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_ask_paints_the_question_and_both_answers() {
+        let (_, _, painted) = gesture_on_update_footer(&UpdateFooter::Ask, None, false);
+        assert!(
+            painted.iter().any(|t| t == UPDATE_ASK_LINE),
+            "the question is missing: {painted:?}"
+        );
+        assert!(painted.iter().any(|t| t == UPDATE_ASK_ON), "{painted:?}");
+        assert!(painted.iter().any(|t| t == UPDATE_ASK_OFF), "{painted:?}");
+    }
+
+    #[test]
+    fn clicking_an_answer_reports_it_and_the_line_does_not_come_back() {
+        for (word, expected) in [(UPDATE_ASK_ON, true), (UPDATE_ASK_OFF, false)] {
+            let (answer, _, _) = gesture_on_update_footer(&UpdateFooter::Ask, Some(word), false);
+            assert_eq!(
+                answer,
+                Some(expected),
+                "clicking {word:?} must report {expected}"
+            );
+            // Deliberately no claim about the window handle here. The pane's
+            // background senses drag *only*, so egui begins a drag on press
+            // anywhere in it — including on a word — and delivers the click on
+            // release all the same. That is the behaviour the agents pane's
+            // `// N older today` line has shipped with since M16, and a press
+            // that never travels moves the window nowhere. The claim worth
+            // making is the one below: a press that DOES travel answers
+            // nothing.
+
+            // And the answer removes the line for good: once the setting is
+            // `Some`, the footer never returns to `Ask`.
+            assert_eq!(
+                update_footer(Some(expected), None, false),
+                UpdateFooter::Silent,
+                "the ask came back after being answered {expected}"
+            );
+        }
+    }
+
+    /// The switcher's gesture, reused: a press that starts on a word and
+    /// travels is a window drag, not an answer. A decoration-less window that
+    /// swallowed this would be unmovable from its own footer.
+    #[test]
+    fn a_drag_starting_on_an_answer_moves_the_window_instead_of_answering() {
+        for word in [UPDATE_ASK_ON, UPDATE_ASK_OFF] {
+            let (answer, moved, _) = gesture_on_update_footer(&UpdateFooter::Ask, Some(word), true);
+            assert_eq!(answer, None, "a drag from {word:?} answered the question");
+            assert!(
+                moved,
+                "a drag from {word:?} was swallowed instead of moving the window"
+            );
+        }
+    }
+
+    #[test]
+    fn the_notice_renders_for_some_and_nothing_at_all_for_none() {
+        let found = notice("v1.8.0");
+        let (_, _, painted) = gesture_on_update_footer(&UpdateFooter::Notice(&found), None, false);
+        assert!(
+            painted.iter().any(|t| t == "// v1.8.0 available"),
+            "the notice line is missing: {painted:?}"
+        );
+
+        // `None` — which is also every failure — paints nothing whatsoever.
+        let (_, _, silent) = gesture_on_update_footer(&UpdateFooter::Silent, None, false);
+        assert!(
+            silent.is_empty(),
+            "a silent footer must paint no text at all: {silent:?}"
+        );
+    }
+
+    /// Sentinel discipline, the M15/M18a habit applied to this response: the
+    /// only text from the update check that can reach the screen is the
+    /// version string, and the URL is a tooltip rather than a painted line.
+    #[test]
+    fn the_version_string_is_the_only_new_text_the_check_can_put_on_screen() {
+        const SENTINEL: &str = "SENTINEL-DO-NOT-PRINT";
+        // A notice whose version carries a sentinel — the one field that does
+        // come from the response. Everything the footer paints must be either
+        // this string or text this file wrote.
+        let planted = UpdateNotice {
+            version: format!("v9.9.9-{SENTINEL}"),
+            url: usage_core::update::RELEASES_URL,
+        };
+        let (_, _, painted) =
+            gesture_on_update_footer(&UpdateFooter::Notice(&planted), None, false);
+
+        assert_eq!(
+            painted.len(),
+            1,
+            "the notice is one line and nothing else: {painted:?}"
+        );
+        assert_eq!(painted[0], format!("// v9.9.9-{SENTINEL} available"));
+
+        // The URL is a hover tooltip, never a painted line — the window has no
+        // click handler on it and never opens anything.
+        assert!(
+            !painted[0].contains("github.com"),
+            "the URL must not be painted into the line: {painted:?}"
+        );
+    }
+
+    /// The notify line is display-only: no `Sense`, no click, no cursor
+    /// change. Structural, because "nobody added a click handler" is a claim
+    /// about the code rather than about one rendered frame.
+    #[test]
+    fn the_notify_line_has_no_click_handler() {
+        const SRC: &str = include_str!("main.rs");
+        let footer = SRC
+            .split("fn render_update_footer")
+            .nth(1)
+            .expect("render_update_footer not found");
+        let body = &footer[..footer
+            .find("\n/// The dot beside an agent row")
+            .expect("unterminated render_update_footer")];
+        let notice_arm = body
+            .split("UpdateFooter::Notice(notice) => {")
+            .nth(1)
+            .and_then(|rest| rest.split("UpdateFooter::Ask =>").next())
+            .expect("the notice arm moved");
+
+        for forbidden in ["clicked()", "Sense::", "sense(", "CursorIcon", "open"] {
+            assert!(
+                !notice_arm.contains(forbidden),
+                "the notify line must stay display-only — it names `{forbidden}`"
+            );
+        }
+        // It is a plain label with a tooltip, and the tooltip is the URL.
+        assert!(
+            notice_arm.contains("on_hover_text(notice.url)"),
+            "the URL belongs in a tooltip: {notice_arm}"
+        );
+        // Amber is quota's colour in this window; a release is not a quota
+        // event and must not borrow the alarm palette.
+        assert!(
+            !notice_arm.contains("AMBER"),
+            "the notify line must not use quota's amber"
+        );
+    }
+
+    /// The gating, structurally: the check refuses both demos and anything but
+    /// an explicit `on`, and it is the only caller of `update::check`.
+    #[test]
+    fn the_window_checks_only_when_asked_and_never_in_a_demo() {
+        const SRC: &str = include_str!("main.rs");
+        let code: String = SRC[..SRC
+            .find("#[cfg(test)]")
+            .expect("test module marker not found")]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            code.matches("update::check(").count(),
+            1,
+            "exactly one caller of update::check in the window"
+        );
+
+        let start = code
+            .split("fn start_update_check")
+            .nth(1)
+            .expect("start_update_check not found");
+        let body = &start[..start.find("\n    }").expect("unterminated function")];
+        assert!(
+            body.contains("if self.pace_demo || self.agents_demo {"),
+            "the check must refuse both demos first"
+        );
+        assert!(
+            body.contains("if !update::opted_in(self.config.update_check) {"),
+            "the check must go through the module's own gate"
+        );
+        // The demo refusal precedes the request, not merely accompanies it.
+        let demo = body.find("self.pace_demo").expect("demo gate gone");
+        let gate = body.find("update::opted_in").expect("opt-in gate gone");
+        let spawn = body.find("std::thread::spawn").expect("the thread moved");
+        assert!(
+            demo < spawn && gate < spawn,
+            "both gates precede the thread"
+        );
     }
 
     #[test]

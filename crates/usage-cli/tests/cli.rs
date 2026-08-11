@@ -243,6 +243,56 @@ fn unknown_flag_still_errors() {
 
 // --- M12 P1: --fail-at ---
 
+/// The conflicts, through the real binary. Deliberately **not** a test of a
+/// successful `--check-update` run: that dials `api.github.com`, and no test in
+/// this repository is allowed to make a network request. The three outcomes are
+/// covered as pure values in the unit tests instead.
+#[test]
+fn check_update_combined_with_another_flag_exits_two_without_asking_anyone() {
+    for extra in [
+        vec!["--once"],
+        vec!["--watch", "300"],
+        vec!["--json"],
+        vec!["--statusline"],
+        vec!["--client-version", "2.1.90"],
+        vec!["--allow-proxy"],
+    ] {
+        let mut command = Command::new(BIN);
+        command.arg("--check-update");
+        for a in &extra {
+            command.arg(a);
+        }
+        let out = command.output().expect("failed to run quotapane-cli");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "--check-update {extra:?} should be a usage error"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("cannot be combined with"),
+            "{extra:?} produced: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn help_lists_the_update_check_on_its_own_usage_line() {
+    let out = Command::new(BIN)
+        .arg("--help")
+        .output()
+        .expect("failed to run quotapane-cli");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("       quotapane-cli --check-update\n"),
+        "the update check needs its own usage line: {stdout}"
+    );
+    assert!(
+        stdout.contains("--check-update          Ask GitHub"),
+        "{stdout}"
+    );
+}
+
 #[test]
 fn help_prints_the_exit_codes_block() {
     // The gate is only usable if a script author can look up what 3 means.
@@ -257,7 +307,7 @@ fn help_prints_the_exit_codes_block() {
             "\
 exit codes:
   0  success; with --fail-at: all windows under the threshold
-  1  a provider or credential error
+  1  a provider or credential error; with --check-update: the check failed
   2  usage error
   3  --fail-at tripped: a window reached the threshold
 "

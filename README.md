@@ -52,6 +52,7 @@ every default.
 | `alerts` | `on` \| `off` | `off` | Raise a quota alert: an in-window banner, a red ring on the tray icon, and one taskbar attention request. |
 | `alert_at` | `1`–`100` | `80` | Percent of a window at which an alert becomes a candidate. |
 | `alert_mode` | `pace` \| `threshold` | `pace` | `pace` only alerts when the window is *also* being spent faster than it is elapsing; `threshold` alerts on every crossing. |
+| `update_check` | `on` \| `off` | *absent* | Whether the window may ask GitHub for the latest release tag, once per launch. **Absent is not `off` — it means un-asked**, and it is the only key here with three states: while it is absent the usage pane shows one footer line asking, and your answer is written here. Absent and `off` both send nothing. `on` makes one anonymous request — no credential, no version string, no identifier beyond a static `User-Agent` — and a newer release becomes one faint line of text. Delete the line to be asked again. |
 
 Pre-1.6 installs stored the theme as a single word in `theme.cfg`.
 That file is still read when `config.cfg` is absent, so your theme
@@ -108,9 +109,9 @@ pointing it at their own work.
 ## Security posture (the short version)
 
 - Tokens are never persisted, never logged, never serialized. They live in memory in a `Secret<T>` that zeroizes on drop and prints `«redacted»`.
-- Network egress is deny-by-default through a single chokepoint with a compile-time allowlist of exactly **two hosts** (`api.anthropic.com`, `chatgpt.com`). Anything else is a hard error, and tests prove it.
+- Network egress is deny-by-default through a single chokepoint with a compile-time allowlist of exactly **three hosts**: the two providers (`api.anthropic.com`, `chatgpt.com`), plus `api.github.com`, reachable only through the opt-in, notify-only update check. Anything else is a hard error, and tests prove it.
 - No first-party telemetry, of any kind, to anyone. CI enforces its absence on every push.
-- **No auto-update and no update check** — there is no updater in the codebase at all. Updating is always something you do deliberately.
+- **No auto-update** — there is no updater in the codebase at all: nothing is ever downloaded or executed, and updating is always something you do deliberately. The update *check* is opt-in and notify-only: the window asks once, in one footer line, and sends nothing until you say yes (or you run `quotapane-cli --check-update` yourself). It is one anonymous request for the latest release tag — no credential, no version string, no identifier — and a newer one is one faint line of text.
 - Credential files are opened read-only. Token refresh is delegated to the official `claude` / `codex` CLIs; QuotaPane never writes them.
 - Proxy support is opt-in and fails closed: with a proxy variable set and no opt-in, nothing is sent. Opting in is a per-run CLI flag behind an explicit warning that a TLS-inspecting proxy can observe your bearer token; the window has no opt-in at all.
 
@@ -196,13 +197,14 @@ quotapane [--client-version <VER>] [--codex-user-agent <UA>] [--no-tray]
 | `--codex-user-agent <UA>` | Override the `User-Agent` sent to the Codex endpoint. Defaults to the Codex CLI's own. |
 | `--no-tray` | Start without the system tray icon. The escape hatch if tray creation fails. |
 
-The headless CLI takes exactly one mode: `--once`, `--watch <SECS>`, or `--statusline`.
+The headless CLI takes exactly one mode: `--once`, `--watch <SECS>`, `--statusline`, or `--check-update`.
 
 ```
 quotapane-cli (--once | --watch <SECS>) [--json]
               [--provider claude|codex|all] [--fail-at <N>]
               [--client-version <VER>] [--debug-raw] [--debug-raw-unsafe]
 quotapane-cli --statusline
+quotapane-cli --check-update
 ```
 
 | Flag | Meaning |
@@ -210,6 +212,7 @@ quotapane-cli --statusline
 | `--once` | Poll once and exit. Exactly one of `--once` and `--watch` is required. |
 | `--watch <SECS>` | Poll every `SECS` seconds until interrupted. `SECS` must be at least **180** — the same polling floor the window respects, applied to scripted polling too. Text output precedes each cycle with a `--- <RFC 3339 UTC timestamp> ---` separator; with `--json`, each cycle is one compact line (NDJSON). |
 | `--statusline` | Read one [Claude Code statusline](https://docs.claude.com/en/docs/claude-code/statusline) JSON document from stdin, print one line of quota, and exit 0 — e.g. `5h 12% · 7d 83%! · resets 2h10m`. **The only mode that sends nothing:** Claude Code already hands its statusline command the quota numbers, so QuotaPane opens no credential file, builds no HTTP client, and makes no request. Combines with no other flag, `--client-version` included: there is no request for a version string to ride on. A payload with no `rate_limits` in it prints nothing and still exits 0 — a status line must never break its host. The line is for humans and is **not** covered by the `--json` stability contract. Setup, and the cases where the payload carries no quota at all: [`docs/gating.md`](docs/gating.md#5-claude-codes-own-status-line). |
+| `--check-update` | Ask GitHub for the latest release tag, print one line, and exit — `quotapane 1.7.0 — v1.8.0 available: github.com/cipherpine/quotapane/releases`, or `quotapane 1.7.0 — up to date`. Running the command **is** the opt-in, so the window's `update_check` preference is not consulted. One anonymous request carrying no credential, no version string, and no identifier beyond a static `User-Agent`; exactly one field of the response is read. Exits 0 either way, and **1** with `update check failed` if the check could not complete — it will not tell you why, because nothing here records why. Combines with no other flag. |
 | `--fail-at <N>` | Exit **3** if any window is at or over `N` percent used (`N` is 1–100), after printing the normal output. Checked over every window of every provider that polled successfully — headline **and** per-model, because a gate should fail safe. Under `--watch`, the first tripping cycle exits. |
 | `--json` | Emit the normalized snapshot as JSON instead of a text summary. With `--provider all`, emits an array. The keys are documented in [`docs/cli-json.md`](docs/cli-json.md), which also states the stability policy. |
 | `--provider <WHICH>` | `claude`, `codex`, or `all`. Default: `claude`. |
@@ -252,7 +255,9 @@ The system tray is **Windows and macOS only**. On Linux, QuotaPane is window-onl
 
 **M4 (opt-in official billing APIs) was withdrawn** on security grounds (ADR-002, in [`ARCHITECTURE.md`](ARCHITECTURE.md)). Both vendors' usage/cost endpoints require an organization **admin** API key, are unavailable to individual subscribers, measure a different thing than subscription quota, and would force this trust boundary to hold the highest-blast-radius secret in either ecosystem — the exact opposite of the point of this project.
 
-Next: package-manager distribution (WinGet / Homebrew / AUR), and a statusline output mode so the CLI can feed Claude Code's own status bar. Under consideration, on exactly the terms `SECURITY.md` invariant 5 pre-commits to: an update *check* that would be notify-only and off by default — today there is none of any kind. Still deferred: the token-free `OtelSource` (the only acceptable route to any cost view).
+Since v1.7: `quotapane-cli --statusline`, which feeds Claude Code's own status bar without making a single request, and WinGet manifests. The update check landed on exactly the terms `SECURITY.md` invariant 5 pre-committed to — notify-only, off by default, and unable to carry a credential — which is also what brought `api.github.com` back to the egress allowlist, together with its one caller and not before.
+
+Next: the remaining package-manager targets (Homebrew / AUR). Still deferred: the token-free `OtelSource` (the only acceptable route to any cost view).
 
 ## FAQ
 

@@ -97,7 +97,7 @@ Scoped to the two trust boundaries and the release pipeline.
 
 ### Elevation of privilege
 - **T-E1 — App requests or requires elevated privileges.** *Mitigation:* runs as a normal user; no elevation requested. Autostart (opt-in) registers only a user-scope login entry.
-- **T-E2 — Silent auto-update escalates into arbitrary code execution as the user.** *Mitigation:* invariant 5, in its strongest form — **no update mechanism exists at all**: no updater code path, no update check, nothing to misconfigure. The egress allowlist (two provider hosts) leaves a covert updater nowhere to call.
+- **T-E2 — Silent auto-update escalates into arbitrary code execution as the user.** *Mitigation:* invariant 5 — **no updater code path exists**: nothing is ever downloaded or executed. The update *check* is notify-only, off by default, and structurally incapable of escalating: it can carry no credential, reads only a version tag, renders one line of text, and is the sole caller of the one non-provider host on the egress allowlist — so a covert updater still has nowhere to call and nothing to call with.
 
 ---
 
@@ -136,9 +136,9 @@ invariant to its tests and CI's `invariants` job fails on drift.
 |---|---|---|
 | 1. No credential persistence | absence of any credential write path in the workspace | enforced by absence; the read path's invariant-6 test (`loads_credential_readonly_and_redacted`) pins credential file access as read-only |
 | 2. No credential leakage | `credentials::Secret<T>` | redaction + zeroize tests (`secret.rs`); `Debug` scrub test (`credentials/mod.rs`); end-to-end failure-path redaction test (`poller::tests::failures_are_forwarded_as_non_secret_messages` — a provider that formats its `Secret` into an error provably cannot leak it to the UI channel) |
-| 3. Deny-by-default egress | `egress` (`ALLOWED_HOSTS`, exactly two hosts) | `non_allowlisted_host_is_rejected` (incl. removed hosts `api.openai.com`, `api.github.com`), `get_refuses_non_allowlisted_host`, `authority_smuggling_paths_are_rejected` |
+| 3. Deny-by-default egress | `egress` (`ALLOWED_HOSTS`, exactly three hosts) | `non_allowlisted_host_is_rejected` (incl. the removed host `api.openai.com` and smuggling variants of all three allowed hosts), `get_refuses_non_allowlisted_host`, `authority_smuggling_paths_are_rejected` |
 | 4. No first-party telemetry | (absence) | CI `no-telemetry` job: greps deps and sources for analytics |
-| 5. No self-update | absence of any updater code path | enforced by absence; the two-host allowlist test above doubles as the check that a covert updater has nowhere to call |
+| 5. No self-update; the check is notify-only, off by default | no updater code path (still enforced by absence) + `update` (gate, single call site, anonymous request) | `the_update_check_sends_nothing_unless_asked`, `the_update_request_cannot_carry_a_credential`, `update_is_the_only_caller_of_the_github_host` |
 | 6. Read-only credentials | `credentials` | `loads_credential_readonly_and_redacted`: file bytes identical after load; no write handle exists |
 | 7. Proxy opt-in (CLI-only, fail-closed) | `egress` proxy gate; `quotapane-cli --allow-proxy` is the only opt-in surface — the window has none | `proxy_env_without_opt_in_fails_closed` (either casing) + opt-in and empty-var tests; CLI tests pin the hint line, the per-run warning, and the absence of a window opt-in |
 | 8. Agent visibility is metadata-only | `usage_core::agents` — allowlisted key extraction fenced by a forbidden-key list; content payloads never deserialized | `sentinel_content_never_reaches_any_output`, `extraction_is_welded_to_the_allowlist_const`, `unparseable_file_still_reports_liveness_from_mtime`, `scanner_opens_only_jsonl_under_the_session_roots`, `no_allowlisted_key_can_ever_name_message_content`, `turn_state_is_read_from_the_record_type_alone` |

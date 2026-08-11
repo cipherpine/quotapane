@@ -38,7 +38,7 @@ test: crates/usage-core/src/credentials/mod.rs::error_display_never_panics_and_h
 test: crates/usage-core/src/poller/mod.rs::failures_are_forwarded_as_non_secret_messages
 test: crates/usage-core/src/egress/mod.rs::egress_errors_never_echo_secrets
 
-invariant 3: Deny-by-default egress — compile-time two-host allowlist; a request to any other host is a hard error.
+invariant 3: Deny-by-default egress — compile-time three-host allowlist; a request to any other host is a hard error.
 kind: test-backed
 test: crates/usage-core/src/egress/mod.rs::non_allowlisted_host_is_rejected
 test: crates/usage-core/src/egress/mod.rs::allowlisted_hosts_pass_host_check
@@ -49,9 +49,11 @@ invariant 4: No first-party telemetry — nothing is collected or transmitted to
 kind: absence
 enforced-by: ci-job no-telemetry (dependency and source greps, every push)
 
-invariant 5: No self-update — no updater or update check exists in the codebase at all.
-kind: absence
-enforced-by: absence of any updater code path; the invariant-3 allowlist leaves a covert updater nowhere to call
+invariant 5: No self-update — nothing is downloaded or executed; the update check is notify-only, off by default, and credential-free.
+kind: test-backed
+test: crates/usage-core/src/update.rs::the_update_check_sends_nothing_unless_asked
+test: crates/usage-core/src/update.rs::the_update_request_cannot_carry_a_credential
+test: crates/usage-core/src/update.rs::update_is_the_only_caller_of_the_github_host
 test: crates/usage-core/src/egress/mod.rs::non_allowlisted_host_is_rejected
 
 invariant 6: Read-only credentials — credential files are opened read-only; refresh is delegated to the official CLIs; auth.json is never written.

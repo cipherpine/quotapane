@@ -4,7 +4,7 @@
 //! QuotaPane's whole thesis is a tiny credential-touching surface. A settings
 //! file is a place where scope accretes — a window position here, a token cache
 //! there — so this one stays deliberately incapable of holding anything but the
-//! six preferences named in [`Config`]. Parsing is a `split_once('=')`, a
+//! seven preferences named in [`Config`]. Parsing is a `split_once('=')`, a
 //! `trim`, a lowercase, and a `match` on a closed key list; every value is a
 //! word or a small integer, and an unrecognized key is *ignored* rather than
 //! stored. There is no place to put a token, no nesting, no escapes, and no
@@ -144,7 +144,7 @@ pub const MIN_HEIGHT: u32 = 160;
 /// window measured in millions of pixels.
 pub const MAX_HEIGHT: u32 = 4096;
 
-/// Every preference QuotaPane persists. Six values, all of them a user's
+/// Every preference QuotaPane persists. Seven values, all of them a user's
 /// display choice — there is deliberately no field here that could hold
 /// account state, a cached response, or credential material of any kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +163,19 @@ pub struct Config {
     pub alert_at: u8,
     /// Whether a candidate must also be burning faster than the clock.
     pub alert_mode: AlertMode,
+    /// Whether the window may ask GitHub for the latest release tag (M18b).
+    ///
+    /// **Tri-state, and the only preference here that is.** `None` is not a
+    /// synonym for `off`: it means the question has never been put to the
+    /// user, which is what makes the window ask once, in one footer line. Once
+    /// answered — either way — the line never returns.
+    ///
+    /// The distinction has to survive a save that had nothing to do with it,
+    /// so [`render`] omits the key entirely while it is `None`. A toggle of
+    /// the theme must not quietly answer a question about the network on the
+    /// user's behalf (SECURITY.md invariant 5: off by default, and un-asked is
+    /// off).
+    pub update_check: Option<bool>,
 }
 
 impl Default for Config {
@@ -177,6 +190,8 @@ impl Default for Config {
             alerts: false,
             alert_at: DEFAULT_ALERT_AT,
             alert_mode: AlertMode::default(),
+            // Un-asked, which sends exactly as much as `off` does.
+            update_check: None,
         }
     }
 }
@@ -187,6 +202,20 @@ fn switch(value: &str, default: bool) -> bool {
         "on" => true,
         "off" => false,
         _ => default,
+    }
+}
+
+/// Parse the tri-state `update_check` switch.
+///
+/// Only the two words the window itself writes mean anything; a hand-edited
+/// `update_check=maybe` reads as un-asked, which is this key's default and the
+/// same silence `off` produces. Erring toward "ask again" rather than toward
+/// "assume yes" is the only safe direction for a key that governs a request.
+fn tri_switch(value: &str) -> Option<bool> {
+    match value {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -240,6 +269,7 @@ fn parse(text: &str) -> Config {
             "alerts" => config.alerts = switch(&value, Config::default().alerts),
             "alert_at" => config.alert_at = alert_at(&value),
             "alert_mode" => config.alert_mode = AlertMode::from_word(&value),
+            "update_check" => config.update_check = tri_switch(&value),
             // Forward compatibility: a key this build does not know is a key a
             // newer build wrote, not an error to report at someone.
             _ => {}
@@ -248,9 +278,21 @@ fn parse(text: &str) -> Config {
     config
 }
 
-/// Render the whole config, every key present, with the two-line header that
-/// tells a curious reader what the file is for.
+/// Render the whole config, with the two-line header that tells a curious
+/// reader what the file is for.
+///
+/// Every key is present **except** an unanswered `update_check`, which is
+/// omitted rather than written as `off`. That asymmetry is the point: writing
+/// it would turn a save the user triggered by resizing the window into an
+/// answer to a question they were never asked, and the ask would never come
+/// back to correct it. The absent key is the un-asked state, on disk as well
+/// as in memory.
 fn render(config: &Config) -> String {
+    let update_check = match config.update_check {
+        Some(true) => "update_check=on\n",
+        Some(false) => "update_check=off\n",
+        None => "",
+    };
     format!(
         "# QuotaPane preferences — display choices only, written by the app.\n\
          # Never credentials: this file cannot hold a token (SECURITY.md invariant 1).\n\
@@ -259,7 +301,8 @@ fn render(config: &Config) -> String {
          history={}\n\
          alerts={}\n\
          alert_at={}\n\
-         alert_mode={}\n",
+         alert_mode={}\n\
+         {update_check}",
         config.theme.as_word(),
         config.height,
         if config.history { "on" } else { "off" },
@@ -433,6 +476,10 @@ mod tests {
         assert!(!config.alerts, "alerts must be opt-in");
         assert_eq!(config.alert_at, 80);
         assert_eq!(config.alert_mode, AlertMode::Pace);
+        assert_eq!(
+            config.update_check, None,
+            "the update check must start un-asked, which sends nothing"
+        );
         // The pre-M14 fixed height, so an install that never grabs the grip
         // opens exactly the window every release to date opened.
         assert_eq!(config.height, 240);
@@ -474,7 +521,7 @@ mod tests {
     #[test]
     fn every_key_parses() {
         let config = parse(
-            "theme=plain\nheight=612\nhistory=on\nalerts=on\nalert_at=42\nalert_mode=threshold\n",
+            "theme=plain\nheight=612\nhistory=on\nalerts=on\nalert_at=42\nalert_mode=threshold\nupdate_check=on\n",
         );
         assert_eq!(
             config,
@@ -485,8 +532,63 @@ mod tests {
                 alerts: true,
                 alert_at: 42,
                 alert_mode: AlertMode::Threshold,
+                update_check: Some(true),
             }
         );
+    }
+
+    /// The one tri-state key: three inputs, three meanings, and the third is
+    /// not a synonym for the second.
+    #[test]
+    fn update_check_is_tri_state_and_absent_is_not_off() {
+        assert_eq!(parse("update_check=on\n").update_check, Some(true));
+        assert_eq!(parse("update_check=off\n").update_check, Some(false));
+        // Absent: the question has not been asked.
+        assert_eq!(parse("theme=plain\n").update_check, None);
+        assert_eq!(parse("").update_check, None);
+        // Case and whitespace fold like every other key.
+        assert_eq!(parse("  UPDATE_CHECK = On \n").update_check, Some(true));
+        // Anything else reads as un-asked rather than as consent.
+        for junk in ["maybe", "yes", "true", "1", "", "on off"] {
+            assert_eq!(
+                parse(&format!("update_check={junk}")).update_check,
+                None,
+                "update_check={junk:?} must not read as an answer"
+            );
+        }
+    }
+
+    /// The bug this key's shape exists to prevent: a save triggered by
+    /// something else must not answer the question.
+    #[test]
+    fn an_unanswered_update_check_is_not_written_by_an_unrelated_save() {
+        // A user drags the grip, or toggles the theme. The whole config is
+        // rewritten — and the key they were never asked about stays absent, so
+        // the ask is still waiting for them next launch.
+        let text = render(&Config {
+            theme: Theme::Plain,
+            height: 612,
+            ..Config::default()
+        });
+        assert!(
+            !text.contains("update_check"),
+            "an unanswered update check must not be written at all: {text:?}"
+        );
+        assert_eq!(parse(&text).update_check, None);
+
+        // Both answers, once given, do get written and do survive.
+        for answer in [true, false] {
+            let text = render(&Config {
+                update_check: Some(answer),
+                ..Config::default()
+            });
+            let word = if answer { "on" } else { "off" };
+            assert!(
+                text.contains(&format!("update_check={word}\n")),
+                "{answer} did not survive rendering: {text:?}"
+            );
+            assert_eq!(parse(&text).update_check, Some(answer));
+        }
     }
 
     #[test]
@@ -618,9 +720,10 @@ mod tests {
             alerts: true,
             alert_at: 65,
             alert_mode: AlertMode::Threshold,
+            update_check: Some(true),
         });
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 8, "two header lines plus six keys: {text:?}");
+        assert_eq!(lines.len(), 9, "two header lines plus seven keys: {text:?}");
         assert!(lines[0].starts_with('#'));
         assert!(lines[1].starts_with('#'));
         assert_eq!(
@@ -632,6 +735,7 @@ mod tests {
                 "alerts=on",
                 "alert_at=65",
                 "alert_mode=threshold",
+                "update_check=on",
             ]
         );
         // The header says what the file is for, and what it is not for.
@@ -649,6 +753,7 @@ mod tests {
                 alerts: true,
                 alert_at: 1,
                 alert_mode: AlertMode::Threshold,
+                update_check: Some(true),
             },
             Config {
                 theme: Theme::CipherPine,
@@ -657,6 +762,14 @@ mod tests {
                 alerts: true,
                 alert_at: 100,
                 alert_mode: AlertMode::Pace,
+                update_check: Some(false),
+            },
+            // The un-asked state has to survive a round trip too — it is the
+            // one value that survives by *not* being written.
+            Config {
+                theme: Theme::Plain,
+                update_check: None,
+                ..Config::default()
             },
         ] {
             assert_eq!(
@@ -684,6 +797,7 @@ mod tests {
                     height: 612,
                     history: true,
                     alerts: true,
+                    update_check: Some(true),
                     alert_at: 55,
                     alert_mode: AlertMode::Threshold,
                 },

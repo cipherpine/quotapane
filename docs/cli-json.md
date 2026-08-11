@@ -150,7 +150,7 @@ half, and it is what a gate should branch on.
 | Code | Meaning |
 |---|---|
 | `0` | success; with `--fail-at`, all windows under the threshold |
-| `1` | a provider or credential error |
+| `1` | a provider or credential error; with `--check-update`, the check could not complete |
 | `2` | usage error |
 | `3` | `--fail-at` tripped: a window reached the threshold |
 

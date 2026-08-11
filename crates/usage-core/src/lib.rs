@@ -26,6 +26,10 @@
 //! and through a fixed allowlist of metadata keys, so the window can say which
 //! sessions are running. It never reaches conversation content, never writes,
 //! and never sends (invariant 8).
+//! [`update`] is the one module whose request carries no credential at all: an
+//! anonymous GET for the latest release tag, through the same chokepoint, and
+//! only when the user has switched it on. It reads one field, keeps no state,
+//! and cannot report a failure (invariant 5).
 //!
 //! ## Enforced invariants (each backed by a test — THREAT_MODEL.md §9)
 //!
@@ -52,3 +56,4 @@ pub mod model;
 pub mod pace;
 pub mod poller;
 pub mod providers;
+pub mod update;
