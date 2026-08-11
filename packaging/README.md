@@ -1,5 +1,12 @@
 # WinGet manifests for `CipherPine.QuotaPane`
 
+**This file lives one level above `winget/` on purpose.** WinGet parses
+*every* file in a manifest directory as YAML, so a markdown README inside
+`packaging/winget/` breaks `winget validate`, `winget install --manifest`,
+and `wingetcreate submit` alike (found the hard way — reports/m18a-winget.md
+F1; the failing token was this file's own first backtick). The manifest
+directory must contain the three YAML files and nothing else, ever.
+
 The three-file manifest set for QuotaPane 1.7.0: version, installer, and
 `en-US` defaultLocale. `InstallerType: zip` with `NestedInstallerType:
 portable`, which puts both `quotapane` and `quotapane-cli` on PATH — the
@@ -65,7 +72,11 @@ sandbox; a moderator reviews from there.
 **`wingetcreate`.** `winget install wingetcreate`, then:
 
 ```powershell
-wingetcreate submit --token <your-github-token> packaging\winget
+wingetcreate submit --prtitle "New package: CipherPine.QuotaPane version 1.7.0" packaging\winget
+# First run: GitHub device-flow auth, creates your winget-pkgs fork, and the
+# PR body carries the repo's contribution terms. Do NOT pass --token on the
+# command line — wingetcreate's own help warns it may be logged. wingetcreate
+# also has telemetry on by default; `wingetcreate settings` can turn it off.
 ```
 
 which forks, commits, and opens the PR in one step. A token with `public_repo`

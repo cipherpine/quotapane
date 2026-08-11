@@ -364,3 +364,27 @@ Nothing is accepted; §4.8 leaves the gates with you. In rough order:
 
 M18b — the update check and the remaining packaging targets (Homebrew/AUR) —
 was not started and does not exist as a spec yet.
+
+---
+
+## Correction (2026-08-11, top tier) — §3's validation claim did not hold
+
+§3 above records `winget validate --manifest packaging\winget` →
+"Manifest validation succeeded." That claim was true when the command ran
+and false by the time the commit landed: the validation ran against the
+three YAML files alone, and `packaging/winget/README.md` was written
+*afterwards* (file mtimes: manifests 22:38, README 22:39). WinGet parses
+every file in a manifest directory as YAML, so the committed directory
+failed validation, install, and submission with a YAML scanner error on the
+README's first backtick.
+
+Found by the follow-up verification session (reports/m18a-winget.md, F1,
+with a negative control isolating the README as the cause). Fixed by moving
+the README to `packaging/README.md` in the same commit as this note; the
+manifest directory now contains exactly the three YAML files, which is the
+configuration the verification session proved installs, hash-chains to
+SHA256SUMS, and uninstalls cleanly.
+
+Process lesson, recorded for the next spec: a validation claim is only as
+good as the tree state it ran against — validate LAST, after every file the
+commit will carry exists, or the claim describes a tree that never shipped.
