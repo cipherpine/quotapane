@@ -19,7 +19,7 @@ path = "src/main.rs"
 # default fonts, X11+Wayland on Linux. This tree is large but lives entirely
 # OUTSIDE the trust boundary: usage-ui receives only non-secret snapshots.
 # See CONTRIBUTING.md for the justification row.
-eframe = { version = "0.35.0", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+eframe = { version = "0.36.1", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
 usage-core = { path = "../usage-core" }
 
 # tray-icon (M3.5): system tray on Windows (primary) + macOS only. Reviewed at
