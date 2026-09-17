@@ -35,4 +35,4 @@ usage-core = { path = "../usage-core" }
 # pull the officially-unmaintained gtk-rs 0.18 bindings + libappindicator.
 # Linux stays window-only in v1 (future gtk-free option: ksni, own review).
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
-tray-icon = { version = "0.24", default-features = false }
+tray-icon = { version = "0.25", default-features = false }
